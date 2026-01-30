@@ -1,0 +1,65 @@
+{
+  "version": "1.0.0",
+  "updated": "2025-01-29",
+  "default_hf_repo": "diogovieira/lunar-router-weights",
+  "packages": [
+    {
+      "id": "weights-mmlu-v1",
+      "name": "MMLU Weights v1",
+      "version": "1.0.0",
+      "description": "Pre-trained routing weights on MMLU benchmark with 100 clusters",
+      "category": "weights",
+      "source_type": "huggingface",
+      "hf_repo_id": "diogovieira/lunar-router-weights",
+      "hf_filename": "weights-mmlu-v1.zip",
+      "size_bytes": 221936,
+      "sha256": "bbc5d3d131421427ca9b174cf9646f1669ac29a3de10ecfae5e8a540c4295721",
+      "archive_type": "zip",
+      "author": "Lunar Team",
+      "license": "MIT",
+      "tags": ["weights", "mmlu", "routing", "default"],
+      "dependencies": [],
+      "num_clusters": 100,
+      "embedding_model": "all-MiniLM-L6-v2",
+      "models_profiled": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo",
+        "mistral-large-latest",
+        "mistral-small-latest",
+        "codestral-latest",
+        "ministral-8b-latest",
+        "ministral-3b-latest",
+        "pixtral-12b-2409"
+      ]
+    },
+    {
+      "id": "weights-default",
+      "name": "Default Weights",
+      "version": "1.0.0",
+      "description": "Default routing weights (alias for weights-mmlu-v1)",
+      "category": "weights",
+      "source_type": "huggingface",
+      "hf_repo_id": "diogovieira/lunar-router-weights",
+      "hf_filename": "weights-mmlu-v1.zip",
+      "size_bytes": 221936,
+      "sha256": "bbc5d3d131421427ca9b174cf9646f1669ac29a3de10ecfae5e8a540c4295721",
+      "archive_type": "zip",
+      "author": "Lunar Team",
+      "license": "MIT",
+      "tags": ["weights", "default"],
+      "dependencies": [],
+      "num_clusters": 100,
+      "embedding_model": "all-MiniLM-L6-v2",
+      "models_profiled": [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4-turbo",
+        "gpt-3.5-turbo",
+        "mistral-large-latest",
+        "mistral-small-latest"
+      ]
+    }
+  ]
+}
