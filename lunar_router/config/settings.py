@@ -1,5 +1,5 @@
 """
-Settings: Configuration management for UniRoute.
+Settings: Configuration management for Lunar Router.
 
 Uses pydantic-settings for environment variable support and validation.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 
 class Settings:
     """
-    UniRoute configuration settings.
+    Lunar Router configuration settings.
 
     Can be configured via environment variables with UNIROUTE_ prefix.
 

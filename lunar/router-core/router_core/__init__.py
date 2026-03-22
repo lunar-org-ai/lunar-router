@@ -1,5 +1,5 @@
 """
-router-core: Shared LLM routing logic for PureAI.
+router-core: Shared LLM routing logic for Lunar Router.
 
 This package provides the core routing functionality that can be used by:
 - SaaS Router: Multi-tenant router with DynamoDB/Secrets Manager
