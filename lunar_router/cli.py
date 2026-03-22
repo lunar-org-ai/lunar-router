@@ -132,6 +132,36 @@ def cmd_verify(args):
         sys.exit(1)
 
 
+def cmd_mcp(args):
+    """Run MCP server."""
+    from .mcp.server import main as mcp_main
+    mcp_main()
+
+
+def cmd_route(args):
+    """Route a prompt to the best model."""
+    from .loader import load_router
+
+    try:
+        router = load_router(verbose=False)
+    except FileNotFoundError:
+        print("Router not available. Download weights first:")
+        print("  lunar-router download weights-mmlu-v1")
+        sys.exit(1)
+
+    router.cost_weight = args.cost_weight
+    decision = router.route(args.prompt)
+
+    print(f"Selected model: {decision.selected_model}")
+    print(f"Expected error: {decision.expected_error:.4f}")
+    print(f"Cluster: {decision.cluster_id}")
+
+    if args.verbose:
+        print(f"\nTop models:")
+        for model, score in sorted(decision.all_scores.items(), key=lambda x: x[1])[:5]:
+            print(f"  {model}: {score:.4f}")
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -199,6 +229,29 @@ def main():
     )
     verify_parser.add_argument("package", help="Package ID")
     verify_parser.set_defaults(func=cmd_verify)
+
+    # mcp command
+    mcp_parser = subparsers.add_parser(
+        "mcp",
+        help="Run MCP server for Claude Code integration",
+        description="Start the MCP server for use with Claude Code, Claw, and other MCP clients.",
+    )
+    mcp_parser.set_defaults(func=cmd_mcp)
+
+    # route command
+    route_parser = subparsers.add_parser(
+        "route",
+        help="Route a prompt to the best model",
+    )
+    route_parser.add_argument("prompt", help="Prompt to route")
+    route_parser.add_argument(
+        "-c", "--cost-weight",
+        type=float,
+        default=0.3,
+        help="Cost weight (0.0=quality, 1.0=cost)",
+    )
+    route_parser.add_argument("-v", "--verbose", action="store_true", help="Show all scores")
+    route_parser.set_defaults(func=cmd_route)
 
     # Parse args
     args = parser.parse_args()

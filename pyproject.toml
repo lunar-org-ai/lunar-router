@@ -63,8 +63,11 @@ s3 = [
 huggingface = [
     "huggingface_hub>=0.16.0",
 ]
+mcp = [
+    "mcp>=1.0.0",
+]
 all = [
-    "lunar-router[openai,anthropic,mistral,google,groq,embeddings,training,api,s3,huggingface]",
+    "lunar-router[openai,anthropic,mistral,google,groq,embeddings,training,api,s3,huggingface,mcp]",
 ]
 dev = [
     "lunar-router[all]",

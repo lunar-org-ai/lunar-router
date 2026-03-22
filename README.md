@@ -218,6 +218,104 @@ config = TrainingConfig(
 result = full_training_pipeline(train_data, val_data, clients, config)
 ```
 
+## MCP Integration (Claude Code / Claw)
+
+Lunar Router includes an MCP (Model Context Protocol) server for integration with Claude Code, Claw, and other MCP-compatible tools.
+
+### Install
+
+```bash
+pip install lunar-router[mcp]
+```
+
+### Setup for Claude Code
+
+Add the following to your `~/.claude/settings.json` (create if it doesn't exist):
+
+```json
+{
+  "mcpServers": {
+    "lunar-router": {
+      "command": "python",
+      "args": ["-m", "lunar_router.mcp"]
+    }
+  }
+}
+```
+
+> **Conda/venv users**: Use the full path to your Python interpreter instead of `python`:
+> ```json
+> {
+>   "mcpServers": {
+>     "lunar-router": {
+>       "command": "/path/to/your/env/bin/python",
+>       "args": ["-m", "lunar_router.mcp"]
+>     }
+>   }
+> }
+> ```
+
+Or run the server manually:
+
+```bash
+lunar-router mcp
+# or
+python -m lunar_router.mcp
+```
+
+### Available MCP Tools
+
+| Tool | Description | Required Params |
+|------|-------------|-----------------|
+| `lunar_route` | Route a prompt to the best model based on semantic understanding | `prompt` |
+| `lunar_generate` | Generate a response using a specific provider/model | `prompt`, `provider`, `model` |
+| `lunar_smart_generate` | Auto-route and generate in one step | `prompt` |
+| `lunar_list_models` | List available models and costs per provider | _(none)_ |
+| `lunar_compare` | Compare responses from multiple models side by side | `prompt`, `models` |
+
+### Tool Details
+
+**`lunar_route`** — Semantic routing without generation
+```
+prompt: "Explain quantum computing"    # The prompt to analyze
+cost_weight: 0.3                       # 0.0 = best quality, 1.0 = lowest cost
+```
+Returns: selected model, expected error, cluster ID, top-5 ranked models with scores.
+
+**`lunar_generate`** — Direct generation with a specific model
+```
+prompt: "Hello!"
+provider: "openai"                     # openai, anthropic, google, groq, mistral
+model: "gpt-4o-mini"
+max_tokens: 1000                       # optional
+temperature: 0.7                       # optional
+```
+
+**`lunar_smart_generate`** — Route + generate in one call
+```
+prompt: "Write a sorting algorithm"
+cost_weight: 0.3                       # optional
+max_tokens: 1000                       # optional
+```
+
+**`lunar_compare`** — Side-by-side comparison
+```
+prompt: "Explain gravity"
+models: [
+  {"provider": "openai", "model": "gpt-4o-mini"},
+  {"provider": "anthropic", "model": "claude-3-5-haiku-20241022"}
+]
+```
+
+### Example Usage in Claude Code
+
+Once configured, you can use natural language:
+
+- "Use lunar_route to find the best model for this coding task"
+- "Use lunar_smart_generate to answer this question cost-effectively"
+- "Use lunar_compare to test GPT-4 vs Claude on this prompt"
+- "Use lunar_list_models to show me OpenAI pricing"
+
 ## API Server
 
 Run an OpenAI-compatible API server:
@@ -277,6 +375,8 @@ lunar_router/
 ├── hub/
 │   ├── manager.py         # Download manager (like NLTK/spaCy)
 │   └── index.json         # Package registry
+├── mcp/
+│   └── server.py          # MCP server (Claude Code integration)
 └── cli.py                 # Command-line interface
 ```
 
