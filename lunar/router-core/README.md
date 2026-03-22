@@ -1,6 +1,6 @@
 # router-core
 
-Core LLM routing logic for PureAI. This package provides the shared routing functionality used by both the SaaS router and Data Plane router.
+Core LLM routing logic for Lunar Router. This package provides the shared routing functionality used by both the SaaS router and Data Plane router.
 
 ## Installation
 

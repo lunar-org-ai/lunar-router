@@ -88,10 +88,10 @@ class DeploymentsCostOverview(BaseModel):
 
 
 # Instance cost configuration (Spot prices)
-# Supports both PureAI tier names and AWS instance types
+# Supports both Lunar Router tier names and AWS instance types
 INSTANCE_COSTS_USD_PER_HOUR: Dict[str, float] = {
     # ============================================
-    # PureAI GPU Tiers (stored in deployments table)
+    # GPU Tiers (stored in deployments table)
     # ============================================
 
     # GPU XS - NVIDIA L4 (7B-13B models)

@@ -95,7 +95,7 @@ class ModelInfo(BaseModel):
     id: str
     object: str = "model"
     created: int = 0
-    owned_by: str = "pureai"
+    owned_by: str = "lunar-router"
     providers: List[ModelProviderInfo] = []
 
 

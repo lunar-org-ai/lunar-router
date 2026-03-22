@@ -11,7 +11,7 @@ class ErrorCategory(str, Enum):
     TIMEOUT = "timeout"  # Request timeout, connection timeout
     NETWORK_ERROR = "network_error"  # Connection failed, DNS error
     MODEL_ERROR = "model_error"  # Model unavailable, context too long, invalid model
-    DEPLOYMENT_ERROR = "deployment_error"  # PureAI: deployment paused/starting/not found
+    DEPLOYMENT_ERROR = "deployment_error"  # Self-hosted: deployment paused/starting/not found
     STREAMING_ERROR = "streaming_error"  # Error during streaming response
     CONTENT_FILTER = "content_filter"  # Content blocked by safety filter
     INVALID_REQUEST = "invalid_request"  # 400, bad request, invalid parameters

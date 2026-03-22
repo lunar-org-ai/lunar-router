@@ -91,8 +91,9 @@ class PromptEmbedder:
 
         if self.cache_enabled:
             if len(self._cache) >= self.cache_max_size:
-                # Simple eviction: remove oldest entries
-                keys_to_remove = list(self._cache.keys())[: self.cache_max_size // 10]
+                # Simple eviction: remove oldest entries (at least 1)
+                num_to_remove = max(1, self.cache_max_size // 10)
+                keys_to_remove = list(self._cache.keys())[:num_to_remove]
                 for k in keys_to_remove:
                     del self._cache[k]
             self._cache[key] = embedding

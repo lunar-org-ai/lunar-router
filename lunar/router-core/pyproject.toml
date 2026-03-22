@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "router-core"
 version = "0.1.0"
-description = "Core LLM routing logic for Lunar"
+description = "Core LLM routing logic for Lunar Router"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"

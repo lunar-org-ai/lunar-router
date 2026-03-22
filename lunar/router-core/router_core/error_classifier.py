@@ -19,7 +19,7 @@ class ErrorCategory(str, Enum):
     NETWORK_ERROR = "network_error"  # Connection issues
     CONTENT_FILTER = "content_filter"  # Safety/moderation blocks
     MODEL_ERROR = "model_error"  # Context limits, model not found
-    DEPLOYMENT_ERROR = "deployment_error"  # PureAI-specific (paused, scaling)
+    DEPLOYMENT_ERROR = "deployment_error"  # Self-hosted deployments (paused, scaling)
     STREAMING_ERROR = "streaming_error"  # Stream protocol issues
     INVALID_REQUEST = "invalid_request"  # Malformed requests
     SERVER_ERROR = "server_error"  # 5xx errors
