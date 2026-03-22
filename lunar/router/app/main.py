@@ -39,7 +39,7 @@ load_dotenv(BASE / ".env")  # optional
 MODELS_DIR = BASE / "configs" / "models"
 
 app = FastAPI(
-    title="Pure AI Health-First (Async + Global Metrics)",
+    title="Lunar Router - Health-First LLM Routing (Async + Global Metrics)",
     version="0.5.0",
 )
 

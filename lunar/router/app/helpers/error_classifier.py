@@ -79,7 +79,7 @@ def classify_error(
     if any(p in error_str for p in model_patterns):
         return ErrorCategory.MODEL_ERROR.value
 
-    # Deployment errors (PureAI specific)
+    # Deployment errors (self-hosted models)
     deployment_patterns = [
         "deployment", "paused", "starting", "resuming", "not found",
         "vllm", "in_service", "scaling"

@@ -1,5 +1,5 @@
 """
-UniRoute Loader: High-level functions for loading pre-trained routers.
+Lunar Router Loader: High-level functions for loading pre-trained routers.
 
 Provides simple functions to:
 1. Download weights and load a ready-to-use router
