@@ -116,6 +116,7 @@ go/bin/
 
 # Weights (download separately)
 weights/
+!go/internal/weights/
 *.npz
 *.zip
 
