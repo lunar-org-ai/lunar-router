@@ -176,6 +176,26 @@ export function useClusteringService() {
     []
   );
 
+  const assignTracesToDataset = useCallback(
+    async (
+      runId: string,
+      clusterId: number,
+      requestIds: string[]
+    ): Promise<{ assigned: number; message: string }> => {
+      const res = await fetch(
+        `${BASE}/v1/clustering/datasets/${runId}/${clusterId}/assign`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ request_ids: requestIds }),
+        }
+      );
+      if (!res.ok) throw new Error(`Assign traces failed: ${res.status}`);
+      return res.json();
+    },
+    []
+  );
+
   const addTracesToDataset = useCallback(
     async (
       runId: string,
@@ -205,5 +225,6 @@ export function useClusteringService() {
     exportDataset,
     qualifyDataset,
     addTracesToDataset,
+    assignTracesToDataset,
   };
 }

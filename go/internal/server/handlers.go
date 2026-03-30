@@ -36,6 +36,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/config/reload", s.handleReloadKeys)
 	mux.HandleFunc("POST /v1/traces", s.handleIngestTraces)
 	mux.HandleFunc("POST /v1/datasets/{runId}/{clusterId}/traces", s.handleAddTracesToDataset)
+	mux.HandleFunc("POST /v1/datasets/{runId}/{clusterId}/assign", s.handleAssignTracesToDataset)
 }
 
 // --- Health ---
@@ -682,6 +683,48 @@ func (s *Server) handleAddTracesToDataset(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"message":    fmt.Sprintf("added %d traces to dataset %s/%d", ingested, runId, clusterId),
 		"ingested":   ingested,
+		"run_id":     runId,
+		"cluster_id": clusterId,
+	})
+}
+
+// --- Assign Existing Traces to Dataset ---
+
+func (s *Server) handleAssignTracesToDataset(w http.ResponseWriter, r *http.Request) {
+	if s.CHWriter == nil {
+		writeError(w, http.StatusServiceUnavailable, "ClickHouse not enabled")
+		return
+	}
+
+	runId := r.PathValue("runId")
+	clusterIdStr := r.PathValue("clusterId")
+	clusterId, err := strconv.Atoi(clusterIdStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid cluster_id")
+		return
+	}
+
+	var req struct {
+		RequestIDs []string `json:"request_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body: "+err.Error())
+		return
+	}
+
+	if len(req.RequestIDs) == 0 {
+		writeError(w, http.StatusBadRequest, "request_ids is required")
+		return
+	}
+
+	if err := s.CHWriter.InsertClusterMappings(runId, clusterId, req.RequestIDs); err != nil {
+		writeError(w, http.StatusInternalServerError, "mapping failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":    fmt.Sprintf("assigned %d traces to dataset %s/%d", len(req.RequestIDs), runId, clusterId),
+		"assigned":   len(req.RequestIDs),
 		"run_id":     runId,
 		"cluster_id": clusterId,
 	})

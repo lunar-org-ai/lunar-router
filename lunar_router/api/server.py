@@ -667,6 +667,34 @@ async def add_traces_to_dataset(run_id: str, cluster_id: int, body: dict):
         raise HTTPException(status_code=502, detail=f"Engine unavailable: {e}")
 
 
+@app.post("/v1/clustering/datasets/{run_id}/{cluster_id}/assign", tags=["datasets"])
+async def assign_traces_to_dataset(run_id: str, cluster_id: int, body: dict):
+    """Assign existing traces (by request_id) to a cluster dataset.
+
+    Body: {"request_ids": ["id1", "id2", ...]}
+    Maps existing traces from the Traces page into a specific dataset.
+    """
+    import httpx
+
+    request_ids = body.get("request_ids", [])
+    if not request_ids:
+        raise HTTPException(status_code=400, detail="request_ids is required")
+
+    engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+    try:
+        resp = httpx.post(
+            f"{engine_url}/v1/datasets/{run_id}/{cluster_id}/assign",
+            json={"request_ids": request_ids},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Engine unavailable: {e}")
+
+
 # --- Dataset Trace Import (Smart Import for UI) ---
 
 
