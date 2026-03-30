@@ -124,7 +124,10 @@ except ImportError:
 from .loader import load_router, create_router, load_router_from_state
 
 # SDK - Unified LLM interface (like LiteLLM / OpenRouter)
-from .sdk import completion, acompletion, Router, parse_model, ModelResponse, StreamChunk
+from .sdk import (
+    completion, acompletion, Router, parse_model, ModelResponse, StreamChunk,
+    add_trace, add_traces, import_traces,
+)
 from .model_prices import model_cost, get_model_info, supported_models
 
 # Hub - Download manager (like NLTK, spaCy)
@@ -189,6 +192,10 @@ __all__ = [
     "model_cost",
     "get_model_info",
     "supported_models",
+    # Trace ingestion
+    "add_trace",
+    "add_traces",
+    "import_traces",
     # Hub (like NLTK download)
     "download",
     "list_packages",

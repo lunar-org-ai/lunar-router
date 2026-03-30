@@ -6,7 +6,9 @@ Provides REST endpoints for routing prompts to LLMs.
 
 from contextlib import asynccontextmanager
 from typing import Optional
+import json
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -562,6 +564,290 @@ async def qualify_clustering_dataset(run_id: str, cluster_id: int, status: str =
         f"WHERE run_id = '{run_id}' AND cluster_id = {cluster_id}"
     )
     return {"message": f"Dataset {cluster_id} status set to {status}"}
+
+
+# --- Trace Ingestion ---
+
+
+@app.post("/v1/traces", tags=["traces"])
+async def ingest_traces(body: dict):
+    """Ingest manual traces into ClickHouse.
+
+    Accepts single trace or batch:
+        {"messages": [...], "model": "gpt-4o-mini"}
+        {"input": "Hello", "output": "Hi", "model": "gpt-4o-mini"}
+        {"traces": [{...}, {...}]}
+
+    Auto-enriches: token estimates, cost calculation, timestamps.
+    """
+    import httpx
+
+    engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+    try:
+        resp = httpx.post(f"{engine_url}/v1/traces", json=body, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Engine unavailable: {e}")
+
+
+@app.post("/v1/traces/import", tags=["traces"])
+async def import_traces_file(body: dict):
+    """Import traces from a JSONL string body.
+
+    Body: {"data": "line1\\nline2\\n...", "source": "import", "model": "gpt-4o-mini"}
+    """
+    import httpx
+
+    data_str = body.get("data", "")
+    source = body.get("source", "file-import")
+    default_model = body.get("model", "")
+    default_provider = body.get("provider", "")
+
+    if not data_str:
+        raise HTTPException(status_code=400, detail="'data' field with JSONL content is required")
+
+    traces = []
+    for line in data_str.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            t = json.loads(line)
+            if source and "source" not in t:
+                t["source"] = source
+            if default_model and "model" not in t:
+                t["model"] = default_model
+            if default_provider and "provider" not in t:
+                t["provider"] = default_provider
+            traces.append(t)
+        except json.JSONDecodeError:
+            continue
+
+    if not traces:
+        raise HTTPException(status_code=400, detail="No valid traces found in data")
+
+    engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+    try:
+        resp = httpx.post(f"{engine_url}/v1/traces", json={"traces": traces}, timeout=30.0)
+        resp.raise_for_status()
+        return resp.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Engine unavailable: {e}")
+
+
+# --- Dataset Trace Import (Smart Import for UI) ---
+
+
+def _detect_field(record: dict, candidates: list[str]) -> str:
+    """Find the first matching field name from a list of candidates."""
+    for c in candidates:
+        if c in record:
+            return c
+        # Try nested: "message.content", etc.
+        parts = c.split(".")
+        obj = record
+        for p in parts:
+            if isinstance(obj, dict) and p in obj:
+                obj = obj[p]
+            else:
+                obj = None
+                break
+        if obj is not None:
+            return c
+    return ""
+
+
+def _extract_value(record: dict, path: str) -> str:
+    """Extract a value from a record using a dot-separated path."""
+    if not path:
+        return ""
+    parts = path.split(".")
+    obj = record
+    for p in parts:
+        if isinstance(obj, dict) and p in obj:
+            obj = obj[p]
+        else:
+            return ""
+    return str(obj) if obj is not None else ""
+
+
+@app.post("/v1/datasets/analyze-traces", tags=["datasets"])
+async def analyze_traces_schema(body: dict):
+    """Auto-detect input/output schema from uploaded JSON data.
+
+    Examines field names and content to determine which fields
+    map to input (prompt) and output (response).
+    """
+    data = body.get("data", [])
+    if not data or not isinstance(data, list):
+        raise HTTPException(status_code=400, detail="'data' must be a non-empty array")
+
+    sample = data[0] if data else {}
+
+    # Detect format
+    input_candidates = [
+        "messages", "input", "prompt", "question", "query",
+        "user_message", "instruction", "text", "input_text",
+    ]
+    output_candidates = [
+        "output", "response", "answer", "completion", "expected_output",
+        "assistant_message", "output_text", "result", "generated_text",
+    ]
+
+    source_format = "unknown"
+    input_path = ""
+    output_path = ""
+
+    # Check for OpenAI messages format
+    if "messages" in sample and isinstance(sample["messages"], list):
+        source_format = "openai-messages"
+        input_path = "messages"
+        output_path = "messages"
+    else:
+        input_path = _detect_field(sample, input_candidates)
+        output_path = _detect_field(sample, output_candidates)
+        if input_path and output_path:
+            source_format = "input-output"
+        elif input_path:
+            source_format = "input-only"
+
+    # Build preview
+    preview = []
+    for record in data[:10]:
+        inp = ""
+        out = ""
+
+        if source_format == "openai-messages":
+            msgs = record.get("messages", [])
+            for m in msgs:
+                if m.get("role") == "user":
+                    inp = m.get("content", "")
+                elif m.get("role") == "assistant":
+                    out = m.get("content", "")
+        else:
+            inp = _extract_value(record, input_path)
+            out = _extract_value(record, output_path)
+
+        # Collect metadata (all other fields)
+        meta = {}
+        for k, v in record.items():
+            if k not in (input_path, output_path, "messages") and isinstance(v, (str, int, float, bool)):
+                meta[k] = v
+
+        preview.append({
+            "input": inp[:500] if inp else "",
+            "expected_output": out[:500] if out else "",
+            "metadata": meta,
+        })
+
+    # Build mapping
+    mapping = {
+        "input": {"path": input_path, "transform": "direct"},
+        "output": {"path": output_path, "transform": "direct"},
+        "metadata": {},
+    }
+
+    return {
+        "mapping": mapping,
+        "preview": preview,
+        "source_format": source_format,
+        "total_records": len(data),
+    }
+
+
+@app.post("/v1/datasets/import-traces", tags=["datasets"])
+async def import_traces_to_clickhouse(body: dict):
+    """Import trace data into ClickHouse using the detected mapping.
+
+    Receives data + mapping from analyze-traces, transforms records
+    into traces and sends to the Go engine.
+    """
+    import httpx
+    import uuid
+
+    name = body.get("name", "imported-dataset")
+    data = body.get("data", [])
+    mapping = body.get("mapping", {})
+    description = body.get("description", "")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="'data' is required")
+
+    input_path = mapping.get("input", {}).get("path", "input") if mapping else "input"
+    output_path = mapping.get("output", {}).get("path", "output") if mapping else "output"
+
+    # Transform records into trace format
+    traces = []
+    skipped = 0
+    for record in data:
+        inp = ""
+        out = ""
+
+        # Handle OpenAI messages format
+        if input_path == "messages" and "messages" in record:
+            msgs = record.get("messages", [])
+            trace = {
+                "messages": msgs,
+                "source": f"import:{name}",
+            }
+            # Extract model/provider if present
+            if "model" in record:
+                trace["model"] = record["model"]
+            if "provider" in record:
+                trace["provider"] = record["provider"]
+            traces.append(trace)
+            continue
+
+        inp = _extract_value(record, input_path)
+        out = _extract_value(record, output_path)
+
+        if not inp and not out:
+            skipped += 1
+            continue
+
+        trace = {
+            "input": inp,
+            "output": out,
+            "source": f"import:{name}",
+        }
+        if "model" in record:
+            trace["model"] = record["model"]
+        if "provider" in record:
+            trace["provider"] = record["provider"]
+        traces.append(trace)
+
+    if not traces:
+        raise HTTPException(status_code=400, detail="No valid traces found after mapping")
+
+    # Send to Go engine
+    engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+    try:
+        resp = httpx.post(
+            f"{engine_url}/v1/traces",
+            json={"traces": traces},
+            timeout=60.0,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Engine unavailable: {e}")
+
+    dataset_id = str(uuid.uuid4())[:8]
+
+    return {
+        "dataset_id": dataset_id,
+        "name": name,
+        "source": "smart-import",
+        "samples_count": result.get("ingested", len(traces)),
+        "skipped_count": skipped,
+    }
 
 
 # --- Secrets (API Key Management) ---

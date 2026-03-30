@@ -854,3 +854,190 @@ def _deployment_cost(model: str) -> float:
     if info:
         return info[0] + info[1]  # sum of input + output per-token costs
     return float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Trace ingestion
+# ---------------------------------------------------------------------------
+
+
+def add_trace(
+    messages: Optional[list[dict[str, Any]]] = None,
+    *,
+    input: Optional[str] = None,
+    output: Optional[str] = None,
+    model: str = "",
+    provider: str = "",
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+    cost_usd: Optional[float] = None,
+    latency_ms: Optional[float] = None,
+    is_error: bool = False,
+    source: str = "manual",
+    tags: Optional[list[str]] = None,
+    engine_url: Optional[str] = None,
+) -> dict:
+    """Add a single trace to ClickHouse.
+
+    Accepts either messages (OpenAI format) or simple input/output strings.
+    Missing metadata (tokens, cost) is auto-estimated.
+
+    Args:
+        messages: OpenAI-format messages list.
+        input: Simple input text (alternative to messages).
+        output: Simple output text (alternative to messages).
+        model: Model name (e.g., "gpt-4o-mini").
+        provider: Provider name (e.g., "openai").
+        tokens_in: Input token count (auto-estimated if None).
+        tokens_out: Output token count (auto-estimated if None).
+        cost_usd: Total cost in USD (auto-calculated from model pricing if None).
+        latency_ms: Latency in milliseconds.
+        is_error: Whether this trace represents an error.
+        source: Source tag (default "manual").
+        tags: Optional list of tags.
+        engine_url: Override engine URL.
+
+    Returns:
+        dict with ingestion result.
+
+    Example:
+        # From messages
+        lr.add_trace(
+            messages=[
+                {"role": "user", "content": "What is 2+2?"},
+                {"role": "assistant", "content": "4"},
+            ],
+            model="gpt-4o-mini",
+        )
+
+        # From simple input/output
+        lr.add_trace(input="Hello!", output="Hi there!", model="gpt-4o-mini")
+    """
+    return add_traces([{
+        "messages": messages,
+        "input": input or "",
+        "output": output or "",
+        "model": model,
+        "provider": provider,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost_usd,
+        "latency_ms": latency_ms,
+        "is_error": is_error,
+        "source": source,
+        "tags": tags,
+    }], engine_url=engine_url)
+
+
+def add_traces(
+    traces: list[dict[str, Any]],
+    *,
+    engine_url: Optional[str] = None,
+) -> dict:
+    """Add multiple traces to ClickHouse in one call.
+
+    Each trace dict can have: messages, input, output, model, provider,
+    tokens_in, tokens_out, cost_usd, latency_ms, is_error, source, tags.
+
+    Args:
+        traces: List of trace dicts.
+        engine_url: Override engine URL.
+
+    Returns:
+        dict with ingestion result {"message": "...", "ingested": N}.
+
+    Example:
+        lr.add_traces([
+            {"input": "Hello!", "output": "Hi!", "model": "gpt-4o-mini"},
+            {"input": "Bye!", "output": "Goodbye!", "model": "gpt-4o-mini"},
+        ])
+    """
+    url = (engine_url or ENGINE_URL) + "/v1/traces"
+
+    # Clean None values from traces
+    clean = []
+    for t in traces:
+        clean.append({k: v for k, v in t.items() if v is not None})
+
+    payload = json.dumps({"traces": clean}).encode()
+    headers = {"Content-Type": "application/json"}
+
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        raise RuntimeError(f"Trace ingestion failed ({e.code}): {body}") from e
+
+
+def import_traces(
+    path: str,
+    *,
+    source: str = "file-import",
+    model: str = "",
+    provider: str = "",
+    engine_url: Optional[str] = None,
+) -> dict:
+    """Import traces from a JSONL or JSON file.
+
+    Supported formats:
+        - JSONL: one JSON object per line (messages or input/output)
+        - JSON array: [{"messages": [...]}, ...]
+        - OpenAI fine-tuning format: {"messages": [...]} per line
+
+    Args:
+        path: Path to the file.
+        source: Source tag for all imported traces.
+        model: Default model name (used if trace doesn't specify one).
+        provider: Default provider name.
+        engine_url: Override engine URL.
+
+    Returns:
+        dict with ingestion result.
+
+    Example:
+        lr.import_traces("training_data.jsonl", model="gpt-4o-mini")
+    """
+    import pathlib
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+
+    text = p.read_text(encoding="utf-8")
+    traces: list[dict] = []
+
+    # Try JSON array first
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            traces = data
+        elif isinstance(data, dict) and "traces" in data:
+            traces = data["traces"]
+    except json.JSONDecodeError:
+        pass
+
+    # Fall back to JSONL
+    if not traces:
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                traces.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    if not traces:
+        raise ValueError(f"No traces found in {path}")
+
+    # Apply defaults
+    for t in traces:
+        if source and "source" not in t:
+            t["source"] = source
+        if model and "model" not in t:
+            t["model"] = model
+        if provider and "provider" not in t:
+            t["provider"] = provider
+
+    return add_traces(traces, engine_url=engine_url)
