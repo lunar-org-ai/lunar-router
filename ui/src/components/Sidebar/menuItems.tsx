@@ -1,4 +1,5 @@
 import {
+  Activity,
   BarChart3,
   Database,
   Layers,
@@ -50,6 +51,13 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/distill-datasets',
         icon: <Layers size={20} />,
         description: 'Manage datasets and traces',
+      },
+      {
+        label: 'Metrics',
+        value: 'distill-metrics',
+        path: '/distill-metrics',
+        icon: <Activity size={20} />,
+        description: 'Evaluation metrics & experiments',
       },
     ],
   },
