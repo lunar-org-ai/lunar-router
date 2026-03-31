@@ -28,6 +28,9 @@ export function useTraceIssues() {
   const { accessToken } = useUser();
   const service = useEvaluationsService();
 
+  // Backend trace-issue endpoints don't require auth — use empty string as fallback
+  const token = accessToken ?? '';
+
   const [issues, setIssues] = useState<TraceIssue[]>([]);
   const [scanning, setScanning] = useState(false);
   const [lastScan, setLastScan] = useState<TraceScan | null>(null);
@@ -35,27 +38,26 @@ export function useTraceIssues() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchIssues = useCallback(async () => {
-    if (!accessToken) return;
     try {
-      const data = await service.listTraceIssues(accessToken);
+      const data = await service.listTraceIssues(token);
       setIssues((data.issues || []).map(normalizeIssue));
     } catch (err) {
       console.error('[useTraceIssues] fetch failed:', err);
     } finally {
       setLoading(false);
     }
-  }, [accessToken, service]);
+  }, [token, service]);
 
   useEffect(() => {
     fetchIssues();
   }, [fetchIssues]);
 
   const triggerScan = useCallback(async () => {
-    if (scanning || !accessToken) return;
+    if (scanning) return;
     setScanning(true);
 
     try {
-      const { scan_id: scanId } = await service.triggerTraceScan(accessToken);
+      const { scan_id: scanId } = await service.triggerTraceScan(token);
 
       setLastScan({
         id: scanId,
@@ -67,7 +69,7 @@ export function useTraceIssues() {
 
       const poll = setInterval(async () => {
         try {
-          const s = await service.getTraceScanStatus(accessToken, scanId);
+          const s = await service.getTraceScanStatus(token, scanId);
           const status = s.status as TraceScan['status'];
 
           setLastScan({
@@ -98,19 +100,18 @@ export function useTraceIssues() {
       console.error('[useTraceIssues] scan trigger failed:', err);
       setScanning(false);
     }
-  }, [scanning, accessToken, service, fetchIssues]);
+  }, [scanning, token, service, fetchIssues]);
 
   const resolveIssue = useCallback(
     async (id: string) => {
-      if (!accessToken) return;
       try {
-        await service.resolveTraceIssue(accessToken, id);
+        await service.resolveTraceIssue(token, id);
         setIssues((prev) => prev.map((i) => (i.id === id ? { ...i, resolved: true } : i)));
       } catch (err) {
         console.error('[useTraceIssues] resolve failed:', err);
       }
     },
-    [accessToken, service]
+    [token, service]
   );
 
   const refresh = useCallback(() => {

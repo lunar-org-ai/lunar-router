@@ -54,7 +54,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Status:            "healthy",
 		RouterInitialized: s.Router != nil,
 		NumModels:         s.Registry.Len(),
-		NumClusters:       s.Router.ClusterAssigner.NumClusters(),
+		NumClusters:       s.Router.ClusterAssigner().NumClusters(),
 		EmbedderReady:     s.Router.Embedder != nil,
 	}
 	writeJSON(w, http.StatusOK, resp)

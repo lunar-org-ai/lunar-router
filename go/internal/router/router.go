@@ -2,9 +2,11 @@ package router
 
 import (
 	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"golang.org/x/sync/singleflight"
 
@@ -17,7 +19,7 @@ import (
 type RouteOption func(*routeOpts)
 
 type routeOpts struct {
-	availableModels   []string
+	availableModels    []string
 	costWeightOverride *float64
 }
 
@@ -35,18 +37,26 @@ func WithCostWeight(w float64) RouteOption {
 	}
 }
 
+// routerState holds the immutable routing state that can be atomically swapped
+// during a hot-reload. All read paths load this via atomic.Pointer.
+type routerState struct {
+	ClusterAssigner clustering.ClusterAssigner
+	Registry        *weights.Registry
+	Generation      uint64 // monotonic version counter
+}
+
 // Router implements the UniRoute routing logic:
 //
 //	h* = argmin_h [γ(x, h) + λ·c(h)]
 //
 // where γ(x, h) = Φ(x)ᵀ · Ψ(h)
 type Router struct {
-	Embedder        embeddings.Embedder // nil if prompt-based routing not needed
-	ClusterAssigner clustering.ClusterAssigner
-	Registry        *weights.Registry
-	CostWeight      float64
-	UseSoftAssign   bool
-	AllowedModels   []string
+	state         atomic.Pointer[routerState]
+	Embedder      embeddings.Embedder // nil if prompt-based routing not needed
+	CostWeight    float64
+	UseSoftAssign bool
+	AllowedModels []string
+	WeightsPath   string // stored for ReloadWeights
 
 	cache *Cache
 	sf    singleflight.Group
@@ -61,25 +71,33 @@ func New(
 	useSoftAssign bool,
 	allowedModels []string,
 ) *Router {
-	return &Router{
+	r := &Router{
+		CostWeight:    costWeight,
+		UseSoftAssign: useSoftAssign,
+		AllowedModels: allowedModels,
+		cache:         NewCache(defaultCacheMaxSize),
+		stats:         NewRoutingStats(),
+	}
+	r.state.Store(&routerState{
 		ClusterAssigner: assigner,
 		Registry:        registry,
-		CostWeight:      costWeight,
-		UseSoftAssign:   useSoftAssign,
-		AllowedModels:   allowedModels,
-		cache:           NewCache(defaultCacheMaxSize),
-		stats:           NewRoutingStats(),
-	}
+		Generation:      0,
+	})
+	return r
 }
 
 // NewEmpty creates a Router with no semantic routing (gateway-only mode).
 func NewEmpty() *Router {
-	return &Router{
+	r := &Router{
+		cache: NewCache(defaultCacheMaxSize),
+		stats: NewRoutingStats(),
+	}
+	r.state.Store(&routerState{
 		ClusterAssigner: &nullAssigner{},
 		Registry:        weights.NewRegistry(),
-		cache:           NewCache(defaultCacheMaxSize),
-		stats:           NewRoutingStats(),
-	}
+		Generation:      0,
+	})
+	return r
 }
 
 // nullAssigner is a no-op cluster assigner for gateway mode.
@@ -89,6 +107,51 @@ func (n *nullAssigner) Assign(embedding []float64) *clustering.ClusterResult {
 	return &clustering.ClusterResult{ClusterID: 0, Probabilities: []float64{1.0}}
 }
 func (n *nullAssigner) NumClusters() int { return 0 }
+
+// State returns the current immutable routing state.
+func (r *Router) State() *routerState {
+	return r.state.Load()
+}
+
+// ClusterAssigner returns the current cluster assigner (convenience accessor).
+func (r *Router) ClusterAssigner() clustering.ClusterAssigner {
+	return r.state.Load().ClusterAssigner
+}
+
+// Registry returns the current model registry (convenience accessor).
+func (r *Router) Registry() *weights.Registry {
+	return r.state.Load().Registry
+}
+
+// Generation returns the current weight generation counter.
+func (r *Router) Generation() uint64 {
+	return r.state.Load().Generation
+}
+
+// ReloadWeights loads a new weight set from disk and atomically swaps it in.
+// The cache is cleared so stale routing decisions are not served.
+// In-flight requests that already loaded the old state continue safely.
+func (r *Router) ReloadWeights(weightsPath string) error {
+	loaded, err := weights.LoadWeights(weightsPath)
+	if err != nil {
+		return fmt.Errorf("load weights: %w", err)
+	}
+
+	oldState := r.state.Load()
+	newState := &routerState{
+		ClusterAssigner: loaded.ClusterAssigner,
+		Registry:        loaded.Registry,
+		Generation:      oldState.Generation + 1,
+	}
+
+	r.state.Store(newState)
+	r.cache.Clear()
+
+	log.Printf("[router] Weights reloaded: generation=%d, models=%d, clusters=%d",
+		newState.Generation, loaded.Registry.Len(), loaded.ClusterAssigner.NumClusters())
+
+	return nil
+}
 
 // Cache returns the routing cache.
 func (r *Router) Cache() *Cache {
@@ -163,8 +226,11 @@ func (r *Router) RouteEmbedding(embedding []float64, opts ...RouteOption) (*Rout
 		opt(o)
 	}
 
+	// Load current state atomically — safe during hot-reload
+	state := r.state.Load()
+
 	// Step 1: Cluster assignment
-	clusterResult := r.ClusterAssigner.Assign(embedding)
+	clusterResult := state.ClusterAssigner.Assign(embedding)
 
 	// Step 2: Get Φ vector (soft or hard)
 	var phi []float64
@@ -179,7 +245,7 @@ func (r *Router) RouteEmbedding(embedding []float64, opts ...RouteOption) (*Rout
 	if modelsToUse == nil {
 		modelsToUse = r.AllowedModels
 	}
-	profiles := r.Registry.GetAvailable(modelsToUse)
+	profiles := state.Registry.GetAvailable(modelsToUse)
 	if len(profiles) == 0 {
 		return nil, fmt.Errorf("no models available for routing")
 	}

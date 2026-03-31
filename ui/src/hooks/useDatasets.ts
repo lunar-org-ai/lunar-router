@@ -20,7 +20,7 @@ export function useDatasets() {
   const [error, setError] = useState<string | null>(null);
 
   const refreshDatasets = useCallback(async () => {
-    if (!accessToken) return;
+    if (!accessToken) { setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
@@ -177,7 +177,8 @@ export function useDatasets() {
   const clearError = useCallback(() => setError(null), []);
 
   useEffect(() => {
-    if (!accessToken || loaded.current) return;
+    if (loaded.current) return;
+    if (!accessToken) { setLoading(false); return; }
     loaded.current = true;
     refreshDatasets();
   }, [accessToken, refreshDatasets]);
