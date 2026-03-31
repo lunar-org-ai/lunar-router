@@ -849,7 +849,6 @@ func (s *Server) handleNonStreamingProxy(
 	ctx := context.Background()
 	requestArrivedAt := start
 
-	// --- Session look-up ---
 	sessionID := r.Header.Get("X-Lunar-Session-Id")
 	var session *ToolCallSession
 	var isExistingSession bool
@@ -857,12 +856,12 @@ func (s *Server) handleNonStreamingProxy(
 	if sessionID != "" && !isInternal {
 		session = s.Sessions.Get(sessionID)
 		if session != nil {
-			session.Lock()
+			session.mu.Lock()
 			isExistingSession = true
 			// Record tool_execution steps for role="tool" messages added by the client.
 			session.AddToolResultSteps(req.Messages, session.LastMessageCount, requestArrivedAt)
+			session.mu.Unlock()
 			session.Touch()
-			session.Unlock()
 		}
 	}
 
@@ -881,29 +880,25 @@ func (s *Server) handleNonStreamingProxy(
 		}
 	}
 
-	// --- Inference step start ---
-	var inferStep *ExecutionTimelineStep
-	if session != nil && isExistingSession {
-		session.Lock()
-	}
+	var inferStepIdx int = -1
 	if session != nil {
+		session.mu.Lock()
 		provName := prov.Name()
 		mn := req.Model
-		inferStep = session.AddInferenceStep(provName, mn, requestArrivedAt)
+		inferStepIdx = session.AddInferenceStep(provName, mn, requestArrivedAt)
+		session.mu.Unlock()
 	}
 
-	// --- Call upstream model ---
 	resp, err := prov.Send(ctx, req)
 	latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 	inferCompletedAt := time.Now()
 
 	if err != nil {
-		if inferStep != nil {
+		if session != nil && inferStepIdx >= 0 {
 			errMsg := err.Error()
-			inferStep.Status = "failed"
-			inferStep.ToolError = &errMsg
-			inferStep.CompletedAt = inferCompletedAt.UTC().Format(time.RFC3339Nano)
-			inferStep.DurationMs = latencyMs
+			session.mu.Lock()
+			session.CompleteInferenceStep(inferStepIdx, "failed", inferCompletedAt, latencyMs, nil, nil, nil, &errMsg)
+			session.mu.Unlock()
 		}
 		em := metrics.RequestMetrics{
 			LatencyMs:     latencyMs,
@@ -918,7 +913,8 @@ func (s *Server) handleNonStreamingProxy(
 		if !isInternal {
 			timelineJSON := "[]"
 			if session != nil {
-				if b, e := json.Marshal(session.Timeline); e == nil {
+				snap := session.Snapshot()
+				if b, e := json.Marshal(snap.Timeline); e == nil {
 					timelineJSON = string(b)
 				}
 			}
@@ -933,23 +929,15 @@ func (s *Server) handleNonStreamingProxy(
 				s.Sessions.Delete(sessionID)
 			}
 		}
-		if session != nil && isExistingSession {
-			session.Unlock()
-		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 
-	// --- Token & cost accounting ---
 	tokensIn, tokensOut, totalTokens := 0, 0, 0
 	if resp.Usage != nil {
 		tokensIn = resp.Usage.PromptTokens
 		tokensOut = resp.Usage.CompletionTokens
 		totalTokens = resp.Usage.TotalTokens
-		if inferStep != nil {
-			inferStep.TokensIn = &tokensIn
-			inferStep.TokensOut = &tokensOut
-		}
 	}
 	var inputCost, outputCost, totalCost float64
 	pricing := provider.GetPricing(req.Model)
@@ -957,17 +945,11 @@ func (s *Server) handleNonStreamingProxy(
 		inputCost, outputCost, totalCost = pricing.ComputeCost(tokensIn, tokensOut)
 	}
 
-	// Complete inference step
-	if inferStep != nil {
-		inferStep.Status = "completed"
-		inferStep.CompletedAt = inferCompletedAt.UTC().Format(time.RFC3339Nano)
-		inferStep.DurationMs = latencyMs
-		ttft := latencyMs
-		inferStep.TTFTMs = &ttft
-	}
-
-	// Accumulate per-turn metrics
+	// Complete inference step and accumulate per-turn metrics under lock
 	if session != nil {
+		ttft := latencyMs
+		session.mu.Lock()
+		session.CompleteInferenceStep(inferStepIdx, "completed", inferCompletedAt, latencyMs, &tokensIn, &tokensOut, &ttft, nil)
 		session.AllTokensIn += tokensIn
 		session.AllTokensOut += tokensOut
 		session.AllInputCost += inputCost
@@ -975,11 +957,8 @@ func (s *Server) handleNonStreamingProxy(
 		session.AllTotalCost += totalCost
 		session.InferenceTurns++
 		session.LastInferenceCompletedAt = inferCompletedAt
-		// Store how many messages were in this request so next turn can identify new ones.
 		session.LastMessageCount = len(req.Messages)
-		if isExistingSession {
-			session.Unlock()
-		}
+		session.mu.Unlock()
 	}
 
 	// Record in-memory metrics for the current turn
@@ -1018,18 +997,21 @@ func (s *Server) handleNonStreamingProxy(
 			if !isExistingSession {
 				sessionID = GenerateSessionID()
 				session.ID = sessionID
-				s.Sessions.New(sessionID) // register a slot
-				s.Sessions.mu.Lock()
-				s.Sessions.sessions[sessionID] = session
-				s.Sessions.mu.Unlock()
+				s.Sessions.Set(sessionID, session)
 			}
 			session.Touch()
 			w.Header().Set("X-Lunar-Session-Id", sessionID)
 		} else {
+			// Take a consistent snapshot of session state for ClickHouse write.
+			var snap SessionSnapshot
+			if session != nil {
+				snap = session.Snapshot()
+			}
+
 			inputMsgsJSON := ""
 			var origMsgs []provider.Message
-			if session != nil && len(session.OriginalMessages) > 0 {
-				origMsgs = session.OriginalMessages
+			if session != nil && len(snap.OriginalMessages) > 0 {
+				origMsgs = snap.OriginalMessages
 			} else {
 				origMsgs = req.Messages
 			}
@@ -1047,8 +1029,8 @@ func (s *Server) handleNonStreamingProxy(
 			}
 
 			reqToolsJSON := "[]"
-			if session != nil && session.RequestToolsJSON != "" {
-				reqToolsJSON = session.RequestToolsJSON
+			if session != nil && snap.RequestToolsJSON != "" {
+				reqToolsJSON = snap.RequestToolsJSON
 			} else if len(req.Tools) > 0 {
 				if b, e := json.Marshal(req.Tools); e == nil {
 					reqToolsJSON = string(b)
@@ -1066,11 +1048,11 @@ func (s *Server) handleNonStreamingProxy(
 			hasTC := false
 			tcCount := 0
 			if session != nil {
-				if b, e := json.Marshal(session.Timeline); e == nil {
+				if b, e := json.Marshal(snap.Timeline); e == nil {
 					timelineJSON = string(b)
 				}
-				hasTC = session.HasToolCalls()
-				tcCount = session.ToolCallCount()
+				hasTC = snap.HasToolCalls
+				tcCount = snap.ToolCallCount
 			}
 
 			// For multi-turn, use aggregated totals; for single-turn, use this turn's values.
@@ -1078,13 +1060,13 @@ func (s *Server) handleNonStreamingProxy(
 			finalInputCost, finalOutputCost, finalTotalCost := inputCost, outputCost, totalCost
 			finalLatencyMs := latencyMs
 			reqType := "chat"
-			if session != nil && session.InferenceTurns > 1 {
-				finalTokIn = session.AllTokensIn
-				finalTokOut = session.AllTokensOut
-				finalInputCost = session.AllInputCost
-				finalOutputCost = session.AllOutputCost
-				finalTotalCost = session.AllTotalCost
-				finalLatencyMs = float64(time.Since(session.CreatedAt).Microseconds()) / 1000.0
+			if session != nil && snap.InferenceTurns > 1 {
+				finalTokIn = snap.AllTokensIn
+				finalTokOut = snap.AllTokensOut
+				finalInputCost = snap.AllInputCost
+				finalOutputCost = snap.AllOutputCost
+				finalTotalCost = snap.AllTotalCost
+				finalLatencyMs = float64(time.Since(snap.CreatedAt).Microseconds()) / 1000.0
 				reqType = "chat_multiturn"
 			}
 			finalTotalTok := finalTokIn + finalTokOut

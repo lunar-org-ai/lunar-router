@@ -54,17 +54,8 @@ func (s *ToolCallSession) nextStep() int {
 	return s.StepCounter
 }
 
-// Lock locks the session mutex. Callers must call Unlock when done.
-func (s *ToolCallSession) Lock() {
-	s.mu.Lock()
-}
 
-// Unlock unlocks the session mutex.
-func (s *ToolCallSession) Unlock() {
-	s.mu.Unlock()
-}
-
-func (s *ToolCallSession) AddInferenceStep(providerName, modelName string, startedAt time.Time) *ExecutionTimelineStep {
+func (s *ToolCallSession) AddInferenceStep(providerName, modelName string, startedAt time.Time) int {
 	n := s.nextStep()
 	pn := providerName
 	mn := modelName
@@ -77,7 +68,23 @@ func (s *ToolCallSession) AddInferenceStep(providerName, modelName string, start
 		Model:     &mn,
 	}
 	s.Timeline = append(s.Timeline, step)
-	return &s.Timeline[len(s.Timeline)-1]
+	return len(s.Timeline) - 1
+}
+
+// CompleteInferenceStep updates the inference step at the given index.
+// Caller must hold s.mu.
+func (s *ToolCallSession) CompleteInferenceStep(idx int, status string, completedAt time.Time, durationMs float64, tokensIn, tokensOut *int, ttftMs *float64, toolError *string) {
+	if idx < 0 || idx >= len(s.Timeline) {
+		return
+	}
+	step := &s.Timeline[idx]
+	step.Status = status
+	step.CompletedAt = completedAt.UTC().Format(time.RFC3339Nano)
+	step.DurationMs = durationMs
+	step.TokensIn = tokensIn
+	step.TokensOut = tokensOut
+	step.TTFTMs = ttftMs
+	step.ToolError = toolError
 }
 
 func (s *ToolCallSession) AddToolResultSteps(
@@ -124,7 +131,9 @@ func (s *ToolCallSession) AddToolResultSteps(
 }
 
 func (s *ToolCallSession) Touch() {
+	s.mu.Lock()
 	s.LastTouchAt = time.Now()
+	s.mu.Unlock()
 }
 
 func (s *ToolCallSession) ToolCallCount() int {
@@ -139,6 +148,49 @@ func (s *ToolCallSession) ToolCallCount() int {
 
 func (s *ToolCallSession) HasToolCalls() bool {
 	return s.ToolCallCount() > 0
+}
+
+type SessionSnapshot struct {
+	Timeline         []ExecutionTimelineStep
+	OriginalMessages []provider.Message
+	RequestToolsJSON string
+	HasToolCalls     bool
+	ToolCallCount    int
+	InferenceTurns   int
+	AllTokensIn      int
+	AllTokensOut     int
+	AllInputCost     float64
+	AllOutputCost    float64
+	AllTotalCost     float64
+	CreatedAt        time.Time
+}
+
+// Snapshot takes a consistent snapshot of the session under lock.
+func (s *ToolCallSession) Snapshot() SessionSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tl := make([]ExecutionTimelineStep, len(s.Timeline))
+	copy(tl, s.Timeline)
+	tcCount := 0
+	for _, step := range tl {
+		if step.Phase == "tool_execution" {
+			tcCount++
+		}
+	}
+	return SessionSnapshot{
+		Timeline:         tl,
+		OriginalMessages: s.OriginalMessages,
+		RequestToolsJSON: s.RequestToolsJSON,
+		HasToolCalls:     tcCount > 0,
+		ToolCallCount:    tcCount,
+		InferenceTurns:   s.InferenceTurns,
+		AllTokensIn:      s.AllTokensIn,
+		AllTokensOut:     s.AllTokensOut,
+		AllInputCost:     s.AllInputCost,
+		AllOutputCost:    s.AllOutputCost,
+		AllTotalCost:     s.AllTotalCost,
+		CreatedAt:        s.CreatedAt,
+	}
 }
 
 const sessionTTL = 30 * time.Minute
@@ -158,17 +210,10 @@ func NewSessionStore() *SessionStore {
 	return st
 }
 
-func (st *SessionStore) New(id string) *ToolCallSession {
-	now := time.Now()
-	s := &ToolCallSession{
-		ID:          id,
-		CreatedAt:   now,
-		LastTouchAt: now,
-	}
+func (st *SessionStore) Set(id string, session *ToolCallSession) {
 	st.mu.Lock()
-	st.sessions[id] = s
+	st.sessions[id] = session
 	st.mu.Unlock()
-	return s
 }
 
 func (st *SessionStore) Get(id string) *ToolCallSession {
@@ -205,7 +250,10 @@ func (st *SessionStore) gc() {
 			cutoff := time.Now().Add(-sessionTTL)
 			st.mu.Lock()
 			for id, s := range st.sessions {
-				if s.LastTouchAt.Before(cutoff) {
+				s.mu.Lock()
+				expired := s.LastTouchAt.Before(cutoff)
+				s.mu.Unlock()
+				if expired {
 					delete(st.sessions, id)
 				}
 			}
