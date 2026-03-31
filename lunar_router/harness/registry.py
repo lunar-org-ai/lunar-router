@@ -1,4 +1,4 @@
-"""Agent registry — discovers and loads agent .md files."""
+"""Agent registry — discovers and loads agent .md files with caching."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ import yaml
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENTS_DIR = Path(__file__).parent / "agents"
+
+# Singleton instance
+_instance: Optional[AgentRegistry] = None
 
 
 @dataclass
@@ -34,6 +37,7 @@ class AgentConfig:
     output_schema: OutputSchema = field(default_factory=OutputSchema)
     system_prompt: str = ""
     file_path: str = ""
+    _mtime: float = 0.0  # file modification time for cache invalidation
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,12 +68,10 @@ def _parse_agent_file(path: Path) -> AgentConfig:
         frontmatter_str = ""
         body = text
 
-    # Parse YAML frontmatter
     meta = yaml.safe_load(frontmatter_str) if frontmatter_str else {}
     if not isinstance(meta, dict):
         meta = {}
 
-    # Parse output_schema
     schema_raw = meta.get("output_schema", {})
     schema = OutputSchema(
         type=schema_raw.get("type", "json"),
@@ -85,19 +87,20 @@ def _parse_agent_file(path: Path) -> AgentConfig:
         output_schema=schema,
         system_prompt=body,
         file_path=str(path),
+        _mtime=path.stat().st_mtime,
     )
 
 
 class AgentRegistry:
-    """Discovers and loads agent .md files from a directory."""
+    """Discovers and loads agent .md files with mtime-based cache invalidation."""
 
     def __init__(self, agents_dir: Optional[Path] = None):
         self.agents_dir = agents_dir or DEFAULT_AGENTS_DIR
         self._agents: dict[str, AgentConfig] = {}
-        self.reload()
+        self._scan()
 
-    def reload(self) -> None:
-        """Scan agents directory and reload all .md files."""
+    def _scan(self) -> None:
+        """Scan agents directory and load all .md files."""
         self._agents.clear()
 
         if not self.agents_dir.exists():
@@ -108,25 +111,49 @@ class AgentRegistry:
             try:
                 config = _parse_agent_file(path)
                 self._agents[config.name] = config
-                logger.debug(f"Loaded agent: {config.name} from {path.name}")
             except Exception as e:
                 logger.warning(f"Failed to load agent {path.name}: {e}")
 
         logger.info(f"Loaded {len(self._agents)} agents from {self.agents_dir}")
 
     def get(self, name: str) -> Optional[AgentConfig]:
-        """Get an agent by name. Hot-reloads the file if it changed."""
+        """Get an agent by name. Reloads only if the file changed (mtime check)."""
         config = self._agents.get(name)
         if config and config.file_path:
-            # Hot-reload: re-parse if file exists
             path = Path(config.file_path)
             if path.exists():
-                fresh = _parse_agent_file(path)
-                self._agents[name] = fresh
-                return fresh
+                mtime = path.stat().st_mtime
+                if mtime > config._mtime:
+                    # File changed — reload it
+                    fresh = _parse_agent_file(path)
+                    self._agents[name] = fresh
+                    return fresh
         return config
 
     def list_agents(self) -> list[AgentConfig]:
-        """Return all registered agents."""
-        self.reload()
+        """Return all registered agents. Scans for new files."""
+        # Check for new files without full reload
+        if self.agents_dir.exists():
+            for path in self.agents_dir.glob("*.md"):
+                name = path.stem
+                meta = yaml.safe_load(path.read_text().split("---", 2)[1]) if path.read_text().startswith("---") else {}
+                agent_name = meta.get("name", name) if isinstance(meta, dict) else name
+                if agent_name not in self._agents:
+                    try:
+                        config = _parse_agent_file(path)
+                        self._agents[config.name] = config
+                    except Exception:
+                        pass
         return list(self._agents.values())
+
+    def names(self) -> list[str]:
+        """Return all agent names."""
+        return list(self._agents.keys())
+
+
+def get_registry(agents_dir: Optional[Path] = None) -> AgentRegistry:
+    """Get or create the singleton AgentRegistry."""
+    global _instance
+    if _instance is None:
+        _instance = AgentRegistry(agents_dir)
+    return _instance

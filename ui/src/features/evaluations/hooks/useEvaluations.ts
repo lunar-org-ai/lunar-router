@@ -50,7 +50,7 @@ export function useEvaluations() {
   );
 
   const refresh = useCallback(async () => {
-    if (!accessToken) return;
+    if (!accessToken) { setLoading(false); return; }
     setLoading(true);
     setError(null);
 
@@ -166,7 +166,8 @@ export function useEvaluations() {
   const clearError = useCallback(() => setError(null), []);
 
   useEffect(() => {
-    if (!accessToken || loaded.current) return;
+    if (loaded.current) return;
+    if (!accessToken) { setLoading(false); return; }
     loaded.current = true;
     refresh();
   }, [accessToken, refresh]);

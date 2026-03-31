@@ -4,6 +4,7 @@ API Server: FastAPI server for UniRoute.
 Provides REST endpoints for routing prompts to LLMs.
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional
 import json
@@ -324,7 +325,12 @@ async def get_harness_agent(name: str):
 async def run_harness_agent(name: str, body: dict):
     """Run a harness agent with user_input and optional context."""
     from ..harness.runner import AgentRunner
-    runner = AgentRunner()
+    from ..harness.memory_store import get_memory_store
+
+    record = body.get("record_memory", False)
+    store = get_memory_store() if record else None
+
+    runner = AgentRunner(memory_store=store, record_memory=record)
     user_input = body.get("input", body.get("user_input", ""))
     context = body.get("context", {})
     use_tools = body.get("use_tools", False)
@@ -338,6 +344,129 @@ async def run_harness_agent(name: str, body: dict):
         result = await runner.run(name, user_input, context)
 
     return {"agent": name, "result": result}
+
+
+# --- Harness Memory ---
+
+
+@app.get("/v1/harness/memory", tags=["harness"])
+async def list_memory(
+    agent: str = "",
+    category: str = "",
+    tags: str = "",
+    limit: int = 20,
+):
+    """Query memory entries with optional filters."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    entries = store.query(
+        agent=agent or None,
+        category=category or None,
+        tags=tag_list,
+        limit=limit,
+    )
+    return {"entries": [e.to_dict() for e in entries], "count": len(entries)}
+
+
+@app.get("/v1/harness/memory/summary/{agent_name}", tags=["harness"])
+async def get_agent_memory_summary(agent_name: str):
+    """Get aggregated performance summary for an agent from memory."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+    return store.agent_summary(agent_name)
+
+
+@app.get("/v1/harness/memory/{entry_id}", tags=["harness"])
+async def get_memory_entry(entry_id: str):
+    """Get a specific memory entry by ID."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+    entry = store.get(entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Memory entry '{entry_id}' not found")
+    return entry.to_dict()
+
+
+@app.delete("/v1/harness/memory/{entry_id}", tags=["harness"])
+async def delete_memory_entry(entry_id: str):
+    """Delete a memory entry."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+    if not store.delete(entry_id):
+        raise HTTPException(status_code=404, detail=f"Memory entry '{entry_id}' not found")
+    return {"deleted": True, "id": entry_id}
+
+
+# --- Trace Issues (Scan Now) ---
+
+
+@app.get("/v1/trace-issues", tags=["trace-issues"])
+async def list_trace_issues(
+    severity: str = "",
+    type: str = "",
+    resolved: Optional[str] = None,
+):
+    """List detected trace issues with optional filters."""
+    from ..harness.trace_scanner import list_issues
+
+    resolved_bool = None
+    if resolved is not None:
+        resolved_bool = resolved.lower() in ("true", "1", "yes")
+
+    issues = list_issues(
+        severity=severity or None,
+        issue_type=type or None,
+        resolved=resolved_bool,
+    )
+    return {"issues": issues, "count": len(issues)}
+
+
+@app.post("/v1/trace-issues/scan", tags=["trace-issues"], status_code=202)
+async def trigger_trace_scan():
+    """Start an async trace scan. Returns scan_id for status polling."""
+    import uuid as _uuid
+    from ..harness.trace_scanner import TraceScanner
+
+    scan_id = str(_uuid.uuid4())
+    scanner = TraceScanner()
+
+    # Run scan in background
+    asyncio.ensure_future(scanner.scan(scan_id))
+
+    return {"scan_id": scan_id, "status": "running"}
+
+
+@app.get("/v1/trace-issues/scan/{scan_id}", tags=["trace-issues"])
+async def get_trace_scan_status(scan_id: str):
+    """Get status of a running or completed scan."""
+    from ..harness.trace_scanner import get_scan_state
+
+    state = get_scan_state(scan_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Scan '{scan_id}' not found")
+    return {
+        "scan_id": state.scan_id,
+        "status": state.status,
+        "traces_scanned": state.traces_scanned,
+        "issues_found": state.issues_found,
+        "started_at": state.started_at,
+        "completed_at": state.completed_at,
+    }
+
+
+@app.put("/v1/trace-issues/{issue_id}/resolve", tags=["trace-issues"])
+async def resolve_trace_issue(issue_id: str):
+    """Mark a trace issue as resolved."""
+    from ..harness.trace_scanner import resolve_issue
+
+    if not resolve_issue(issue_id):
+        raise HTTPException(status_code=404, detail=f"Issue '{issue_id}' not found")
+    return {"resolved": True, "id": issue_id}
 
 
 # --- Clustering (Domain Datasets) ---

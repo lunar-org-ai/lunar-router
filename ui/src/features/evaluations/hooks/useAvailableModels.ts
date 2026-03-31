@@ -12,7 +12,7 @@ export function useAvailableModels() {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    if (!accessToken) return;
+    if (!accessToken) { setLoading(false); return; }
     try {
       const data = await service.listAvailableModels(accessToken);
       setModels(data);
@@ -24,7 +24,8 @@ export function useAvailableModels() {
   }, [accessToken, service]);
 
   useEffect(() => {
-    if (!accessToken || loaded.current) return;
+    if (loaded.current) return;
+    if (!accessToken) { setLoading(false); return; }
     loaded.current = true;
     refresh();
   }, [accessToken, refresh]);
