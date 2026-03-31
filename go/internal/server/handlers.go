@@ -137,7 +137,9 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 			ErrorMessage:  err.Error(),
 		}
 		s.Metrics.Record(m)
-		s.CHWriter.Record(m, chw.TraceExtra{RequestType: "route"})
+		if s.CHWriter != nil {
+			s.CHWriter.Record(m, chw.TraceExtra{RequestType: "route"})
+		}
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -158,13 +160,15 @@ func (s *Server) handleRoute(w http.ResponseWriter, r *http.Request) {
 		ClusterID:     decision.ClusterID,
 	}
 	s.Metrics.Record(m)
-	s.CHWriter.Record(m, chw.TraceExtra{
-		RequestType:       "route",
+	if s.CHWriter != nil {
+		s.CHWriter.Record(m, chw.TraceExtra{
+			RequestType:       "route",
 		CacheHit:          cacheHit,
 		ExpectedError:     decision.ExpectedError,
-		CostAdjustedScore: decision.CostAdjustedScore,
-		AllScores:         decision.AllScores,
-	})
+			CostAdjustedScore: decision.CostAdjustedScore,
+			AllScores:         decision.AllScores,
+		})
+	}
 
 	writeJSON(w, http.StatusOK, routeResponse{
 		RoutingDecision: decision,
@@ -853,10 +857,12 @@ func (s *Server) handleNonStreamingProxy(
 	if sessionID != "" && !isInternal {
 		session = s.Sessions.Get(sessionID)
 		if session != nil {
+			session.Lock()
 			isExistingSession = true
 			// Record tool_execution steps for role="tool" messages added by the client.
 			session.AddToolResultSteps(req.Messages, session.LastMessageCount, requestArrivedAt)
 			session.Touch()
+			session.Unlock()
 		}
 	}
 
@@ -877,6 +883,9 @@ func (s *Server) handleNonStreamingProxy(
 
 	// --- Inference step start ---
 	var inferStep *ExecutionTimelineStep
+	if session != nil && isExistingSession {
+		session.Lock()
+	}
 	if session != nil {
 		provName := prov.Name()
 		mn := req.Model
@@ -913,14 +922,19 @@ func (s *Server) handleNonStreamingProxy(
 					timelineJSON = string(b)
 				}
 			}
-			s.CHWriter.Record(em, chw.TraceExtra{
-				RequestType:       "chat",
-				InputText:         lastUserMessage(req.Messages),
-				ExecutionTimeline: timelineJSON,
-			})
+			if s.CHWriter != nil {
+				s.CHWriter.Record(em, chw.TraceExtra{
+					RequestType:       "chat",
+					InputText:         lastUserMessage(req.Messages),
+					ExecutionTimeline: timelineJSON,
+				})
+			}
 			if isExistingSession {
 				s.Sessions.Delete(sessionID)
 			}
+		}
+		if session != nil && isExistingSession {
+			session.Unlock()
 		}
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -963,6 +977,9 @@ func (s *Server) handleNonStreamingProxy(
 		session.LastInferenceCompletedAt = inferCompletedAt
 		// Store how many messages were in this request so next turn can identify new ones.
 		session.LastMessageCount = len(req.Messages)
+		if isExistingSession {
+			session.Unlock()
+		}
 	}
 
 	// Record in-memory metrics for the current turn
@@ -1091,20 +1108,22 @@ func (s *Server) handleNonStreamingProxy(
 				Model:         req.Model,
 			}
 
-			s.CHWriter.Record(finalSM, chw.TraceExtra{
-				RequestType:       reqType,
-				InputText:         inputText,
-				OutputText:        outputText,
-				InputMessages:     inputMsgsJSON,
-				OutputMessage:     outputMsg,
-				FinishReason:      finishReason,
-				RequestTools:      reqToolsJSON,
-				ResponseToolCalls: responseToolCallsJSON,
-				HasToolCalls:      hasTC,
-				ToolCallsCount:    tcCount,
-				ExecutionTimeline: timelineJSON,
-				TokensPerS:        tokensPerS,
-			})
+			if s.CHWriter != nil {
+				s.CHWriter.Record(finalSM, chw.TraceExtra{
+					RequestType:       reqType,
+					InputText:         inputText,
+					OutputText:        outputText,
+					InputMessages:     inputMsgsJSON,
+					OutputMessage:     outputMsg,
+					FinishReason:      finishReason,
+					RequestTools:      reqToolsJSON,
+					ResponseToolCalls: responseToolCallsJSON,
+					HasToolCalls:      hasTC,
+					ToolCallsCount:    tcCount,
+					ExecutionTimeline: timelineJSON,
+					TokensPerS:        tokensPerS,
+				})
+			}
 
 			if isExistingSession {
 				s.Sessions.Delete(sessionID)
@@ -1119,7 +1138,7 @@ func (s *Server) handleNonStreamingProxy(
 		Cost *costInfo `json:"cost,omitempty"`
 	}
 	var costField *costInfo
-	if totalCost > 0 {
+	if pricing != nil {
 		costField = &costInfo{
 			InputCostUSD:  inputCost,
 			OutputCostUSD: outputCost,
@@ -1156,7 +1175,7 @@ func (s *Server) handleStreamingProxy(
 			Stream:        true,
 		}
 		s.Metrics.Record(sem)
-		if !isInternal {
+		if !isInternal && s.CHWriter != nil {
 			s.CHWriter.Record(sem, chw.TraceExtra{RequestType: "chat_stream"})
 		}
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -1206,7 +1225,7 @@ func (s *Server) handleStreamingProxy(
 		Stream:    true,
 	}
 	s.Metrics.Record(ssm)
-	if !isInternal {
+	if !isInternal && s.CHWriter != nil {
 		s.CHWriter.Record(ssm, chw.TraceExtra{RequestType: "chat_stream"})
 	}
 }

@@ -15,6 +15,17 @@ import (
 	"github.com/lunar-org-ai/lunar-router/go/internal/metrics"
 )
 
+// clampInt clamps v to [min, max].
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
 // TraceExtra carries routing-specific fields not in RequestMetrics.
 type TraceExtra struct {
 	RequestType          string             // "route", "chat", "chat_stream"
@@ -398,7 +409,7 @@ func (w *Writer) insertBatch(rows []traceRow) error {
 			requestTools,
 			responseToolCalls,
 			hasToolCalls,
-			uint16(e.ToolCallsCount),
+			uint16(clampInt(e.ToolCallsCount, 0, 65535)),
 			executionTimeline,
 			e.TokensPerS,
 		)

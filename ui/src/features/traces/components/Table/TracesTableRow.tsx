@@ -53,7 +53,7 @@ export function TracesTableRow({
               <Wrench className="size-3" />
               {trace.output_message?.tool_calls
                 ? trace.output_message.tool_calls.map((tc) => tc.function.name).join(', ')
-                : `${trace.tool_calls_count ?? ''} tool call${(trace.tool_calls_count ?? 0) !== 1 ? 's' : ''}`}
+                : `${trace.tool_calls_count ?? 0} tool call${(trace.tool_calls_count ?? 0) !== 1 ? 's' : ''}`}
             </Badge>
           ) : (
             <span className="max-w-xs truncate block text-sm text-muted-foreground">

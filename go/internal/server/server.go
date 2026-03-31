@@ -89,7 +89,10 @@ func (s *Server) Run() error {
 	select {
 	case <-stop:
 		log.Println("Shutting down...")
-		s.CHWriter.Close()
+		s.Sessions.Close()
+		if s.CHWriter != nil {
+			s.CHWriter.Close()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return s.httpServer.Shutdown(ctx)

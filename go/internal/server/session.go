@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/rand"
 	"fmt"
 	"sync"
 	"time"
@@ -9,6 +10,8 @@ import (
 )
 
 type ToolCallSession struct {
+	mu sync.Mutex
+
 	ID string
 
 	// Accumulated execution timeline
@@ -49,6 +52,16 @@ type ToolCallSession struct {
 func (s *ToolCallSession) nextStep() int {
 	s.StepCounter++
 	return s.StepCounter
+}
+
+// Lock locks the session mutex. Callers must call Unlock when done.
+func (s *ToolCallSession) Lock() {
+	s.mu.Lock()
+}
+
+// Unlock unlocks the session mutex.
+func (s *ToolCallSession) Unlock() {
+	s.mu.Unlock()
 }
 
 func (s *ToolCallSession) AddInferenceStep(providerName, modelName string, startedAt time.Time) *ExecutionTimelineStep {
@@ -175,7 +188,12 @@ func (st *SessionStore) Delete(id string) {
 }
 
 func (st *SessionStore) Close() {
-	close(st.stopGC)
+	select {
+	case <-st.stopGC:
+		// already closed
+	default:
+		close(st.stopGC)
+	}
 }
 
 func (st *SessionStore) gc() {
@@ -199,5 +217,7 @@ func (st *SessionStore) gc() {
 }
 
 func GenerateSessionID() string {
-	return fmt.Sprintf("lunar-session-%d", time.Now().UnixNano())
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("lunar-session-%x", b)
 }

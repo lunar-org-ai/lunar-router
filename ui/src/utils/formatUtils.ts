@@ -72,7 +72,8 @@ export function formatCost(cost: number): string {
  */
 export function formatMs(ms: number): string {
   if (ms < 1) return '<1ms';
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(2)}s`;
+  if (ms < 1000) return `${Math.floor(ms)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
 }
 
 /**
