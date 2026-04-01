@@ -6,6 +6,7 @@ Provides REST endpoints for routing prompts to LLMs.
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 import json
 import logging
@@ -54,8 +55,19 @@ async def lifespan(app: FastAPI):
         logger.info("Pushed stored API keys to Go engine")
     except Exception as e:
         logger.debug(f"Could not push keys to engine on startup: {e}")
+
+    # Start scan scheduler if enabled
+    from ..harness.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    if scheduler.config.enabled:
+        scheduler.start()
+        logger.info("Scan scheduler started on lifespan")
+
     yield
+
     # Shutdown
+    scheduler.stop()
     logger.info("UniRoute API shutting down...")
 
 
@@ -467,6 +479,70 @@ async def resolve_trace_issue(issue_id: str):
     if not resolve_issue(issue_id):
         raise HTTPException(status_code=404, detail=f"Issue '{issue_id}' not found")
     return {"resolved": True, "id": issue_id}
+
+
+@app.put("/v1/trace-issues/{issue_id}/dismiss", tags=["trace-issues"])
+async def dismiss_trace_issue(issue_id: str, body: Optional[dict] = None):
+    """Dismiss a trace issue as a false positive (not an error)."""
+    from ..harness.trace_scanner import dismiss_issue
+
+    reason = (body or {}).get("reason", "")
+    success, feedback_id = dismiss_issue(issue_id, reason=reason)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Issue '{issue_id}' not found")
+    return {"dismissed": True, "id": issue_id, "feedback_id": feedback_id}
+
+
+@app.get("/v1/trace-issues/schedule", tags=["trace-issues"])
+async def get_scan_schedule():
+    """Get current scan schedule configuration."""
+    from ..harness.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    return {"schedule": scheduler.config.to_dict(), "running": scheduler.running}
+
+
+@app.put("/v1/trace-issues/schedule", tags=["trace-issues"])
+async def update_scan_schedule(body: dict):
+    """Update scan schedule configuration (enable/disable, interval, etc)."""
+    from ..harness.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    config = scheduler.update_config(
+        enabled=body.get("enabled"),
+        interval_seconds=body.get("interval_seconds"),
+        days_lookback=body.get("days_lookback"),
+        trace_limit=body.get("trace_limit"),
+    )
+    return {"schedule": config.to_dict(), "running": scheduler.running}
+
+
+@app.get("/v1/trace-issues/feedback", tags=["trace-issues"])
+async def list_trace_feedback(
+    issue_type: Optional[str] = None,
+    model: Optional[str] = None,
+    limit: int = 50,
+):
+    """List user feedback (false positive dismissals)."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+    tags = []
+    if issue_type:
+        tags.append(issue_type)
+    if model:
+        tags.append(model)
+
+    entries = store.query(
+        agent="trace_scanner",
+        category="user_feedback",
+        tags=tags or None,
+        limit=limit,
+    )
+    return {
+        "feedback": [e.to_dict() for e in entries],
+        "count": len(entries),
+    }
 
 
 # --- Clustering (Domain Datasets) ---
@@ -1032,6 +1108,144 @@ async def import_traces_to_clickhouse(body: dict):
         "samples_count": result.get("ingested", len(traces)),
         "skipped_count": skipped,
     }
+
+
+# --- Evaluation Datasets (CRUD) ---
+
+_DATASETS_FILE: Optional[Path] = None
+
+
+def _get_datasets_file() -> Path:
+    global _DATASETS_FILE
+    if _DATASETS_FILE is None:
+        from ..hub import LUNAR_DATA_HOME
+        d = LUNAR_DATA_HOME / "eval_datasets"
+        d.mkdir(parents=True, exist_ok=True)
+        _DATASETS_FILE = d / "datasets.json"
+    return _DATASETS_FILE
+
+
+def _load_datasets() -> list[dict]:
+    p = _get_datasets_file()
+    if p.exists():
+        with open(p) as f:
+            return json.load(f)
+    return []
+
+
+def _save_datasets(datasets: list[dict]) -> None:
+    p = _get_datasets_file()
+    with open(p, "w") as f:
+        json.dump(datasets, f, indent=2)
+
+
+@app.get("/v1/datasets", tags=["datasets"])
+async def list_datasets():
+    """List all evaluation datasets."""
+    datasets = _load_datasets()
+    return {"datasets": datasets, "total": len(datasets)}
+
+
+@app.post("/v1/datasets", tags=["datasets"])
+async def create_dataset(body: dict):
+    """Create a new evaluation dataset."""
+    import uuid
+    from datetime import datetime
+
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="'name' is required")
+
+    now = datetime.now().isoformat()
+    dataset = {
+        "id": str(uuid.uuid4())[:8],
+        "name": name,
+        "description": body.get("description", ""),
+        "source": body.get("source", "manual"),
+        "samples_count": 0,
+        "created_at": now,
+        "updated_at": now,
+        "samples": [],
+    }
+
+    datasets = _load_datasets()
+    datasets.append(dataset)
+    _save_datasets(datasets)
+
+    # Return without samples list in the response body
+    resp = {k: v for k, v in dataset.items() if k != "samples"}
+    return resp
+
+
+@app.get("/v1/datasets/{dataset_id}", tags=["datasets"])
+async def get_dataset(
+    dataset_id: str,
+    include_samples: bool = False,
+    samples_limit: int = 50,
+    samples_offset: int = 0,
+):
+    """Get a single dataset by ID."""
+    datasets = _load_datasets()
+    ds = next((d for d in datasets if d["id"] == dataset_id), None)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    samples = ds.get("samples", [])
+    dataset_info = {k: v for k, v in ds.items() if k != "samples"}
+    dataset_info["samples_count"] = len(samples)
+
+    result: dict = {"dataset": dataset_info, "samples": [], "samples_total": len(samples)}
+    if include_samples:
+        result["samples"] = samples[samples_offset : samples_offset + samples_limit]
+    return result
+
+
+@app.delete("/v1/datasets/{dataset_id}", tags=["datasets"])
+async def delete_dataset(dataset_id: str):
+    """Delete a dataset."""
+    datasets = _load_datasets()
+    filtered = [d for d in datasets if d["id"] != dataset_id]
+    if len(filtered) == len(datasets):
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    _save_datasets(filtered)
+    return {"success": True}
+
+
+@app.post("/v1/datasets/{dataset_id}/samples", tags=["datasets"])
+async def add_samples(dataset_id: str, body: dict):
+    """Add samples to an existing dataset."""
+    import uuid
+    from datetime import datetime
+
+    samples_input = body.get("samples", [])
+    if not samples_input:
+        raise HTTPException(status_code=400, detail="'samples' is required")
+
+    datasets = _load_datasets()
+    ds = next((d for d in datasets if d["id"] == dataset_id), None)
+    if ds is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    now = datetime.now().isoformat()
+    new_samples = []
+    for s in samples_input:
+        new_samples.append({
+            "id": str(uuid.uuid4())[:8],
+            "input": s.get("input", ""),
+            "output": s.get("output", ""),
+            "expected_output": s.get("expected_output", ""),
+            "metadata": s.get("metadata", {}),
+            "created_at": now,
+        })
+
+    if "samples" not in ds:
+        ds["samples"] = []
+    ds["samples"].extend(new_samples)
+    ds["samples_count"] = len(ds["samples"])
+    ds["updated_at"] = now
+    _save_datasets(datasets)
+
+    return {"message": f"Added {len(new_samples)} samples", "count": len(new_samples)}
 
 
 # --- Secrets (API Key Management) ---

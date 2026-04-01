@@ -37,7 +37,7 @@ interface AutoCollectTabProps {
 const ALL_MODELS_VALUE = '__all__';
 
 export function AutoCollectTab({ dataset }: AutoCollectTabProps) {
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const {
     getAutoCollectConfig,
     getAutoCollectHistory,

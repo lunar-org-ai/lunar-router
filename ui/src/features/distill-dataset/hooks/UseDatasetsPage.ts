@@ -21,7 +21,7 @@ export function useDatasetsPage() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [deletingDatasetId, setDeletingDatasetId] = useState<string | null>(null);
 
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const { allTraces, isLoading: metricsLoading, isInitialized: metricsInitialized } = useMetrics();
   const datasetsHook = useDatasets();
