@@ -14,6 +14,7 @@ interface StepContentProps {
   models: AvailableModel[];
   metrics: { builtin: EvaluationMetric[]; custom: EvaluationMetric[] };
   onFormChange: (partial: Partial<RunEvaluationFormData>) => void;
+  onRefreshMetrics?: () => void;
 }
 
 export function StepContent({
@@ -23,6 +24,7 @@ export function StepContent({
   models,
   metrics,
   onFormChange,
+  onRefreshMetrics,
 }: StepContentProps) {
   switch (stepId) {
     case 'general':
@@ -56,12 +58,14 @@ export function StepContent({
           builtin={metrics.builtin}
           custom={metrics.custom}
           selectedMetrics={formData.metrics}
+          datasetId={formData.datasetId}
           onToggle={(metricId) => {
             const next = formData.metrics.includes(metricId)
               ? formData.metrics.filter((id) => id !== metricId)
               : [...formData.metrics, metricId];
             onFormChange({ metrics: next });
           }}
+          onSuggestedMetricsCreated={onRefreshMetrics}
         />
       );
   }

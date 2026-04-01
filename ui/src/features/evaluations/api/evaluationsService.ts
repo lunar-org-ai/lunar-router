@@ -1508,6 +1508,47 @@ export function useEvaluationsService() {
     []
   );
 
+  const dismissTraceIssue = useCallback(
+    async (accessToken: string, issueId: string, reason?: string): Promise<Record<string, any>> => {
+      const data = await apiCall<Record<string, any>>(
+        `/v1/trace-issues/${issueId}/dismiss`,
+        accessToken,
+        {
+          method: 'PUT',
+          ...(reason ? { body: JSON.stringify({ reason }) } : {}),
+        }
+      );
+      return data;
+    },
+    []
+  );
+
+  const getScheduleConfig = useCallback(
+    async (accessToken: string): Promise<Record<string, any>> => {
+      const data = await apiCall<Record<string, any>>(
+        '/v1/trace-issues/schedule',
+        accessToken
+      );
+      return data;
+    },
+    []
+  );
+
+  const updateScheduleConfig = useCallback(
+    async (
+      accessToken: string,
+      config: { enabled?: boolean; interval_seconds?: number; days_lookback?: number; trace_limit?: number }
+    ): Promise<Record<string, any>> => {
+      const data = await apiCall<Record<string, any>>(
+        '/v1/trace-issues/schedule',
+        accessToken,
+        { method: 'PUT', body: JSON.stringify(config) }
+      );
+      return data;
+    },
+    []
+  );
+
   // ============================================================
   // EXPERIMENTS
   // ============================================================
@@ -2021,6 +2062,9 @@ export function useEvaluationsService() {
       triggerTraceScan,
       getTraceScanStatus,
       resolveTraceIssue,
+      dismissTraceIssue,
+      getScheduleConfig,
+      updateScheduleConfig,
 
       // Experiments
       listExperiments,

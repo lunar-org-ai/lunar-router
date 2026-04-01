@@ -32,6 +32,7 @@ class ToolKit:
             "add_traces": self.add_traces,
             "read_memory": self.read_memory,
             "write_memory": self.write_memory,
+            "read_feedback": self.read_feedback,
         }
         self._descriptions: dict[str, str] = {
             "query_traces": "Query recent LLM traces. Args: days (int=7), model (str=''), limit (int=50)",
@@ -44,6 +45,7 @@ class ToolKit:
             "add_traces": "Add traces to ClickHouse. Args: traces (list[dict]) each with input/output/model",
             "read_memory": "Query memory entries. Args: agent (str=''), category (str=''), tags (list[str]=[]), limit (int=10)",
             "write_memory": "Save a memory note. Args: agent (str), content (str), tags (list[str]=[]), category (str='note')",
+            "read_feedback": "Query user feedback (false positive dismissals). Args: issue_type (str=''), model (str=''), limit (int=20)",
         }
 
     def get(self, name: str) -> Optional[Callable]:
@@ -187,3 +189,40 @@ class ToolKit:
         )
         path = store.save(entry)
         return {"saved": True, "id": entry.id, "path": str(path)}
+
+    async def read_feedback(
+        self,
+        issue_type: str = "",
+        model: str = "",
+        limit: int = 20,
+    ) -> dict:
+        """Query user feedback (false positive dismissals)."""
+        from .memory_store import get_memory_store
+
+        store = get_memory_store()
+        tags = []
+        if issue_type:
+            tags.append(issue_type)
+        if model:
+            tags.append(model)
+
+        entries = store.query(
+            agent="trace_scanner",
+            category="user_feedback",
+            tags=tags or None,
+            limit=limit,
+        )
+        return {
+            "count": len(entries),
+            "feedback": [
+                {
+                    "issue_type": e.evaluation.get("issue_type"),
+                    "model_id": e.evaluation.get("model_id"),
+                    "feedback_type": e.evaluation.get("feedback_type"),
+                    "trace_input_preview": e.evaluation.get("trace_input_preview", "")[:200],
+                    "reason": e.evaluation.get("reason", ""),
+                    "created_at": e.created_at,
+                }
+                for e in entries
+            ],
+        }

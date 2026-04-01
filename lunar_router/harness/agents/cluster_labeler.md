@@ -1,7 +1,7 @@
 ---
 name: cluster_labeler
 description: Labels a cluster of prompts with domain name, rules, and confidence
-model: mistral-small-latest
+model: mistral/mistral-small-latest
 temperature: 0.1
 max_tokens: 500
 output_schema:

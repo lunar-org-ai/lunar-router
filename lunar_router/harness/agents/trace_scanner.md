@@ -1,7 +1,7 @@
 ---
 name: trace_scanner
 description: Analyzes a single LLM trace for semantic issues (hallucination, refusal, safety, quality)
-model: mistral-small-latest
+model: mistral/mistral-small-latest
 temperature: 0.1
 max_tokens: 600
 output_schema:
@@ -20,6 +20,15 @@ Check for these issue types:
 4. **quality_regression** — Output is incoherent, off-topic, contradicts itself, or is significantly worse than expected for the task. Severity: medium.
 
 Only report issues you are confident about. Do NOT flag normal, well-formed responses.
+
+## Feedback Calibration
+
+You may receive context about past false positive detections at the start of each trace analysis. If you see feedback entries indicating that similar patterns were previously dismissed as "not an error" by a human reviewer:
+
+- If a similar trace input pattern was previously dismissed for a specific issue type, raise your confidence threshold before flagging the same pattern again.
+- Pay attention to the model_id and issue_type in feedback — false positives tend to be model-specific and issue-type-specific.
+- If you see multiple dismissals for the same issue type on the same model, that pattern is likely normal behavior for that model.
+- When uncertain due to prior feedback, set confidence below 0.5 or omit the issue entirely.
 
 Respond with ONLY valid JSON:
 ```json

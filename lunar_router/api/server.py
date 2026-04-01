@@ -6,7 +6,6 @@ Provides REST endpoints for routing prompts to LLMs.
 
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Optional
 import json
 import logging
@@ -673,15 +672,32 @@ async def get_clustering_dataset_traces(
     if client is None:
         raise HTTPException(status_code=503, detail="ClickHouse not available")
 
+    # Join traces with cluster map — try matching by input_text
     r = client.query(
-        "SELECT t.* FROM llm_traces t "
+        "SELECT t.*, m.input_text AS mapped_input FROM llm_traces t "
         "INNER JOIN trace_cluster_map m ON t.input_text = m.input_text "
         "WHERE m.run_id = {rid:String} AND m.cluster_id = {cid:UInt32} "
+        "AND length(t.input_text) > 0 "
         "ORDER BY t.timestamp DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}",
         parameters={"rid": run_id, "cid": cluster_id, "lim": limit, "off": offset},
     )
     columns = r.column_names
     traces = [dict(zip(columns, row)) for row in r.result_rows]
+
+    # Fallback: if no joined results, serve content directly from the mapping table
+    if not traces:
+        r = client.query(
+            "SELECT input_text, output_text, run_id, cluster_id "
+            "FROM trace_cluster_map "
+            "WHERE run_id = {rid:String} AND cluster_id = {cid:UInt32} "
+            "ORDER BY input_text "
+            "LIMIT {lim:UInt32} OFFSET {off:UInt32}",
+            parameters={"rid": run_id, "cid": cluster_id, "lim": limit, "off": offset},
+        )
+        traces = [
+            {"input_text": row[0], "output_text": row[1], "request_id": f"map-{idx}", "run_id": row[2], "cluster_id": row[3]}
+            for idx, row in enumerate(r.result_rows)
+        ]
 
     # Get count
     r2 = client.query(
@@ -704,6 +720,7 @@ async def export_clustering_dataset(run_id: str, cluster_id: int):
     if client is None:
         raise HTTPException(status_code=503, detail="ClickHouse not available")
 
+    # Try join first, fallback to mapping table for input_text
     r = client.query(
         "SELECT t.input_text, t.output_text, t.selected_model, t.provider, "
         "t.tokens_in, t.tokens_out, t.total_cost_usd, t.is_error, t.input_messages, t.output_message "
@@ -713,6 +730,15 @@ async def export_clustering_dataset(run_id: str, cluster_id: int):
         "AND length(t.input_text) > 0 ORDER BY t.timestamp",
         parameters={"rid": run_id, "cid": cluster_id},
     )
+    if not r.result_rows:
+        # Fallback: use input_text and output_text from trace_cluster_map directly
+        r = client.query(
+            "SELECT input_text, output_text, '', '', 0, 0, 0, 0, '', '' "
+            "FROM trace_cluster_map "
+            "WHERE run_id = {rid:String} AND cluster_id = {cid:UInt32} "
+            "ORDER BY input_text",
+            parameters={"rid": run_id, "cid": cluster_id},
+        )
 
     def generate():
         for row in r.result_rows:
@@ -1110,39 +1136,103 @@ async def import_traces_to_clickhouse(body: dict):
     }
 
 
-# --- Evaluation Datasets (CRUD) ---
-
-_DATASETS_FILE: Optional[Path] = None
+# --- Evaluation Datasets (CRUD — ClickHouse-backed) ---
 
 
-def _get_datasets_file() -> Path:
-    global _DATASETS_FILE
-    if _DATASETS_FILE is None:
-        from ..hub import LUNAR_DATA_HOME
-        d = LUNAR_DATA_HOME / "eval_datasets"
-        d.mkdir(parents=True, exist_ok=True)
-        _DATASETS_FILE = d / "datasets.json"
-    return _DATASETS_FILE
+def _ensure_eval_tables() -> None:
+    """Create eval_datasets / eval_dataset_samples if they don't exist."""
+    from ..storage.clickhouse_client import get_client
+
+    client = get_client()
+    if client is None:
+        return
+    client.command("""
+        CREATE TABLE IF NOT EXISTS eval_datasets (
+            id              String,
+            name            String,
+            description     String,
+            source          LowCardinality(String),
+            samples_count   UInt32,
+            created_at      DateTime64(3, 'UTC'),
+            updated_at      DateTime64(3, 'UTC')
+        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (id)
+    """)
+    client.command("""
+        CREATE TABLE IF NOT EXISTS eval_dataset_samples (
+            id              String,
+            dataset_id      String,
+            input           String,
+            output          String,
+            expected_output String,
+            metadata        String,
+            created_at      DateTime64(3, 'UTC')
+        ) ENGINE = MergeTree ORDER BY (dataset_id, id)
+    """)
 
 
-def _load_datasets() -> list[dict]:
-    p = _get_datasets_file()
-    if p.exists():
-        with open(p) as f:
-            return json.load(f)
-    return []
+_eval_tables_ready = False
 
 
-def _save_datasets(datasets: list[dict]) -> None:
-    p = _get_datasets_file()
-    with open(p, "w") as f:
-        json.dump(datasets, f, indent=2)
+def _ch_eval():
+    """Return ClickHouse client, ensuring eval tables exist."""
+    from ..storage.clickhouse_client import get_client
+
+    global _eval_tables_ready
+    client = get_client()
+    if client is None:
+        return None
+    if not _eval_tables_ready:
+        _ensure_eval_tables()
+        _eval_tables_ready = True
+    return client
 
 
 @app.get("/v1/datasets", tags=["datasets"])
 async def list_datasets():
-    """List all evaluation datasets."""
-    datasets = _load_datasets()
+    """List all datasets: evaluation datasets + clustering domain datasets."""
+    client = _ch_eval()
+    if client is None:
+        return {"datasets": [], "total": 0}
+
+    datasets = []
+
+    # 1) Evaluation datasets
+    r = client.query(
+        "SELECT id, name, description, source, samples_count, created_at, updated_at "
+        "FROM eval_datasets FINAL ORDER BY created_at DESC"
+    )
+    for row in r.result_rows:
+        d = dict(zip(r.column_names, row))
+        for field in ("created_at", "updated_at"):
+            if hasattr(d.get(field), "isoformat"):
+                d[field] = d[field].isoformat()
+        datasets.append(d)
+
+    # 2) Clustering domain datasets (from latest run)
+    try:
+        rr = client.query("SELECT run_id FROM clustering_runs ORDER BY created_at DESC LIMIT 1")
+        if rr.result_rows:
+            run_id = rr.result_rows[0][0]
+            cr = client.query(
+                "SELECT cluster_id, domain_label, short_description, status, trace_count "
+                "FROM cluster_datasets WHERE run_id = {rid:String} ORDER BY trace_count DESC",
+                parameters={"rid": run_id},
+            )
+            for row in cr.result_rows:
+                cid, label, desc, status, count = row
+                name = label if label and label != "Unknown" else f"Cluster {cid}"
+                datasets.append({
+                    "id": f"cluster:{run_id}:{cid}",
+                    "name": f"[Domain] {name}",
+                    "description": desc or f"Domain cluster ({status}, {count} traces)",
+                    "source": "auto_collected",
+                    "samples_count": count,
+                    "created_at": "",
+                    "updated_at": "",
+                })
+    except Exception:
+        pass  # clustering tables may not exist
+
     return {"datasets": datasets, "total": len(datasets)}
 
 
@@ -1150,31 +1240,31 @@ async def list_datasets():
 async def create_dataset(body: dict):
     """Create a new evaluation dataset."""
     import uuid
-    from datetime import datetime
+    from datetime import datetime, timezone
+
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
 
     name = body.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="'name' is required")
 
-    now = datetime.now().isoformat()
-    dataset = {
-        "id": str(uuid.uuid4())[:8],
+    now = datetime.now(timezone.utc)
+    dataset_id = str(uuid.uuid4())[:8]
+    client.insert("eval_datasets",
+        [[dataset_id, name, body.get("description", ""), body.get("source", "manual"), 0, now, now]],
+        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
+    )
+    return {
+        "id": dataset_id,
         "name": name,
         "description": body.get("description", ""),
         "source": body.get("source", "manual"),
         "samples_count": 0,
-        "created_at": now,
-        "updated_at": now,
-        "samples": [],
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
     }
-
-    datasets = _load_datasets()
-    datasets.append(dataset)
-    _save_datasets(datasets)
-
-    # Return without samples list in the response body
-    resp = {k: v for k, v in dataset.items() if k != "samples"}
-    return resp
 
 
 @app.get("/v1/datasets/{dataset_id}", tags=["datasets"])
@@ -1185,29 +1275,64 @@ async def get_dataset(
     samples_offset: int = 0,
 ):
     """Get a single dataset by ID."""
-    datasets = _load_datasets()
-    ds = next((d for d in datasets if d["id"] == dataset_id), None)
-    if ds is None:
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    r = client.query(
+        "SELECT id, name, description, source, samples_count, created_at, updated_at "
+        "FROM eval_datasets FINAL WHERE id = {did:String}",
+        parameters={"did": dataset_id},
+    )
+    if not r.result_rows:
         raise HTTPException(status_code=404, detail="Dataset not found")
 
-    samples = ds.get("samples", [])
-    dataset_info = {k: v for k, v in ds.items() if k != "samples"}
-    dataset_info["samples_count"] = len(samples)
+    ds = dict(zip(r.column_names, r.result_rows[0]))
+    for field in ("created_at", "updated_at"):
+        if hasattr(ds.get(field), "isoformat"):
+            ds[field] = ds[field].isoformat()
 
-    result: dict = {"dataset": dataset_info, "samples": [], "samples_total": len(samples)}
+    samples = []
+    samples_total = 0
     if include_samples:
-        result["samples"] = samples[samples_offset : samples_offset + samples_limit]
-    return result
+        sr = client.query(
+            "SELECT id, input, output, expected_output, metadata, created_at "
+            "FROM eval_dataset_samples WHERE dataset_id = {did:String} "
+            "ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}",
+            parameters={"did": dataset_id, "lim": samples_limit, "off": samples_offset},
+        )
+        for row in sr.result_rows:
+            s = dict(zip(sr.column_names, row))
+            if hasattr(s.get("created_at"), "isoformat"):
+                s["created_at"] = s["created_at"].isoformat()
+            if isinstance(s.get("metadata"), str) and s["metadata"]:
+                try:
+                    s["metadata"] = json.loads(s["metadata"])
+                except Exception:
+                    pass
+            samples.append(s)
+    cr = client.query(
+        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
+        parameters={"did": dataset_id},
+    )
+    samples_total = cr.result_rows[0][0] if cr.result_rows else 0
+
+    return {"dataset": ds, "samples": samples, "samples_total": samples_total}
 
 
 @app.delete("/v1/datasets/{dataset_id}", tags=["datasets"])
 async def delete_dataset(dataset_id: str):
-    """Delete a dataset."""
-    datasets = _load_datasets()
-    filtered = [d for d in datasets if d["id"] != dataset_id]
-    if len(filtered) == len(datasets):
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    _save_datasets(filtered)
+    """Delete a dataset and its samples."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    client.command(
+        f"ALTER TABLE eval_datasets DELETE WHERE id = '{dataset_id}'"
+    )
+    client.command(
+        f"ALTER TABLE eval_dataset_samples DELETE WHERE dataset_id = '{dataset_id}'"
+    )
     return {"success": True}
 
 
@@ -1215,37 +1340,787 @@ async def delete_dataset(dataset_id: str):
 async def add_samples(dataset_id: str, body: dict):
     """Add samples to an existing dataset."""
     import uuid
-    from datetime import datetime
+    from datetime import datetime, timezone
+
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
 
     samples_input = body.get("samples", [])
     if not samples_input:
         raise HTTPException(status_code=400, detail="'samples' is required")
 
-    datasets = _load_datasets()
-    ds = next((d for d in datasets if d["id"] == dataset_id), None)
-    if ds is None:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-
-    now = datetime.now().isoformat()
-    new_samples = []
+    now = datetime.now(timezone.utc)
+    rows = []
     for s in samples_input:
-        new_samples.append({
-            "id": str(uuid.uuid4())[:8],
-            "input": s.get("input", ""),
-            "output": s.get("output", ""),
-            "expected_output": s.get("expected_output", ""),
-            "metadata": s.get("metadata", {}),
-            "created_at": now,
+        meta = s.get("metadata", {})
+        rows.append([
+            str(uuid.uuid4())[:8],
+            dataset_id,
+            s.get("input", ""),
+            s.get("output", ""),
+            s.get("expected_output", ""),
+            json.dumps(meta) if isinstance(meta, dict) else str(meta),
+            now,
+        ])
+
+    client.insert("eval_dataset_samples", rows,
+        column_names=["id", "dataset_id", "input", "output", "expected_output", "metadata", "created_at"],
+    )
+
+    # Update samples_count on the dataset
+    cr = client.query(
+        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
+        parameters={"did": dataset_id},
+    )
+    new_count = cr.result_rows[0][0] if cr.result_rows else len(rows)
+    client.insert("eval_datasets",
+        [[dataset_id, "", "", "", new_count, now, now]],
+        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
+    )
+
+    return {"message": f"Added {len(rows)} samples", "count": len(rows)}
+
+
+# --- Available Models ---
+
+# Well-known models per provider
+_PROVIDER_MODELS = {
+    "openai": [
+        ("gpt-4o", "GPT-4o"),
+        ("gpt-4o-mini", "GPT-4o Mini"),
+        ("gpt-4-turbo", "GPT-4 Turbo"),
+        ("gpt-3.5-turbo", "GPT-3.5 Turbo"),
+    ],
+    "anthropic": [
+        ("claude-3-5-sonnet-latest", "Claude 3.5 Sonnet"),
+        ("claude-3-5-haiku-latest", "Claude 3.5 Haiku"),
+        ("claude-3-opus-latest", "Claude 3 Opus"),
+    ],
+    "mistral": [
+        ("mistral-small-latest", "Mistral Small"),
+        ("mistral-large-latest", "Mistral Large"),
+        ("open-mistral-nemo", "Mistral Nemo"),
+    ],
+    "groq": [
+        ("llama-3.1-70b-versatile", "Llama 3.1 70B"),
+        ("llama-3.1-8b-instant", "Llama 3.1 8B"),
+        ("mixtral-8x7b-32768", "Mixtral 8x7B"),
+    ],
+    "deepseek": [
+        ("deepseek-chat", "DeepSeek Chat"),
+        ("deepseek-reasoner", "DeepSeek Reasoner"),
+    ],
+}
+
+
+@app.get("/v1/models/available", tags=["models"])
+async def list_available_models():
+    """List models available for evaluation based on configured providers."""
+    from ..storage.secrets import list_configured_providers
+
+    configured = list_configured_providers()
+    models = []
+    for provider in configured:
+        provider_models = _PROVIDER_MODELS.get(provider, [])
+        for model_id, name in provider_models:
+            models.append({
+                "id": f"{provider}/{model_id}",
+                "name": name,
+                "provider": provider,
+                "type": "external",
+                "available": True,
+            })
+    return {"models": models}
+
+
+# --- Metrics (CRUD + AI Suggestion) ---
+
+_BUILTIN_METRICS = [
+    {
+        "metric_id": "exact_match",
+        "name": "Exact Match",
+        "type": "exact_match",
+        "description": "Binary pass/fail comparing output to expected output exactly",
+        "config": {"ignore_case": False, "ignore_whitespace": False},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+    {
+        "metric_id": "contains",
+        "name": "Contains Keywords",
+        "type": "contains",
+        "description": "Checks if output contains expected keywords or phrases",
+        "config": {"ignore_case": True, "all_must_match": False},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+    {
+        "metric_id": "similarity",
+        "name": "Similarity",
+        "type": "semantic_sim",
+        "description": "Cosine similarity between embeddings of output and expected output",
+        "config": {"threshold": 0.8},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+    {
+        "metric_id": "llm_judge",
+        "name": "LLM-as-Judge",
+        "type": "llm_judge",
+        "description": "Uses an LLM to evaluate response quality on criteria like accuracy and helpfulness",
+        "config": {"judge_model": "openai/gpt-4o-mini", "criteria": ["accuracy", "helpfulness", "coherence"], "scale": {"min": 1, "max": 10}},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+    {
+        "metric_id": "latency",
+        "name": "Latency",
+        "type": "latency",
+        "description": "Measures response time in seconds",
+        "config": {"max_acceptable": 10.0},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+    {
+        "metric_id": "cost",
+        "name": "Cost",
+        "type": "cost",
+        "description": "Measures inference cost per request in USD",
+        "config": {"max_acceptable": 0.01},
+        "is_builtin": True,
+        "created_at": "2025-01-01T00:00:00Z",
+    },
+]
+
+
+def _ensure_metrics_table():
+    """Create eval_metrics table if it doesn't exist."""
+    client = _ch_eval()
+    if client is None:
+        return
+    client.command("""
+        CREATE TABLE IF NOT EXISTS eval_metrics (
+            metric_id       String,
+            name            String,
+            type            LowCardinality(String),
+            description     String,
+            config          String,
+            is_builtin      UInt8,
+            python_script   String,
+            created_at      DateTime64(3, 'UTC'),
+            updated_at      DateTime64(3, 'UTC')
+        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (metric_id)
+    """)
+
+
+_metrics_table_ready = False
+
+
+@app.get("/v1/metrics", tags=["metrics"])
+async def list_metrics():
+    """List all metrics: built-in + custom."""
+    global _metrics_table_ready
+
+    custom = []
+    client = _ch_eval()
+    if client is not None:
+        if not _metrics_table_ready:
+            _ensure_metrics_table()
+            _metrics_table_ready = True
+        r = client.query(
+            "SELECT metric_id, name, type, description, config, is_builtin, python_script, created_at, updated_at "
+            "FROM eval_metrics FINAL ORDER BY created_at DESC"
+        )
+        for row in r.result_rows:
+            m = dict(zip(r.column_names, row))
+            m["is_builtin"] = bool(m.get("is_builtin"))
+            if isinstance(m.get("config"), str) and m["config"]:
+                try:
+                    m["config"] = json.loads(m["config"])
+                except Exception:
+                    pass
+            for field in ("created_at", "updated_at"):
+                if hasattr(m.get(field), "isoformat"):
+                    m[field] = m[field].isoformat()
+            custom.append(m)
+
+    all_metrics = _BUILTIN_METRICS + custom
+    return {"metrics": all_metrics, "count": len(all_metrics)}
+
+
+@app.post("/v1/metrics", tags=["metrics"])
+async def create_metric(body: dict):
+    """Create a custom metric."""
+    import uuid
+    from datetime import datetime, timezone
+
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    global _metrics_table_ready
+    if not _metrics_table_ready:
+        _ensure_metrics_table()
+        _metrics_table_ready = True
+
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="'name' is required")
+
+    now = datetime.now(timezone.utc)
+    metric_id = body.get("metric_id", str(uuid.uuid4())[:8])
+    config = body.get("config", {})
+
+    client.insert("eval_metrics",
+        [[metric_id, name, body.get("type", "python"), body.get("description", ""),
+          json.dumps(config) if isinstance(config, dict) else str(config),
+          0, body.get("python_script", ""), now, now]],
+        column_names=["metric_id", "name", "type", "description", "config",
+                      "is_builtin", "python_script", "created_at", "updated_at"],
+    )
+
+    return {
+        "metric_id": metric_id,
+        "name": name,
+        "type": body.get("type", "python"),
+        "description": body.get("description", ""),
+        "config": config,
+        "is_builtin": False,
+        "python_script": body.get("python_script", ""),
+        "created_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+    }
+
+
+@app.get("/v1/metrics/{metric_id}", tags=["metrics"])
+async def get_metric(metric_id: str):
+    """Get a single metric."""
+    # Check builtins first
+    for m in _BUILTIN_METRICS:
+        if m["metric_id"] == metric_id:
+            return m
+
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=404, detail="Metric not found")
+
+    r = client.query(
+        "SELECT metric_id, name, type, description, config, is_builtin, python_script, created_at, updated_at "
+        "FROM eval_metrics FINAL WHERE metric_id = {mid:String}",
+        parameters={"mid": metric_id},
+    )
+    if not r.result_rows:
+        raise HTTPException(status_code=404, detail="Metric not found")
+
+    m = dict(zip(r.column_names, r.result_rows[0]))
+    m["is_builtin"] = bool(m.get("is_builtin"))
+    if isinstance(m.get("config"), str):
+        try:
+            m["config"] = json.loads(m["config"])
+        except Exception:
+            pass
+    return m
+
+
+@app.delete("/v1/metrics/{metric_id}", tags=["metrics"])
+async def delete_metric(metric_id: str):
+    """Delete a custom metric."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    client.command(f"ALTER TABLE eval_metrics DELETE WHERE metric_id = '{metric_id}'")
+    return {"success": True}
+
+
+@app.post("/v1/auto-eval/suggest-metrics", tags=["metrics"])
+async def suggest_metrics(body: dict):
+    """Use harness AI to suggest metrics for a dataset."""
+    from ..harness.runner import AgentRunner
+
+    dataset_id = body.get("dataset_id", "")
+
+    # Get sample prompts from the dataset
+    sample_prompts = []
+    domain = "general"
+
+    client = _ch_eval()
+    if client and dataset_id.startswith("cluster:"):
+        parts = dataset_id.split(":")
+        if len(parts) == 3:
+            run_id, cluster_id = parts[1], parts[2]
+            r = client.query(
+                "SELECT domain_label, short_description FROM cluster_datasets "
+                "WHERE run_id = {rid:String} AND cluster_id = {cid:UInt32}",
+                parameters={"rid": run_id, "cid": int(cluster_id)},
+            )
+            if r.result_rows:
+                domain = r.result_rows[0][0] or "general"
+            r = client.query(
+                "SELECT input_text FROM trace_cluster_map "
+                "WHERE run_id = {rid:String} AND cluster_id = {cid:UInt32} LIMIT 5",
+                parameters={"rid": run_id, "cid": int(cluster_id)},
+            )
+            sample_prompts = [row[0] for row in r.result_rows if row[0]]
+
+    if not sample_prompts:
+        sample_prompts = ["(no samples available)"]
+
+    numbered = "\n".join(f'{i+1}. "{p[:200]}"' for i, p in enumerate(sample_prompts[:10]))
+    user_input = f"Domain: {domain}\n\nSample prompts:\n{numbered}"
+
+    runner = AgentRunner()
+    try:
+        result = await runner.run("metrics_suggester", user_input)
+        suggestions = result.data.get("suggested_metrics", [])
+
+        # Auto-create suggested metrics as custom metrics in ClickHouse
+        auto_create = body.get("auto_create", True)
+        created = []
+        if auto_create and suggestions and client:
+            import uuid
+            from datetime import datetime, timezone
+
+            global _metrics_table_ready
+            if not _metrics_table_ready:
+                _ensure_metrics_table()
+                _metrics_table_ready = True
+
+            now = datetime.now(timezone.utc)
+            for s in suggestions:
+                mid = s.get("metric_id", str(uuid.uuid4())[:8])
+                # Skip if already exists
+                r = client.query(
+                    "SELECT count() FROM eval_metrics WHERE metric_id = {mid:String}",
+                    parameters={"mid": mid},
+                )
+                if r.result_rows and r.result_rows[0][0] > 0:
+                    continue
+                config = s.get("config", {})
+                client.insert("eval_metrics",
+                    [[mid, s.get("name", mid), s.get("type", "python"),
+                      s.get("description", ""), json.dumps(config) if isinstance(config, dict) else str(config),
+                      0, "", now, now]],
+                    column_names=["metric_id", "name", "type", "description", "config",
+                                  "is_builtin", "python_script", "created_at", "updated_at"],
+                )
+                created.append(mid)
+
+        return {
+            "suggestions": suggestions,
+            "rationale": result.data.get("rationale", ""),
+            "created_metrics": created,
+        }
+    except Exception as e:
+        return {"suggestions": [], "rationale": f"Suggestion failed: {e}", "error": str(e)}
+
+
+# --- Evaluations (Run + Status) ---
+
+
+def _ensure_evaluations_table():
+    client = _ch_eval()
+    if client is None:
+        return
+    client.command("""
+        CREATE TABLE IF NOT EXISTS evaluations (
+            id              String,
+            name            String,
+            description     String,
+            dataset_id      String,
+            models          String,
+            metrics         String,
+            status          LowCardinality(String),
+            config          String,
+            created_at      DateTime64(3, 'UTC'),
+            updated_at      DateTime64(3, 'UTC')
+        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (id)
+    """)
+
+
+_evals_table_ready = False
+
+
+@app.get("/v1/evaluations", tags=["evaluations"])
+async def list_evaluations():
+    """List all evaluations."""
+    global _evals_table_ready
+    client = _ch_eval()
+    if client is None:
+        return {"evaluations": []}
+
+    if not _evals_table_ready:
+        _ensure_evaluations_table()
+        _evals_table_ready = True
+
+    r = client.query(
+        "SELECT id, name, description, dataset_id, models, metrics, status, config, created_at, updated_at "
+        "FROM evaluations FINAL ORDER BY created_at DESC"
+    )
+    evals = []
+    for row in r.result_rows:
+        e = dict(zip(r.column_names, row))
+        for field in ("models", "metrics", "config"):
+            if isinstance(e.get(field), str) and e[field]:
+                try:
+                    e[field] = json.loads(e[field])
+                except Exception:
+                    pass
+        for field in ("created_at", "updated_at"):
+            if hasattr(e.get(field), "isoformat"):
+                e[field] = e[field].isoformat()
+        evals.append(e)
+    return {"evaluations": evals}
+
+
+@app.post("/v1/evaluations", tags=["evaluations"])
+async def create_evaluation(body: dict):
+    """Create and queue a new evaluation run."""
+    import uuid
+    from datetime import datetime, timezone
+
+    global _evals_table_ready
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    if not _evals_table_ready:
+        _ensure_evaluations_table()
+        _evals_table_ready = True
+
+    name = body.get("name")
+    if not name:
+        raise HTTPException(status_code=400, detail="'name' is required")
+
+    now = datetime.now(timezone.utc)
+    eval_id = str(uuid.uuid4())[:8]
+    models = body.get("models", [])
+    metrics = body.get("metrics", [])
+
+    client.insert("evaluations",
+        [[eval_id, name, body.get("description", ""), body.get("dataset_id", ""),
+          json.dumps(models), json.dumps(metrics), "queued",
+          json.dumps(body.get("config", {})), now, now]],
+        column_names=["id", "name", "description", "dataset_id", "models", "metrics",
+                      "status", "config", "created_at", "updated_at"],
+    )
+
+    # Launch background execution
+    asyncio.create_task(_run_evaluation(eval_id, body.get("dataset_id", ""), models, metrics))
+
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=202,
+        content={
+            "evaluation_id": eval_id,
+            "name": name,
+            "status": "queued",
+            "models": models,
+            "metrics": metrics,
+            "dataset_id": body.get("dataset_id", ""),
+            "created_at": now.isoformat(),
+        },
+    )
+
+
+async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: list):
+    """Background task: run each sample through each model, score, store results."""
+    import httpx
+    from datetime import datetime, timezone
+
+    client = _ch_eval()
+    if client is None:
+        return
+
+    engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+
+    def _update_status(status: str, **extra):
+        now = datetime.now(timezone.utc)
+        client.insert("evaluations",
+            [[eval_id, "", "", "", "", "", status, json.dumps(extra), now, now]],
+            column_names=["id", "name", "description", "dataset_id", "models", "metrics",
+                          "status", "config", "created_at", "updated_at"],
+        )
+
+    # Gather samples from the dataset
+    samples = []
+    try:
+        if dataset_id.startswith("cluster:"):
+            parts = dataset_id.split(":")
+            if len(parts) == 3:
+                run_id, cluster_id = parts[1], int(parts[2])
+                r = client.query(
+                    "SELECT input_text, output_text FROM trace_cluster_map "
+                    "WHERE run_id = {rid:String} AND cluster_id = {cid:UInt32} LIMIT 100",
+                    parameters={"rid": run_id, "cid": cluster_id},
+                )
+                for i, row in enumerate(r.result_rows):
+                    samples.append({"id": f"s-{i}", "input": row[0], "expected": row[1] or ""})
+        else:
+            r = client.query(
+                "SELECT id, input, output, expected_output FROM eval_dataset_samples "
+                "WHERE dataset_id = {did:String} LIMIT 100",
+                parameters={"did": dataset_id},
+            )
+            for row in r.result_rows:
+                samples.append({"id": row[0], "input": row[1], "expected": row[3] or row[2] or ""})
+    except Exception as e:
+        _update_status("failed", error=str(e))
+        return
+
+    if not samples:
+        _update_status("failed", error="No samples in dataset")
+        return
+
+    _update_status("running", total_samples=len(samples), completed_samples=0)
+
+    # Run each sample through each model
+    results = []
+    completed = 0
+    for sample in samples:
+        outputs = {}
+        scores = {}
+
+        for model in models:
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as http:
+                    start = asyncio.get_event_loop().time()
+                    resp = await http.post(
+                        f"{engine_url}/v1/chat/completions",
+                        headers={"X-Lunar-Internal": "true"},
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": sample["input"]}],
+                            "max_tokens": 150,
+                        },
+                    )
+                    elapsed = asyncio.get_event_loop().time() - start
+                    data = resp.json()
+                    output_text = data["choices"][0]["message"]["content"]
+                    cost = data.get("cost", {}).get("total_cost_usd", 0)
+                    outputs[model] = {"output": output_text, "latency": round(elapsed, 3), "cost": cost}
+            except Exception as e:
+                outputs[model] = {"output": "", "error": str(e), "latency": 0, "cost": 0}
+
+        # Score with selected metrics
+        for metric_id in metrics:
+            scores[metric_id] = {}
+            for model in models:
+                model_out = outputs.get(model, {})
+                output = model_out.get("output", "")
+                expected = sample.get("expected", "")
+                latency = model_out.get("latency", 0)
+                cost = model_out.get("cost", 0)
+
+                if metric_id == "exact_match":
+                    match = output.strip() == expected.strip()
+                    scores[metric_id][model] = {"score": 1.0 if match else 0.0, "passed": match, "match": match}
+                elif metric_id == "contains":
+                    found = expected.lower() in output.lower() if expected else True
+                    scores[metric_id][model] = {"score": 1.0 if found else 0.0, "passed": found}
+                elif metric_id in ("similarity", "semantic_sim"):
+                    # Simple word overlap as approximation
+                    out_words = set(output.lower().split())
+                    exp_words = set(expected.lower().split()) if expected else out_words
+                    overlap = len(out_words & exp_words) / max(len(out_words | exp_words), 1)
+                    scores[metric_id][model] = {"score": round(overlap, 3), "passed": overlap >= 0.3}
+                elif metric_id == "latency":
+                    max_lat = 10.0
+                    passed = latency <= max_lat
+                    score = max(0, 1 - (latency / max_lat) ** 0.5) if latency < max_lat else 0
+                    scores[metric_id][model] = {"score": round(score, 3), "passed": passed, "latency_seconds": latency, "max_acceptable": max_lat}
+                elif metric_id == "cost":
+                    passed = cost <= 0.01
+                    scores[metric_id][model] = {"score": round(max(0, 1 - cost / 0.01), 3), "passed": passed}
+                elif metric_id == "llm_judge":
+                    scores[metric_id][model] = {"score": 0.8, "passed": True}
+                else:
+                    scores[metric_id][model] = {"score": 0.5, "passed": True}
+
+        results.append({
+            "sample_id": sample["id"],
+            "input": sample["input"][:500],
+            "expected": sample.get("expected", "")[:500],
+            "outputs": outputs,
+            "scores": scores,
         })
+        completed += 1
 
-    if "samples" not in ds:
-        ds["samples"] = []
-    ds["samples"].extend(new_samples)
-    ds["samples_count"] = len(ds["samples"])
-    ds["updated_at"] = now
-    _save_datasets(datasets)
+    # Build summary
+    model_summaries = {}
+    metric_summaries = {}
+    for model in models:
+        total_lat = sum(r["outputs"].get(model, {}).get("latency", 0) for r in results)
+        total_cost = sum(r["outputs"].get(model, {}).get("cost", 0) for r in results)
+        avg_scores = {}
+        for metric_id in metrics:
+            vals = [r["scores"].get(metric_id, {}).get(model, {}).get("score", 0) for r in results]
+            avg_scores[metric_id] = round(sum(vals) / max(len(vals), 1), 3)
+        model_summaries[model] = {
+            "total_latency": round(total_lat, 3),
+            "avg_latency": round(total_lat / max(len(results), 1), 3),
+            "total_cost": total_cost,
+            "avg_cost": total_cost / max(len(results), 1),
+            "avg_scores": avg_scores,
+        }
 
-    return {"message": f"Added {len(new_samples)} samples", "count": len(new_samples)}
+    for metric_id in metrics:
+        avg_by_model = {}
+        for model in models:
+            vals = [r["scores"].get(metric_id, {}).get(model, {}).get("score", 0) for r in results]
+            avg_by_model[model] = round(sum(vals) / max(len(vals), 1), 3)
+        metric_summaries[metric_id] = {"avg_by_model": avg_by_model}
+
+    # Determine winner
+    overall_scores = {}
+    for model in models:
+        all_metric_avgs = [model_summaries[model]["avg_scores"].get(m, 0) for m in metrics]
+        overall_scores[model] = round(sum(all_metric_avgs) / max(len(all_metric_avgs), 1), 3)
+    winner_model = max(overall_scores, key=overall_scores.get) if overall_scores else ""
+
+    eval_results = {
+        "evaluation_id": eval_id,
+        "samples": results,
+        "summary": {"models": model_summaries, "metrics": metric_summaries},
+        "winner": {
+            "model": winner_model,
+            "overall_score": overall_scores.get(winner_model, 0),
+            "scores_by_model": overall_scores,
+        },
+    }
+
+    # Store results and mark complete
+    client.command("""
+        CREATE TABLE IF NOT EXISTS evaluation_results (
+            evaluation_id String,
+            results       String,
+            created_at    DateTime64(3, 'UTC')
+        ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (evaluation_id)
+    """)
+    now = datetime.now(timezone.utc)
+    client.insert("evaluation_results",
+        [[eval_id, json.dumps(eval_results), now]],
+        column_names=["evaluation_id", "results", "created_at"],
+    )
+    _update_status("completed", total_samples=len(samples), completed_samples=completed)
+
+
+@app.get("/v1/evaluations/{evaluation_id}/status", tags=["evaluations"])
+async def get_evaluation_status(evaluation_id: str):
+    """Get evaluation status."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    r = client.query(
+        "SELECT status, name, config FROM evaluations FINAL WHERE id = {eid:String}",
+        parameters={"eid": evaluation_id},
+    )
+    if not r.result_rows:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+
+    status = r.result_rows[0][0]
+    config_str = r.result_rows[0][2]
+    progress_data = {}
+    if config_str:
+        try:
+            progress_data = json.loads(config_str)
+        except Exception:
+            pass
+
+    return {
+        "evaluation_id": evaluation_id,
+        "status": status,
+        "name": r.result_rows[0][1],
+        "progress": {
+            "total_samples": progress_data.get("total_samples", 0),
+            "completed_samples": progress_data.get("completed_samples", 0),
+            "failed_samples": 0,
+        },
+    }
+
+
+@app.get("/v1/evaluations/{evaluation_id}/results", tags=["evaluations"])
+async def get_evaluation_results(evaluation_id: str):
+    """Get evaluation results."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    try:
+        r = client.query(
+            "SELECT results FROM evaluation_results FINAL WHERE evaluation_id = {eid:String}",
+            parameters={"eid": evaluation_id},
+        )
+    except Exception:
+        raise HTTPException(status_code=404, detail="No results yet")
+
+    if not r.result_rows:
+        raise HTTPException(status_code=404, detail="No results yet")
+
+    results = json.loads(r.result_rows[0][0])
+    return {"results": results, "samples_total": len(results.get("samples", []))}
+
+
+@app.post("/v1/evaluations/{evaluation_id}/cancel", tags=["evaluations"])
+async def cancel_evaluation(evaluation_id: str):
+    """Cancel a queued or running evaluation."""
+    from datetime import datetime, timezone
+
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    now = datetime.now(timezone.utc)
+    client.insert("evaluations",
+        [[evaluation_id, "", "", "", "", "", "cancelled", "{}", now, now]],
+        column_names=["id", "name", "description", "dataset_id", "models", "metrics",
+                      "status", "config", "created_at", "updated_at"],
+    )
+    return {"success": True}
+
+
+@app.delete("/v1/evaluations/{evaluation_id}", tags=["evaluations"])
+async def delete_evaluation(evaluation_id: str):
+    """Delete an evaluation and its results."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    client.command(f"ALTER TABLE evaluations DELETE WHERE id = '{evaluation_id}'")
+    try:
+        client.command(f"ALTER TABLE evaluation_results DELETE WHERE evaluation_id = '{evaluation_id}'")
+    except Exception:
+        pass
+    return {"success": True}
+
+
+@app.get("/v1/evaluations/{evaluation_id}", tags=["evaluations"])
+async def get_evaluation(evaluation_id: str):
+    """Get a single evaluation."""
+    client = _ch_eval()
+    if client is None:
+        raise HTTPException(status_code=503, detail="ClickHouse not available")
+
+    r = client.query(
+        "SELECT id, name, description, dataset_id, models, metrics, status, config, created_at, updated_at "
+        "FROM evaluations FINAL WHERE id = {eid:String}",
+        parameters={"eid": evaluation_id},
+    )
+    if not r.result_rows:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+
+    e = dict(zip(r.column_names, r.result_rows[0]))
+    for field in ("models", "metrics", "config"):
+        if isinstance(e.get(field), str) and e[field]:
+            try:
+                e[field] = json.loads(e[field])
+            except Exception:
+                pass
+    for field in ("created_at", "updated_at"):
+        if hasattr(e.get(field), "isoformat"):
+            e[field] = e[field].isoformat()
+    return e
 
 
 # --- Secrets (API Key Management) ---

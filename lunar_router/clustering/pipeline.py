@@ -435,13 +435,13 @@ class ClusteringPipeline:
         map_rows = []
         for i, trace in enumerate(traces):
             cid = int(assignments[i])
-            map_rows.append([v.run_id, trace.input_text, cid])
+            map_rows.append([v.run_id, trace.input_text, cid, trace.output_text])
 
         if map_rows:
             client.insert(
                 "trace_cluster_map",
                 map_rows,
-                column_names=["run_id", "input_text", "cluster_id"],
+                column_names=["run_id", "input_text", "cluster_id", "output_text"],
             )
 
         logger.info(f"[clustering:{v.run_id}] Stored {len(result.datasets)} clusters, {len(map_rows)} mappings")

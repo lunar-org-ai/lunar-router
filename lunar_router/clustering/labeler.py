@@ -33,12 +33,12 @@ class ClusterLabeler:
 
         try:
             result = await self.runner.run("cluster_labeler", user_input)
-            if "parse_error" in result:
-                logger.warning(f"Label parse error: {result['parse_error']}")
+            if "parse_error" in result.data:
+                logger.warning(f"Label parse error: {result.data['parse_error']}")
                 return ClusterLabel.unknown()
-            return ClusterLabel.from_dict(result)
+            return ClusterLabel.from_dict(result.data)
         except Exception as e:
-            logger.warning(f"LLM labeling failed: {e}")
+            logger.warning(f"LLM labeling failed: {type(e).__name__}: {e}", exc_info=True)
             return ClusterLabel.unknown()
 
     async def score_coherence(self, sample_prompts: list[str]) -> float:

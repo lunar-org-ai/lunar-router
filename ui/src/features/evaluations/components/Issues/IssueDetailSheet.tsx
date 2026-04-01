@@ -1,4 +1,4 @@
-import { WandSparkles, ChevronRight } from 'lucide-react';
+import { WandSparkles, ChevronRight, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Progress } from '@/components/ui/progress';
@@ -22,6 +22,7 @@ interface IssueDetailSheetProps {
   onClose: () => void;
   issue: TraceIssue | null;
   onResolve: (id: string) => void;
+  onDismiss: (id: string) => void;
   onRunEval?: (config: EvalPrefillConfig) => void;
 }
 
@@ -30,6 +31,7 @@ export function IssueDetailSheet({
   onClose,
   issue,
   onResolve,
+  onDismiss,
   onRunEval,
 }: IssueDetailSheetProps) {
   if (!issue) return null;
@@ -43,7 +45,8 @@ export function IssueDetailSheet({
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={SEVERITY_VARIANT[issue.severity]}>{issue.severity.toUpperCase()}</Badge>
             <Badge variant="secondary">{ISSUE_TYPE_LABELS[issue.type] || issue.type}</Badge>
-            {issue.resolved && <Badge variant="outline">Resolved</Badge>}
+            {issue.dismissed && <Badge variant="outline">Dismissed</Badge>}
+            {issue.resolved && !issue.dismissed && <Badge variant="outline">Resolved</Badge>}
           </div>
           <SheetTitle>{issue.title}</SheetTitle>
           <SheetDescription>
@@ -99,10 +102,21 @@ export function IssueDetailSheet({
 
         <SheetFooter>
           {!issue.resolved && (
-            <Button size="sm" onClick={() => onResolve(issue.id)} className="flex-1">
-              <WandSparkles className="size-3.5" />
-              Resolve
-            </Button>
+            <>
+              <Button size="sm" onClick={() => onResolve(issue.id)} className="flex-1">
+                <WandSparkles className="size-3.5" />
+                Resolve
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => onDismiss(issue.id)}
+                className="flex-1"
+              >
+                <XCircle className="size-3.5" />
+                Not an Error
+              </Button>
+            </>
           )}
           {issue.suggested_eval_config && onRunEval && !issue.resolved && (
             <Button

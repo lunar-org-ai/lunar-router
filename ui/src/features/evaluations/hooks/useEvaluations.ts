@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type {
   Evaluation,
@@ -22,7 +21,7 @@ const ACTIVE_STATUSES: EvaluationStatus[] = ['queued', 'starting', 'running'];
 const TERMINAL_STATUSES: EvaluationStatus[] = ['completed', 'failed', 'cancelled'];
 
 export function useEvaluations() {
-  const { accessToken } = useUser();
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 
@@ -50,7 +49,6 @@ export function useEvaluations() {
   );
 
   const refresh = useCallback(async () => {
-    if (!accessToken) { setLoading(false); return; }
     setLoading(true);
     setError(null);
 
@@ -74,7 +72,6 @@ export function useEvaluations() {
 
   const create = useCallback(
     async (request: CreateEvaluationRequest): Promise<Evaluation | null> => {
-      if (!accessToken) return null;
       try {
         const evaluation = await service.createEvaluation(accessToken, request);
         setEvaluations((prev) => [evaluation, ...prev]);
@@ -90,7 +87,6 @@ export function useEvaluations() {
 
   const remove = useCallback(
     async (id: string): Promise<boolean> => {
-      if (!accessToken) return false;
       try {
         await service.deleteEvaluation(accessToken, id);
         setEvaluations((prev) => prev.filter((e) => e.id !== id));
@@ -106,7 +102,6 @@ export function useEvaluations() {
 
   const cancel = useCallback(
     async (id: string): Promise<boolean> => {
-      if (!accessToken) return false;
       try {
         const ok = await service.cancelEvaluation(accessToken, id);
         if (ok) {
@@ -126,7 +121,6 @@ export function useEvaluations() {
 
   const getResults = useCallback(
     async (id: string): Promise<{ results: EvaluationResults; samples_total?: number } | null> => {
-      if (!accessToken) return null;
       try {
         return await service.getEvaluationResults(accessToken, id, { include_samples: true });
       } catch (err) {
@@ -139,7 +133,6 @@ export function useEvaluations() {
 
   const getStatus = useCallback(
     async (id: string): Promise<EvaluationStatusResponse | null> => {
-      if (!accessToken) return null;
       try {
         return await service.getEvaluationStatus(accessToken, id);
       } catch (err) {
@@ -152,7 +145,6 @@ export function useEvaluations() {
 
   const getOne = useCallback(
     async (id: string): Promise<Evaluation | null> => {
-      if (!accessToken) return null;
       try {
         return await service.getEvaluation(accessToken, id);
       } catch (err) {
@@ -167,13 +159,12 @@ export function useEvaluations() {
 
   useEffect(() => {
     if (loaded.current) return;
-    if (!accessToken) { setLoading(false); return; }
     loaded.current = true;
     refresh();
   }, [accessToken, refresh]);
 
   useEffect(() => {
-    if (!accessToken || activeEvaluations.length === 0) return;
+    if (activeEvaluations.length === 0) return;
 
     const interval = hasQueuedOrStarting ? POLLING_INTERVALS.queued : POLLING_INTERVALS.running;
 

@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 ISSUE_CATEGORY = "trace_issue"
 SCAN_CATEGORY = "trace_scan"
+FEEDBACK_CATEGORY = "user_feedback"
+AUTO_EVAL_CATEGORY = "auto_evaluation"
 
 # Heuristic thresholds
 LATENCY_SPIKE_ZSCORE = 2.0  # standard deviations above mean
@@ -316,12 +318,22 @@ class TraceScanner:
             # Store issues in memory
             self._store_issues(issues, scan_id)
 
+            # Auto-generate eval cases from high/medium issues
+            eval_count = 0
+            if issues:
+                eval_entries = await self._generate_eval_cases(issues, scan_id)
+                eval_count = len(eval_entries)
+                logger.info(
+                    f"Auto-generated {eval_count} eval cases from "
+                    f"{len(issues)} issues"
+                )
+
             state.issues_found = len(issues)
             state.status = "completed"
             state.completed_at = datetime.now(timezone.utc).isoformat()
 
             # Store scan summary in memory
-            self._store_scan_summary(state, issues)
+            self._store_scan_summary(state, issues, eval_count=eval_count)
 
             return issues
 
@@ -363,10 +375,36 @@ class TraceScanner:
 
         return issues
 
+    def _build_feedback_context(self) -> str:
+        """Build a concise feedback context string from past false positives."""
+        feedback_entries = self.memory_store.query(
+            agent="trace_scanner",
+            category=FEEDBACK_CATEGORY,
+            limit=50,
+        )
+        if not feedback_entries:
+            return ""
+
+        lines = ["## Past False Positives (adjust your analysis accordingly)\n"]
+        for fb in feedback_entries[:20]:
+            ev = fb.evaluation
+            reason = ev.get("reason", "")
+            reason_str = f" Reason: {reason}" if reason else ""
+            lines.append(
+                f"- Issue type '{ev.get('issue_type', '?')}' on model "
+                f"'{ev.get('model_id', '?')}' was dismissed as false positive. "
+                f"Input preview: {ev.get('trace_input_preview', '')[:100]}"
+                f"{reason_str}"
+            )
+        return "\n".join(lines) + "\n\n"
+
     async def _run_agent_checks(self, traces: list[dict]) -> list[TraceIssue]:
         """Run the trace_scanner LLM agent on traces with content."""
         runner = self._get_runner()
         issues: list[TraceIssue] = []
+
+        # Load past feedback to inject as context
+        feedback_context = self._build_feedback_context()
 
         for trace in traces:
             input_text = str(trace.get("input_text", ""))[:1000]
@@ -375,6 +413,7 @@ class TraceScanner:
             trace_id = trace.get("request_id", "")
 
             user_input = (
+                f"{feedback_context}"
                 f"Model: {model_id}\n\n"
                 f"## Input\n{input_text}\n\n"
                 f"## Output\n{output_text}"
@@ -441,7 +480,66 @@ class TraceScanner:
             except Exception as e:
                 logger.debug(f"Failed to save issue to memory: {e}")
 
-    def _store_scan_summary(self, state: ScanState, issues: list[TraceIssue]) -> None:
+    async def _generate_eval_cases(
+        self, issues: list[TraceIssue], scan_id: str,
+    ) -> list[MemoryEntry]:
+        """Auto-generate eval cases from high/medium severity issues."""
+        runner = self._get_runner()
+        entries: list[MemoryEntry] = []
+
+        qualifying = [i for i in issues if i.severity in ("high", "medium")]
+        for issue in qualifying:
+            user_input = (
+                f"## Detected Issue\n\n"
+                f"- **Type:** {issue.type}\n"
+                f"- **Severity:** {issue.severity}\n"
+                f"- **Title:** {issue.title}\n"
+                f"- **Description:** {issue.description}\n"
+                f"- **Model:** {issue.model_id}\n"
+                f"- **Suggested action:** {issue.suggested_action}\n\n"
+                f"## Original Trace Input\n```\n{issue.trace_input[:500]}\n```\n\n"
+                f"## Original Trace Output\n```\n{issue.trace_output[:500]}\n```"
+            )
+            try:
+                result = await runner.run("eval_generator", user_input)
+                eval_case = result.data.get("eval_case", {})
+                rationale = result.data.get("rationale", "")
+
+                entry = MemoryEntry(
+                    id=str(uuid.uuid4()),
+                    agent="eval_generator",
+                    category=AUTO_EVAL_CATEGORY,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    body=(
+                        f"## Auto-Generated Eval Case\n\n"
+                        f"**Source issue:** {issue.id} ({issue.type})\n"
+                        f"**Check type:** {eval_case.get('check_type', 'unknown')}\n\n"
+                        f"### Input\n{eval_case.get('input', '')}\n\n"
+                        f"### Expected Behavior\n{eval_case.get('expected_behavior', '')}\n\n"
+                        f"### Rationale\n{rationale}"
+                    ),
+                    model=issue.model_id,
+                    tags=[
+                        issue.type,
+                        issue.severity,
+                        f"source:{issue.id}",
+                        f"scan:{scan_id}",
+                    ],
+                    evaluation={
+                        "eval_case": eval_case,
+                        "rationale": rationale,
+                        "source_issue_id": issue.id,
+                        "source_issue_type": issue.type,
+                    },
+                )
+                self.memory_store.save(entry)
+                entries.append(entry)
+            except Exception as e:
+                logger.warning(f"Failed to generate eval case for issue {issue.id}: {e}")
+
+        return entries
+
+    def _store_scan_summary(self, state: ScanState, issues: list[TraceIssue], eval_count: int = 0) -> None:
         """Store scan summary as a memory entry for historical tracking."""
         type_counts: dict[str, int] = {}
         severity_counts: dict[str, int] = {}
@@ -453,6 +551,7 @@ class TraceScanner:
             "## Scan Summary\n",
             f"- **Traces scanned:** {state.traces_scanned}",
             f"- **Issues found:** {state.issues_found}",
+            f"- **Eval cases generated:** {eval_count}",
             f"- **Duration:** {state.started_at} to {state.completed_at}",
             "",
             "## Issues by Type\n",
@@ -473,6 +572,7 @@ class TraceScanner:
             evaluation={
                 "traces_scanned": state.traces_scanned,
                 "issues_found": state.issues_found,
+                "eval_cases_generated": eval_count,
                 "type_counts": type_counts,
                 "severity_counts": severity_counts,
             },
@@ -571,6 +671,64 @@ def resolve_issue(
     # Re-save with updated evaluation
     store.save(entry)
     return True
+
+
+def dismiss_issue(
+    issue_id: str,
+    reason: str = "",
+    memory_store: Optional[MemoryStore] = None,
+) -> tuple[bool, str]:
+    """Dismiss an issue as a false positive and store user feedback.
+
+    Returns (success, feedback_entry_id).
+    """
+    store = memory_store or get_memory_store()
+    entry = store.get(issue_id)
+    if entry is None or entry.category != ISSUE_CATEGORY:
+        return False, ""
+
+    # Update the original issue entry
+    entry.evaluation["dismissed"] = True
+    entry.evaluation["resolved"] = True
+    entry.tags = [t for t in entry.tags if t not in ("unresolved",)]
+    entry.tags.extend(["dismissed", "false_positive"])
+    store.save(entry)
+
+    # Create a separate feedback entry for future learning
+    issue_type = entry.evaluation.get("type", "unknown")
+    model_id = entry.model or "unknown"
+    trace_input = entry.evaluation.get("trace_input", "")
+
+    feedback_id = str(uuid.uuid4())
+    reason_text = f"\n\n**User reason:** {reason}" if reason else ""
+    feedback_entry = MemoryEntry(
+        id=feedback_id,
+        agent="trace_scanner",
+        category=FEEDBACK_CATEGORY,
+        created_at=datetime.now(timezone.utc).isoformat(),
+        body=(
+            f"## False Positive Dismissal\n\n"
+            f"- **Source issue:** {issue_id}\n"
+            f"- **Issue type:** {issue_type}\n"
+            f"- **Model:** {model_id}\n"
+            f"- **Original title:** {entry.evaluation.get('title', '')}\n"
+            f"- **Input preview:** {trace_input[:200]}"
+            f"{reason_text}"
+        ),
+        model=model_id,
+        tags=["false_positive", issue_type, model_id],
+        evaluation={
+            "source_issue_id": issue_id,
+            "issue_type": issue_type,
+            "model_id": model_id,
+            "feedback_type": "false_positive",
+            "trace_input_preview": trace_input[:200],
+            "reason": reason,
+        },
+    )
+    store.save(feedback_entry)
+
+    return True, feedback_id
 
 
 def get_scan_state(scan_id: str) -> Optional[ScanState]:

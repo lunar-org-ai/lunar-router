@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type { EvaluationMetric, CreateCustomMetricRequest } from '../types';
 
@@ -9,7 +8,7 @@ interface MetricsState {
 }
 
 export function useMetrics() {
-  const { accessToken } = useUser();
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 
@@ -17,7 +16,6 @@ export function useMetrics() {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    if (!accessToken) { setLoading(false); return; }
     try {
       const data = await service.listMetrics(accessToken);
       setMetrics(data);
@@ -30,14 +28,12 @@ export function useMetrics() {
 
   useEffect(() => {
     if (loaded.current) return;
-    if (!accessToken) { setLoading(false); return; }
     loaded.current = true;
     refresh();
   }, [accessToken, refresh]);
 
   const createCustomMetric = useCallback(
     async (request: CreateCustomMetricRequest): Promise<EvaluationMetric | null> => {
-      if (!accessToken) return null;
       try {
         const metric = await service.createCustomMetric(accessToken, request);
         setMetrics((prev) => ({ ...prev, custom: [...prev.custom, metric] }));
@@ -52,7 +48,6 @@ export function useMetrics() {
 
   const deleteCustomMetric = useCallback(
     async (id: string): Promise<boolean> => {
-      if (!accessToken) return false;
       try {
         await service.deleteCustomMetric(accessToken, id);
         setMetrics((prev) => ({

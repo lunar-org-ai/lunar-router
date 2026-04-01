@@ -329,7 +329,9 @@ class AgentRunner:
         cleaned = _strip_markdown_json(text)
         try:
             parsed = json.loads(cleaned)
-            if not isinstance(parsed, dict):
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                parsed = parsed[0]
+            elif not isinstance(parsed, dict):
                 parsed = {"value": parsed}
             return parsed, False
         except json.JSONDecodeError as e:
