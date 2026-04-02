@@ -1824,7 +1824,7 @@ async def create_evaluation(body: dict):
 
 
 async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: list):
-    """Background task: run each sample through each model, score, store results."""
+    """Background task: run samples through models in parallel, score, store results."""
     import httpx
     from datetime import datetime, timezone
 
@@ -1833,6 +1833,7 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
         return
 
     engine_url = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+    max_concurrency = int(os.environ.get("LUNAR_EVAL_CONCURRENCY", "10"))
 
     def _update_status(status: str, **extra):
         now = datetime.now(timezone.utc)
@@ -1842,7 +1843,7 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                           "status", "config", "created_at", "updated_at"],
         )
 
-    # Gather samples from the dataset
+    # --- Gather samples from the dataset (unchanged) ---
     samples = []
     try:
         if dataset_id.startswith("cluster:"):
@@ -1872,37 +1873,11 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
         _update_status("failed", error="No samples in dataset")
         return
 
-    _update_status("running", total_samples=len(samples), completed_samples=0)
+    _update_status("running", total_samples=len(samples), completed_samples=0, failed_samples=0)
 
-    # Run each sample through each model
-    results = []
-    completed = 0
-    for sample in samples:
-        outputs = {}
-        scores = {}
-
-        for model in models:
-            try:
-                async with httpx.AsyncClient(timeout=60.0) as http:
-                    start = asyncio.get_event_loop().time()
-                    resp = await http.post(
-                        f"{engine_url}/v1/chat/completions",
-                        headers={"X-Lunar-Internal": "true"},
-                        json={
-                            "model": model,
-                            "messages": [{"role": "user", "content": sample["input"]}],
-                            "max_tokens": 150,
-                        },
-                    )
-                    elapsed = asyncio.get_event_loop().time() - start
-                    data = resp.json()
-                    output_text = data["choices"][0]["message"]["content"]
-                    cost = data.get("cost", {}).get("total_cost_usd", 0)
-                    outputs[model] = {"output": output_text, "latency": round(elapsed, 3), "cost": cost}
-            except Exception as e:
-                outputs[model] = {"output": "", "error": str(e), "latency": 0, "cost": 0}
-
-        # Score with selected metrics
+    # --- Scoring helper ---
+    def _score_sample(outputs: dict, sample: dict) -> dict:
+        scores: dict = {}
         for metric_id in metrics:
             scores[metric_id] = {}
             for model in models:
@@ -1910,7 +1885,7 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                 output = model_out.get("output", "")
                 expected = sample.get("expected", "")
                 latency = model_out.get("latency", 0)
-                cost = model_out.get("cost", 0)
+                cost_val = model_out.get("cost", 0)
 
                 if metric_id == "exact_match":
                     match = output.strip() == expected.strip()
@@ -1919,7 +1894,6 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                     found = expected.lower() in output.lower() if expected else True
                     scores[metric_id][model] = {"score": 1.0 if found else 0.0, "passed": found}
                 elif metric_id in ("similarity", "semantic_sim"):
-                    # Simple word overlap as approximation
                     out_words = set(output.lower().split())
                     exp_words = set(expected.lower().split()) if expected else out_words
                     overlap = len(out_words & exp_words) / max(len(out_words | exp_words), 1)
@@ -1930,23 +1904,84 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                     score = max(0, 1 - (latency / max_lat) ** 0.5) if latency < max_lat else 0
                     scores[metric_id][model] = {"score": round(score, 3), "passed": passed, "latency_seconds": latency, "max_acceptable": max_lat}
                 elif metric_id == "cost":
-                    passed = cost <= 0.01
-                    scores[metric_id][model] = {"score": round(max(0, 1 - cost / 0.01), 3), "passed": passed}
+                    passed = cost_val <= 0.01
+                    scores[metric_id][model] = {"score": round(max(0, 1 - cost_val / 0.01), 3), "passed": passed}
                 elif metric_id == "llm_judge":
                     scores[metric_id][model] = {"score": 0.8, "passed": True}
                 else:
                     scores[metric_id][model] = {"score": 0.5, "passed": True}
+        return scores
 
-        results.append({
+    # --- Parallel execution ---
+    semaphore = asyncio.Semaphore(max_concurrency)
+    progress_lock = asyncio.Lock()
+    completed_count = 0
+    failed_count = 0
+
+    async def _process_sample(http_client: httpx.AsyncClient, sample: dict) -> dict:
+        nonlocal completed_count, failed_count
+
+        outputs = {}
+        for model in models:
+            async with semaphore:
+                try:
+                    loop = asyncio.get_running_loop()
+                    start = loop.time()
+                    resp = await http_client.post(
+                        f"{engine_url}/v1/chat/completions",
+                        headers={"X-Lunar-Internal": "true"},
+                        json={
+                            "model": model,
+                            "messages": [{"role": "user", "content": sample["input"]}],
+                            "max_tokens": 150,
+                        },
+                    )
+                    elapsed = loop.time() - start
+                    data = resp.json()
+                    output_text = data["choices"][0]["message"]["content"]
+                    cost = data.get("cost", {}).get("total_cost_usd", 0)
+                    outputs[model] = {"output": output_text, "latency": round(elapsed, 3), "cost": cost}
+                except Exception as e:
+                    outputs[model] = {"output": "", "error": str(e), "latency": 0, "cost": 0}
+
+        scores = _score_sample(outputs, sample)
+
+        # Update progress
+        async with progress_lock:
+            completed_count += 1
+            if any("error" in outputs.get(m, {}) for m in models):
+                failed_count += 1
+            batch = max(1, len(samples) // 10)  # ~10 progress updates per eval
+            if completed_count % batch == 0 or completed_count == len(samples):
+                _update_status("running",
+                    total_samples=len(samples),
+                    completed_samples=completed_count,
+                    failed_samples=failed_count,
+                )
+
+        return {
             "sample_id": sample["id"],
             "input": sample["input"][:500],
             "expected": sample.get("expected", "")[:500],
             "outputs": outputs,
             "scores": scores,
-        })
-        completed += 1
+        }
 
-    # Build summary
+    # Run all samples in parallel with shared client and semaphore
+    async with httpx.AsyncClient(timeout=60.0) as http_client:
+        tasks = [_process_sample(http_client, s) for s in samples]
+        raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Filter out exceptions
+    results = []
+    for i, r in enumerate(raw_results):
+        if isinstance(r, Exception):
+            logger.error(f"Eval {eval_id}: sample {samples[i]['id']} failed: {r}")
+            failed_count += 1
+        else:
+            results.append(r)
+
+    # --- Build summary ---
     model_summaries = {}
     metric_summaries = {}
     for model in models:
@@ -2002,7 +2037,11 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
         [[eval_id, json.dumps(eval_results), now]],
         column_names=["evaluation_id", "results", "created_at"],
     )
-    _update_status("completed", total_samples=len(samples), completed_samples=completed)
+    _update_status("completed",
+        total_samples=len(samples),
+        completed_samples=len(results),
+        failed_samples=failed_count,
+    )
 
 
 @app.get("/v1/evaluations/{evaluation_id}/status", tags=["evaluations"])
@@ -2035,7 +2074,7 @@ async def get_evaluation_status(evaluation_id: str):
         "progress": {
             "total_samples": progress_data.get("total_samples", 0),
             "completed_samples": progress_data.get("completed_samples", 0),
-            "failed_samples": 0,
+            "failed_samples": progress_data.get("failed_samples", 0),
         },
     }
 
