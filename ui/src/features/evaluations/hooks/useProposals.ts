@@ -1,6 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { toast } from 'sonner';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type { Proposal } from '../types/evaluationsTypes';
 
@@ -9,14 +8,13 @@ function normalizeProposal(p: Record<string, unknown>): Proposal {
 }
 
 export function useProposals() {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
 
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [loading, setLoading] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!accessToken) return;
     setLoading(true);
     try {
       const res = await service.listProposals(accessToken);
@@ -26,10 +24,9 @@ export function useProposals() {
     } finally {
       setLoading(false);
     }
-  }, [accessToken, service]);
+  }, [service]);
 
   useEffect(() => {
-    if (!accessToken) return;
     let cancelled = false;
 
     setLoading(true);
@@ -46,11 +43,10 @@ export function useProposals() {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, service]);
+  }, [service]);
 
   const approveProposal = useCallback(
     async (id: string) => {
-      if (!accessToken) return null;
       setProposals((prev) => prev.filter((p) => p.id !== id)); // optimistic
       try {
         const result = await service.approveProposal(accessToken, id);
@@ -63,12 +59,11 @@ export function useProposals() {
         return null;
       }
     },
-    [accessToken, service, refresh]
+    [service, refresh]
   );
 
   const rejectProposal = useCallback(
     async (id: string, reason?: string) => {
-      if (!accessToken) return;
       setProposals((prev) => prev.filter((p) => p.id !== id)); // optimistic
       try {
         await service.rejectProposal(accessToken, id, reason);
@@ -79,7 +74,7 @@ export function useProposals() {
         refresh();
       }
     },
-    [accessToken, service, refresh]
+    [service, refresh]
   );
 
   const pendingCount = useMemo(

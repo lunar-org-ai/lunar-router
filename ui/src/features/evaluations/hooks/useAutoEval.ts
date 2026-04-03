@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type { AutoEvalConfig, AutoEvalRun } from '../types/evaluationsTypes';
 
@@ -12,7 +11,7 @@ function normalizeRun(r: Record<string, unknown>): AutoEvalRun {
 }
 
 export function useAutoEval() {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
 
   const [configs, setConfigs] = useState<AutoEvalConfig[]>([]);
@@ -20,7 +19,6 @@ export function useAutoEval() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!accessToken) return;
     let cancelled = false;
     setLoading(true);
 
@@ -37,7 +35,7 @@ export function useAutoEval() {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, service]);
+  }, [service]);
 
   const createConfig = useCallback(
     async (
@@ -46,35 +44,31 @@ export function useAutoEval() {
         'id' | 'created_at' | 'updated_at' | 'last_run_at' | 'last_run_score'
       >
     ) => {
-      if (!accessToken) return;
       const result = await service.createAutoEvalConfig(accessToken, data);
       setConfigs((prev) => [normalizeConfig(result), ...prev]);
     },
-    [accessToken, service]
+    [service]
   );
 
   const updateConfig = useCallback(
     async (id: string, updates: Partial<AutoEvalConfig>) => {
-      if (!accessToken) return;
       const result = await service.updateAutoEvalConfig(accessToken, id, updates);
       const updated = normalizeConfig(result);
       setConfigs((prev) => prev.map((c) => (c.id === id ? { ...c, ...updated } : c)));
     },
-    [accessToken, service]
+    [service]
   );
 
   const deleteConfig = useCallback(
     async (id: string) => {
-      if (!accessToken) return;
       await service.deleteAutoEvalConfig(accessToken, id);
       setConfigs((prev) => prev.filter((c) => c.id !== id));
     },
-    [accessToken, service]
+    [service]
   );
 
   const triggerRun = useCallback(
     async (configId: string) => {
-      if (!accessToken) return;
       setLoading(true);
       try {
         const result = await service.triggerAutoEvalRun(accessToken, configId);
@@ -92,25 +86,23 @@ export function useAutoEval() {
         setLoading(false);
       }
     },
-    [accessToken, service]
+    [service]
   );
 
   const loadRuns = useCallback(
     async (configId: string) => {
-      if (!accessToken) return;
       const res = await service.listAutoEvalRuns(accessToken, configId);
       setRuns((res.runs || []).map(normalizeRun));
     },
-    [accessToken, service]
+    [service]
   );
 
   const suggestMetrics = useCallback(
     async (datasetId: string) => {
-      if (!accessToken) return [];
       const res = await service.suggestMetrics(accessToken, datasetId);
       return res.suggestions || [];
     },
-    [accessToken, service]
+    [service]
   );
 
   return {

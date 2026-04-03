@@ -1,10 +1,9 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type { AvailableModel } from '../types';
 
 export function useAvailableModels() {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 
@@ -12,7 +11,6 @@ export function useAvailableModels() {
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
-    if (!accessToken) return;
     try {
       const data = await service.listAvailableModels(accessToken);
       setModels(data);
@@ -24,10 +22,10 @@ export function useAvailableModels() {
   }, [accessToken, service]);
 
   useEffect(() => {
-    if (!accessToken || loaded.current) return;
+    if (loaded.current) return;
     loaded.current = true;
     refresh();
-  }, [accessToken, refresh]);
+  }, [refresh]);
 
   return { models, loading, refresh };
 }

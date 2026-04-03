@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../../../api/evaluationsService';
 import { extractScoresByModel } from './utils';
 import type { Evaluation, ModelRanking, EvaluationResultsMap } from './types';
@@ -8,7 +7,7 @@ const MAX_RANKINGS = 6;
 const MAX_FETCH_BATCH = 20;
 
 export function useModelLeaderboard(evaluations: Evaluation[]) {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
   const serviceRef = useRef(service);
   serviceRef.current = service;
@@ -50,8 +49,6 @@ export function useModelLeaderboard(evaluations: Evaluation[]) {
 
   // Fetch missing results for completed evaluations without score data
   useEffect(() => {
-    if (!accessToken) return;
-
     const idsToFetch = evaluations
       .filter((e) => e.status === 'completed')
       .filter((e) => {
@@ -69,7 +66,7 @@ export function useModelLeaderboard(evaluations: Evaluation[]) {
     if (idsToFetch.length === 0) return;
 
     fetchMissingResults(idsToFetch, accessToken);
-  }, [accessToken, evaluations, fetchedResults, fetchMissingResults]);
+  }, [evaluations, fetchedResults, fetchMissingResults]);
 
   // Merge evaluations with fetched results
   const mergedEvaluations = useMemo(

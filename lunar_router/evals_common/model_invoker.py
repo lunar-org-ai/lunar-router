@@ -26,7 +26,10 @@ class ModelInvoker:
         self.base_url = (base_url or ENGINE_URL).rstrip("/")
 
     def _build_headers(self, authorization: str | None = None) -> dict[str, str]:
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "X-Lunar-Internal": "true",
+        }
         if authorization:
             if authorization.startswith("sk_") or authorization.startswith("pk_"):
                 headers["x-api-key"] = authorization
@@ -59,6 +62,15 @@ class ModelInvoker:
             max_tokens=max_tokens,
         )
 
+    # Models that require max_completion_tokens instead of max_tokens
+    _COMPLETION_TOKEN_MODELS = {"o1", "o1-mini", "o1-preview", "o3", "o3-mini", "o4-mini"}
+
+    @staticmethod
+    def _needs_completion_tokens(model: str) -> bool:
+        """Check if model requires max_completion_tokens instead of max_tokens."""
+        bare = model.split("/")[-1]
+        return bare in ModelInvoker._COMPLETION_TOKEN_MODELS
+
     def invoke_with_messages(
         self,
         model: str,
@@ -82,12 +94,18 @@ class ModelInvoker:
         url = f"{self.base_url}/v1/chat/completions"
         headers = self._build_headers(authorization)
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+
+        # o-series models require max_completion_tokens instead of max_tokens
+        if self._needs_completion_tokens(model):
+            payload["max_completion_tokens"] = max_tokens
+        else:
+            payload["max_tokens"] = max_tokens
+
         # Merge extra fields (tools, tool_choice, etc.)
         payload.update(extra)
 

@@ -160,13 +160,29 @@ def _run_export(config_path: str) -> None:
     print(f"[EXPORT] quantization={quant_types}")
     print(f"[EXPORT] export_gguf={export_gguf}")
 
-    # Update progress
     _update_export_progress(tenant_id, job_id, 5, "merging_adapter")
 
-    # 1. Merge LoRA adapter with base model
     merged_dir = output_dir.parent / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
 
+    if export_gguf and _try_unsloth_gguf(adapter_dir, str(output_dir), quant_types, tenant_id, job_id):
+        _update_export_progress(tenant_id, job_id, 90, "computing_results")
+        artifacts = {}
+        for f in output_dir.iterdir():
+            if f.suffix == ".gguf":
+                qt = f.stem.replace("model-", "")
+                artifacts[qt] = str(f)
+        _write_results(tenant_id, job_id, artifacts)
+        try:
+            from . import repository as _repo
+            _repo.update_job(tenant_id, job_id, {"artifacts": {"gguf": artifacts}})
+        except Exception as e:
+            print(f"[EXPORT] WARN: Failed to update artifacts: {e}")
+        _update_export_progress(tenant_id, job_id, 100, "complete")
+        print(f"[EXPORT] Export complete! Artifacts: {list(artifacts.keys())}")
+        return
+
+    # Fallback: merge then convert
     resolved_model = _resolve_base_model(base_model, adapter_dir)
     _merge_adapter(resolved_model, adapter_dir, str(merged_dir))
 
@@ -177,12 +193,10 @@ def _run_export(config_path: str) -> None:
         _update_export_progress(tenant_id, job_id, 100, "complete")
         return
 
-    # 2. Convert to GGUF
     _update_export_progress(tenant_id, job_id, 50, "converting_gguf")
 
     f16_path = output_dir / "model-f16.gguf"
 
-    # Try llama.cpp convert script
     llama_cpp_dir = _find_llama_cpp()
     if llama_cpp_dir:
         convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
@@ -190,7 +204,6 @@ def _run_export(config_path: str) -> None:
             _run_cmd(["python", str(convert_script), str(merged_dir),
                        "--outfile", str(f16_path), "--outtype", "f16"])
         else:
-            print("[EXPORT] convert_hf_to_gguf.py not found, trying pip package")
             _convert_with_pip(str(merged_dir), str(f16_path))
     else:
         _convert_with_pip(str(merged_dir), str(f16_path))
@@ -238,6 +251,109 @@ def _run_export(config_path: str) -> None:
 
     _update_export_progress(tenant_id, job_id, 100, "complete")
     print(f"[EXPORT] Export complete! Artifacts: {list(artifacts.keys())}")
+
+
+def _try_unsloth_gguf(
+    adapter_dir: str, output_dir: str, quant_types: list[str],
+    tenant_id: str, job_id: str,
+) -> bool:
+    """Try direct GGUF export via unsloth (no llama.cpp needed)."""
+    try:
+        from unsloth import FastLanguageModel
+    except ImportError:
+        print("[EXPORT] Unsloth not available, skipping direct GGUF export")
+        return False
+
+    try:
+        from peft import PeftModel as _PeftModel
+
+        adapter_cfg_path = Path(adapter_dir) / "adapter_config.json"
+        if not adapter_cfg_path.exists():
+            return False
+
+        adapter_cfg = json.loads(adapter_cfg_path.read_text())
+        base_id = adapter_cfg.get("base_model_name_or_path", "")
+        if not base_id:
+            return False
+
+        load_4bit = "4bit" in base_id.lower() or "bnb" in base_id.lower()
+        print(f"[EXPORT] Loading model for GGUF export: {base_id}")
+
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=base_id,
+            load_in_4bit=load_4bit,
+            dtype=None,
+        )
+
+        print(f"[EXPORT] Loading adapter from: {adapter_dir}")
+        model = _PeftModel.from_pretrained(model, adapter_dir)
+
+        out_path = Path(output_dir)
+        primary_qt = None
+        for qt in quant_types:
+            qt = qt.strip().lower()
+            if qt != "f16":
+                primary_qt = qt
+                break
+        primary_qt = primary_qt or "q4_k_m"
+
+        _update_export_progress(tenant_id, job_id, 30, f"exporting_gguf_{primary_qt}")
+        gguf_file = out_path / f"model-{primary_qt}.gguf"
+        print(f"[EXPORT] Saving GGUF ({primary_qt}) via unsloth...")
+        model.save_pretrained_gguf(
+            str(out_path), tokenizer,
+            quantization_method=primary_qt,
+        )
+
+        # Unsloth saves as "unsloth.{Q_TYPE}.gguf" — rename to our convention
+        for f in out_path.iterdir():
+            if f.suffix == ".gguf" and f.name != gguf_file.name:
+                f.rename(gguf_file)
+                break
+
+        if gguf_file.exists():
+            size_mb = gguf_file.stat().st_size / (1024 * 1024)
+            print(f"[EXPORT] Created {primary_qt}: {gguf_file} ({size_mb:.1f} MB)")
+        else:
+            # Maybe unsloth already named it correctly
+            gguf_files = list(out_path.glob("*.gguf"))
+            if gguf_files:
+                print(f"[EXPORT] Created GGUF: {gguf_files[0]}")
+            else:
+                print("[EXPORT] WARN: No GGUF file found after unsloth export")
+                return False
+
+        # Export additional quantizations if requested
+        for qt in quant_types:
+            qt = qt.strip().lower()
+            if qt == "f16" or qt == primary_qt:
+                continue
+            try:
+                _update_export_progress(tenant_id, job_id, 60, f"exporting_gguf_{qt}")
+                qt_file = out_path / f"model-{qt}.gguf"
+                print(f"[EXPORT] Saving additional GGUF ({qt}) via unsloth...")
+                model.save_pretrained_gguf(
+                    str(out_path), tokenizer,
+                    quantization_method=qt,
+                )
+                for f in out_path.iterdir():
+                    if f.suffix == ".gguf" and f.name != gguf_file.name and f.name != qt_file.name:
+                        f.rename(qt_file)
+                        break
+                if qt_file.exists():
+                    size_mb = qt_file.stat().st_size / (1024 * 1024)
+                    print(f"[EXPORT] Created {qt}: {qt_file} ({size_mb:.1f} MB)")
+            except Exception as e:
+                print(f"[EXPORT] WARN: Failed to export {qt}: {e}")
+
+        print("[EXPORT] Unsloth GGUF export complete!")
+        return True
+
+    except Exception as e:
+        print(f"[EXPORT] Unsloth GGUF export failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 def _try_unsloth_merge(adapter_dir: str, output_dir: str) -> bool:

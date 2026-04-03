@@ -52,6 +52,21 @@ async def start_training(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Build subprocess config
+    # Detect GPU VRAM and adjust defaults for low-memory GPUs
+    _low_vram = False
+    try:
+        import torch as _torch
+        if _torch.cuda.is_available():
+            vram_gb = _torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            _low_vram = vram_gb < 4.0
+            logger.info("GPU VRAM: %.2f GiB (low_vram=%s)", vram_gb, _low_vram)
+    except Exception:
+        pass
+
+    _default_batch = 1 if _low_vram else 2
+    _default_seq_len = 512 if _low_vram else 2048
+    _default_grad_accum = 8 if _low_vram else 4
+
     train_config = {
         "job_id": job_id,
         "tenant_id": tenant_id,
@@ -61,9 +76,9 @@ async def start_training(
         "training_mode": config.get("training_mode", "sft"),
         "max_steps": config.get("training_steps", 500),
         "learning_rate": config.get("learning_rate", 2e-4),
-        "per_device_batch_size": config.get("batch_size", 2),
-        "grad_accum_steps": config.get("grad_accum_steps", 4),
-        "max_seq_length": config.get("max_seq_length", 2048),
+        "per_device_batch_size": config.get("batch_size", _default_batch),
+        "grad_accum_steps": config.get("grad_accum_steps", _default_grad_accum),
+        "max_seq_length": config.get("max_seq_length", _default_seq_len),
         "warmup_steps": config.get("warmup_steps", 5),
         # BOND params
         "bond_beta": config.get("bond_beta", 0.5),
@@ -81,7 +96,12 @@ async def start_training(
     logger.info("Launching training subprocess for job %s", job_id)
 
     # Inherit env + skip TensorFlow imports (we only use PyTorch)
-    env = {**os.environ, "TRANSFORMERS_NO_TF": "1", "TF_CPP_MIN_LOG_LEVEL": "3"}
+    env = {
+        **os.environ,
+        "TRANSFORMERS_NO_TF": "1",
+        "TF_CPP_MIN_LOG_LEVEL": "3",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    }
 
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "lunar_router.distillation.trainer",
@@ -143,6 +163,13 @@ def _run_training(config_path: str) -> None:
     from datasets import load_dataset
 
     print(f"[TRAIN] PyTorch {torch.__version__}, CUDA={torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        print(f"[TRAIN] GPU: {torch.cuda.get_device_name(0)}, VRAM: {vram_gb:.2f} GiB")
+        if vram_gb < 4.0:
+            os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+            torch.cuda.empty_cache()
+            print("[TRAIN] Low VRAM detected — enabled expandable_segments & cleared cache")
 
     try:
         from unsloth import FastLanguageModel
@@ -281,6 +308,12 @@ def _run_sft_training(
         dataset = dataset.map(add_eos)
         print(f"[TRAIN] Using raw text field for {len(dataset)} examples")
 
+    # Detect low VRAM for extra memory optimizations
+    _low_vram_train = False
+    if torch.cuda.is_available():
+        _vram = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+        _low_vram_train = _vram < 4.0
+
     training_args = TrainingArguments(
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
@@ -297,6 +330,8 @@ def _run_sft_training(
         seed=3407,
         save_strategy="no",
         report_to="none",
+        dataloader_pin_memory=not _low_vram_train,
+        gradient_checkpointing=True,
     )
 
     trainer = SFTTrainer(

@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type { TraceIssue, TraceScan } from '../types/evaluationsTypes';
 
@@ -25,7 +24,7 @@ function normalizeIssue(raw: Record<string, unknown>): TraceIssue {
 }
 
 export function useTraceIssues() {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
 
   const [issues, setIssues] = useState<TraceIssue[]>([]);
@@ -35,7 +34,6 @@ export function useTraceIssues() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchIssues = useCallback(async () => {
-    if (!accessToken) return;
     try {
       const data = await service.listTraceIssues(accessToken);
       setIssues((data.issues || []).map(normalizeIssue));
@@ -51,7 +49,7 @@ export function useTraceIssues() {
   }, [fetchIssues]);
 
   const triggerScan = useCallback(async () => {
-    if (scanning || !accessToken) return;
+    if (scanning) return;
     setScanning(true);
 
     try {
@@ -98,11 +96,10 @@ export function useTraceIssues() {
       console.error('[useTraceIssues] scan trigger failed:', err);
       setScanning(false);
     }
-  }, [scanning, accessToken, service, fetchIssues]);
+  }, [scanning, service, fetchIssues]);
 
   const resolveIssue = useCallback(
     async (id: string) => {
-      if (!accessToken) return;
       try {
         await service.resolveTraceIssue(accessToken, id);
         setIssues((prev) => prev.map((i) => (i.id === id ? { ...i, resolved: true } : i)));

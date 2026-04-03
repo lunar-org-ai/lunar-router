@@ -59,22 +59,56 @@ async def update_settings(request: Request):
 
 @router.get("/v1/models/available")
 async def list_available_models(request: Request):
-    """List models available for evaluation by querying Go engine."""
+    """List models available for evaluation.
+
+    Queries Go engine for configured providers, then maps each provider
+    to its known models from ``model_prices.MODEL_INFO``.
+    """
     try:
         import httpx
         from ..evals_common.model_invoker import ModelInvoker
-        invoker = ModelInvoker()
-        url = f"{invoker.base_url}/v1/pricing/models"
-        resp = httpx.get(url, timeout=10)
-        if resp.status_code != 200:
-            return {"models": [], "count": 0, "by_provider": {}}
-        data = resp.json()
-        models = data.get("models", [])
+        from ..model_prices import MODEL_INFO
 
+        PROVIDER_PREFIXES: dict[str, list[str]] = {
+            "openai": ["gpt-", "o1", "o3", "o4"],
+            "anthropic": ["claude-"],
+            "google": ["gemini-"],
+            "mistral": ["mistral-", "ministral-", "codestral-", "pixtral-", "open-mistral-", "open-mixtral-"],
+            "deepseek": ["deepseek-"],
+            "groq": ["llama-", "mixtral-8x7b-32768", "gemma2-"],
+            "perplexity": ["sonar"],
+            "cerebras": ["llama3.1-"],
+            "sambanova": ["Meta-Llama-"],
+            "together": ["meta-llama/", "mistralai/", "Qwen/"],
+            "fireworks": ["accounts/fireworks/"],
+            "cohere": ["command", "c4ai-"],
+        }
+
+        invoker = ModelInvoker()
+        url = f"{invoker.base_url}/v1/config/keys"
+        resp = httpx.get(url, timeout=5)
+        configured: list[str] = []
+        if resp.status_code == 200:
+            configured = resp.json().get("configured_providers", [])
+
+        if not configured:
+            configured = ["openai"]
+
+        models: list[dict] = []
         grouped: dict[str, list] = {}
-        for m in models:
-            provider = m.get("provider", "unknown")
-            grouped.setdefault(provider, []).append(m)
+        for provider in configured:
+            prefixes = PROVIDER_PREFIXES.get(provider, [])
+            for model_key in MODEL_INFO:
+                if any(model_key.startswith(p) for p in prefixes):
+                    entry = {
+                        "id": f"{provider}/{model_key}",
+                        "name": model_key,
+                        "provider": provider,
+                        "type": "external",
+                        "available": True,
+                    }
+                    models.append(entry)
+                    grouped.setdefault(provider, []).append(entry)
 
         return {"models": models, "count": len(models), "by_provider": grouped}
     except Exception as e:

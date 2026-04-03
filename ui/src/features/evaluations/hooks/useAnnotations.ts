@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { useUser } from '@/contexts/UserContext';
 import { useEvaluationsService } from '../api/evaluationsService';
 import type {
   AnnotationQueue,
@@ -10,7 +9,7 @@ import type {
 import { downloadBlob } from '../utils';
 
 export function useAnnotations() {
-  const { accessToken } = useUser();
+  const accessToken = '';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 
@@ -20,21 +19,20 @@ export function useAnnotations() {
   const [loading, setLoading] = useState(false);
 
   const refreshQueues = useCallback(async () => {
-    if (!accessToken) return;
     try {
       const data = await service.listAnnotationQueues(accessToken);
       setQueues(data);
     } catch (err) {
       console.error('[useAnnotations] refreshQueues failed:', err);
     }
-  }, [accessToken, service]);
+  }, [service]);
 
   useEffect(() => {
-    if (!accessToken || loaded.current) return;
+    if (loaded.current) return;
     loaded.current = true;
     setLoading(true);
     refreshQueues().finally(() => setLoading(false));
-  }, [accessToken, refreshQueues]);
+  }, [refreshQueues]);
 
   const createQueue = useCallback(
     async (data: {
@@ -44,7 +42,6 @@ export function useAnnotations() {
       evaluationId?: string;
       rubric: AnnotationRubric;
     }) => {
-      if (!accessToken) return;
       const rubric = data.rubric.criteria.map((c) => ({
         name: c.name,
         description: c.description,
@@ -58,21 +55,19 @@ export function useAnnotations() {
       });
       setQueues((prev) => [queue, ...prev]);
     },
-    [accessToken, service]
+    [service]
   );
 
   const deleteQueue = useCallback(
     async (id: string) => {
-      if (!accessToken) return;
       await service.deleteAnnotationQueue(accessToken, id);
       setQueues((prev) => prev.filter((q) => q.id !== id));
     },
-    [accessToken, service]
+    [service]
   );
 
   const loadItems = useCallback(
     async (queueId: string) => {
-      if (!accessToken) return;
       setLoading(true);
       try {
         const [allItems, next] = await Promise.all([
@@ -87,12 +82,11 @@ export function useAnnotations() {
         setLoading(false);
       }
     },
-    [accessToken, service]
+    [service]
   );
 
   const getNextItem = useCallback(
     async (queueId: string) => {
-      if (!accessToken) return;
       try {
         const next = await service.getNextAnnotationItem(accessToken, queueId);
         setCurrentItem(next);
@@ -101,12 +95,12 @@ export function useAnnotations() {
         setCurrentItem(null);
       }
     },
-    [accessToken, service]
+    [service]
   );
 
   const submitAnnotation = useCallback(
     async (itemId: string, scores: Record<string, number>, notes?: string) => {
-      if (!accessToken || !currentItem) return;
+      if (!currentItem) return;
       const result = await service.submitAnnotationItem(
         accessToken,
         currentItem.queue_id,
@@ -121,12 +115,12 @@ export function useAnnotations() {
         )
       );
     },
-    [accessToken, service, currentItem]
+    [service, currentItem]
   );
 
   const skipItem = useCallback(
     async (itemId: string) => {
-      if (!accessToken || !currentItem) return;
+      if (!currentItem) return;
       const result = await service.skipAnnotationItem(accessToken, currentItem.queue_id, itemId);
       setItems((prev) => prev.map((i) => (i.id === itemId ? result : i)));
       setQueues((prev) =>
@@ -135,12 +129,11 @@ export function useAnnotations() {
         )
       );
     },
-    [accessToken, service, currentItem]
+    [service, currentItem]
   );
 
   const exportAnnotations = useCallback(
     async (queueId: string, format: 'json' | 'csv' = 'json') => {
-      if (!accessToken) return;
       const data = await service.exportAnnotations(accessToken, queueId, format);
 
       if (format === 'csv' && data.csv) {
@@ -157,12 +150,11 @@ export function useAnnotations() {
         );
       }
     },
-    [accessToken, service]
+    [service]
   );
 
   const getAnalytics = useCallback(
     async (queueId: string): Promise<AnnotationAnalytics | null> => {
-      if (!accessToken) return null;
       try {
         return await service.getAnnotationAnalytics(accessToken, queueId);
       } catch (err) {
@@ -170,7 +162,7 @@ export function useAnnotations() {
         return null;
       }
     },
-    [accessToken, service]
+    [service]
   );
 
   return {

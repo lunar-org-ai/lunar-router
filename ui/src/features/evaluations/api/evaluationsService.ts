@@ -998,6 +998,80 @@ export function useEvaluationsService() {
         if (!results.summary) {
           results.summary = { models: {}, metrics: {} };
         }
+
+        const summaryObj = results.summary as Record<string, unknown>;
+        if (!summaryObj.models && !summaryObj.metrics) {
+          const modelsMap: Record<
+            string,
+            {
+              total_latency: number;
+              avg_latency: number;
+              total_cost: number;
+              avg_cost: number;
+              avg_scores: Record<string, number>;
+            }
+          > = {};
+          const metricsMap: Record<string, { avg_by_model: Record<string, number> }> = {};
+
+          for (const [metricName, metricData] of Object.entries(summaryObj)) {
+            if (typeof metricData !== 'object' || metricData === null) continue;
+            const modelEntries = metricData as Record<
+              string,
+              { average?: number; count?: number; min?: number; max?: number }
+            >;
+            metricsMap[metricName] = { avg_by_model: {} };
+            for (const [modelId, stats] of Object.entries(modelEntries)) {
+              if (typeof stats !== 'object' || stats === null) continue;
+              const avg = stats.average ?? 0;
+              metricsMap[metricName].avg_by_model[modelId] = avg;
+              if (!modelsMap[modelId]) {
+                modelsMap[modelId] = {
+                  total_latency: 0,
+                  avg_latency: 0,
+                  total_cost: 0,
+                  avg_cost: 0,
+                  avg_scores: {},
+                };
+              }
+              modelsMap[modelId].avg_scores[metricName] = avg;
+            }
+          }
+
+          // Fill latency/cost from samples if available
+          if (Array.isArray(results.samples)) {
+            const modelStats: Record<string, { latencies: number[]; costs: number[] }> = {};
+            for (const sample of results.samples) {
+              if (!sample.outputs) continue;
+              for (const [modelId, output] of Object.entries(sample.outputs)) {
+                if (!modelStats[modelId]) modelStats[modelId] = { latencies: [], costs: [] };
+                if (output.latency) modelStats[modelId].latencies.push(output.latency);
+                if (output.cost) modelStats[modelId].costs.push(output.cost);
+              }
+            }
+            for (const [modelId, stats] of Object.entries(modelStats)) {
+              if (!modelsMap[modelId]) {
+                modelsMap[modelId] = {
+                  total_latency: 0,
+                  avg_latency: 0,
+                  total_cost: 0,
+                  avg_cost: 0,
+                  avg_scores: {},
+                };
+              }
+              const totalLat = stats.latencies.reduce((a, b) => a + b, 0);
+              const totalCost = stats.costs.reduce((a, b) => a + b, 0);
+              modelsMap[modelId].total_latency = totalLat;
+              modelsMap[modelId].avg_latency = stats.latencies.length
+                ? totalLat / stats.latencies.length
+                : 0;
+              modelsMap[modelId].total_cost = totalCost;
+              modelsMap[modelId].avg_cost = stats.costs.length ? totalCost / stats.costs.length : 0;
+            }
+          }
+
+          results.summary = { models: modelsMap, metrics: metricsMap };
+        }
+
         if (!results.summary.models) {
           results.summary.models = {};
         }
