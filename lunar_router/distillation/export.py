@@ -54,6 +54,7 @@ async def start_export(
         "quantization_types": config.get("quantization_types", ["q4_k_m", "q8_0"]),
         "output_dir": str(output_dir),
         "export_gguf": config.get("export_gguf", True),
+        "max_seq_length": config.get("max_seq_length", 512),
         "ch_host": os.environ.get("LUNAR_CH_HOST", "localhost"),
         "ch_port": os.environ.get("LUNAR_CH_PORT", "8123"),
     }
@@ -63,12 +64,21 @@ async def start_export(
 
     logger.info("Launching export subprocess for job %s", job_id)
 
+    env = {
+        **os.environ,
+        "TRANSFORMERS_NO_TF": "1",
+        "TF_CPP_MIN_LOG_LEVEL": "3",
+        "TORCHDYNAMO_DISABLE": "1",
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+    }
+
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-m", "lunar_router.distillation.export",
         str(config_path),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(Path(__file__).resolve().parents[2]),
+        env=env,
     )
 
     output_lines: list[str] = []
@@ -104,13 +114,20 @@ async def start_export(
 
 
 def _resolve_base_model(model_id: str, adapter_dir: str) -> str:
-    """Resolve quantized model IDs to full-precision equivalents for CPU merge."""
+    """Resolve quantized model IDs to full-precision equivalents for CPU merge.
+
+    Strategy: strip BNB quantization suffixes and keep the *unsloth* org
+    prefix so we always point at a public (non-gated) repo.  This avoids
+    hitting gated repos like meta-llama/ or mistralai/ which require auth.
+
+    Falls back to the HuggingFace Hub API to verify the resolved ID exists.
+    """
     original = model_id
 
     if "bnb-4bit" not in model_id and "bnb-8bit" not in model_id:
         return model_id
 
-    # Try adapter_config.json first
+    # Try adapter_config.json/
     adapter_config_path = Path(adapter_dir) / "adapter_config.json"
     if adapter_config_path.exists():
         try:
@@ -122,29 +139,38 @@ def _resolve_base_model(model_id: str, adapter_dir: str) -> str:
         except Exception:
             pass
 
-    # Strip unsloth quantization suffixes
+    # Strip quantization suffixes
+    org = model_id.split("/")[0] if "/" in model_id else "unsloth"
     model_name = model_id.split("/")[-1]
-    model_name = re.sub(r"-unsloth(-bnb-[48]bit)?", "", model_name)
-    model_name = re.sub(r"-bnb-[48]bit", "", model_name)
+    model_name = re.sub(r"-bnb-[48]bit$", "", model_name)
 
-    org_mappings = {
-        "Qwen3": "Qwen", "Qwen2": "Qwen", "Qwen": "Qwen",
-        "Llama": "meta-llama", "Mistral": "mistralai",
-        "Phi": "microsoft", "Gemma": "google",
-    }
-    org = "unsloth"
-    for prefix, hf_org in org_mappings.items():
-        if model_name.startswith(prefix):
-            org = hf_org
-            break
+    candidates = []
+    if org != "unsloth":
+        candidates.append(f"unsloth/{model_name}")
+    candidates.append(f"{org}/{model_name}")
 
-    resolved = f"{org}/{model_name}"
-    print(f"[EXPORT] Resolved quantized model: {original} → {resolved}")
+    # 3. Verify which candidate actually exists on HuggingFace
+    try:
+        from huggingface_hub import model_info
+        for candidate in candidates:
+            try:
+                model_info(candidate)
+                print(f"[EXPORT] Resolved quantized model: {original} → {candidate}")
+                return candidate
+            except Exception:
+                continue
+    except ImportError:
+        pass
+
+    resolved = candidates[0]
+    print(f"[EXPORT] Resolved quantized model (unverified): {original} → {resolved}")
     return resolved
 
 
 def _run_export(config_path: str) -> None:
     """Execute export. Called as __main__ in a subprocess."""
+    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+
     config = json.loads(Path(config_path).read_text())
 
     job_id = config["job_id"]
@@ -154,18 +180,30 @@ def _run_export(config_path: str) -> None:
     quant_types = config.get("quantization_types", ["q4_k_m", "q8_0"])
     output_dir = Path(config["output_dir"])
     export_gguf = config.get("export_gguf", True)
+    max_seq_length = config.get("max_seq_length", 512)
+
+    # Clear GPU cache before loading model
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            print(f"[EXPORT] GPU: {torch.cuda.get_device_name(0)}, "
+                  f"VRAM: {torch.cuda.get_device_properties(0).total_memory / (1024**3):.2f} GiB")
+    except Exception:
+        pass
 
     print(f"[EXPORT] job={job_id} base={base_model}")
     print(f"[EXPORT] adapter={adapter_dir}")
     print(f"[EXPORT] quantization={quant_types}")
     print(f"[EXPORT] export_gguf={export_gguf}")
+    print(f"[EXPORT] max_seq_length={max_seq_length}")
 
     _update_export_progress(tenant_id, job_id, 5, "merging_adapter")
 
     merged_dir = output_dir.parent / "merged"
     merged_dir.mkdir(parents=True, exist_ok=True)
 
-    if export_gguf and _try_unsloth_gguf(adapter_dir, str(output_dir), quant_types, tenant_id, job_id):
+    if export_gguf and _try_unsloth_gguf(adapter_dir, str(output_dir), quant_types, tenant_id, job_id, max_seq_length):
         _update_export_progress(tenant_id, job_id, 90, "computing_results")
         artifacts = {}
         for f in output_dir.iterdir():
@@ -184,7 +222,7 @@ def _run_export(config_path: str) -> None:
 
     # Fallback: merge then convert
     resolved_model = _resolve_base_model(base_model, adapter_dir)
-    _merge_adapter(resolved_model, adapter_dir, str(merged_dir))
+    _merge_adapter(resolved_model, adapter_dir, str(merged_dir), max_seq_length)
 
     _update_export_progress(tenant_id, job_id, 40, "merged")
 
@@ -201,7 +239,7 @@ def _run_export(config_path: str) -> None:
     if llama_cpp_dir:
         convert_script = llama_cpp_dir / "convert_hf_to_gguf.py"
         if convert_script.exists():
-            _run_cmd(["python", str(convert_script), str(merged_dir),
+            _run_cmd([sys.executable, str(convert_script), str(merged_dir),
                        "--outfile", str(f16_path), "--outtype", "f16"])
         else:
             _convert_with_pip(str(merged_dir), str(f16_path))
@@ -255,7 +293,7 @@ def _run_export(config_path: str) -> None:
 
 def _try_unsloth_gguf(
     adapter_dir: str, output_dir: str, quant_types: list[str],
-    tenant_id: str, job_id: str,
+    tenant_id: str, job_id: str, max_seq_length: int = 512,
 ) -> bool:
     """Try direct GGUF export via unsloth (no llama.cpp needed)."""
     try:
@@ -265,6 +303,10 @@ def _try_unsloth_gguf(
         return False
 
     try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         from peft import PeftModel as _PeftModel
 
         adapter_cfg_path = Path(adapter_dir) / "adapter_config.json"
@@ -277,12 +319,14 @@ def _try_unsloth_gguf(
             return False
 
         load_4bit = "4bit" in base_id.lower() or "bnb" in base_id.lower()
-        print(f"[EXPORT] Loading model for GGUF export: {base_id}")
+        print(f"[EXPORT] Loading model for GGUF export: {base_id} (max_seq_length={max_seq_length})")
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=base_id,
+            max_seq_length=max_seq_length,
             load_in_4bit=load_4bit,
             dtype=None,
+            device_map="sequential",
         )
 
         print(f"[EXPORT] Loading adapter from: {adapter_dir}")
@@ -356,7 +400,7 @@ def _try_unsloth_gguf(
         return False
 
 
-def _try_unsloth_merge(adapter_dir: str, output_dir: str) -> bool:
+def _try_unsloth_merge(adapter_dir: str, output_dir: str, max_seq_length: int = 512) -> bool:
     """Try merging using unsloth — handles quantized models without gated repo access."""
     try:
         from unsloth import FastLanguageModel
@@ -365,6 +409,10 @@ def _try_unsloth_merge(adapter_dir: str, output_dir: str) -> bool:
         return False
 
     try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         from peft import PeftModel as _PeftModel
 
         # Read base model from adapter config
@@ -380,12 +428,14 @@ def _try_unsloth_merge(adapter_dir: str, output_dir: str) -> bool:
             return False
 
         load_4bit = "4bit" in base_id.lower() or "bnb" in base_id.lower()
-        print(f"[EXPORT] Loading base model via unsloth: {base_id} (4bit={load_4bit})")
+        print(f"[EXPORT] Loading base model via unsloth: {base_id} (4bit={load_4bit}, max_seq_length={max_seq_length})")
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=base_id,
+            max_seq_length=max_seq_length,
             load_in_4bit=load_4bit,
             dtype=None,
+            device_map="sequential",
         )
 
         print(f"[EXPORT] Loading adapter from: {adapter_dir}")
@@ -403,45 +453,80 @@ def _try_unsloth_merge(adapter_dir: str, output_dir: str) -> bool:
         return False
 
 
-def _merge_adapter(base_model_id: str, adapter_dir: str, output_dir: str) -> None:
+def _merge_adapter(base_model_id: str, adapter_dir: str, output_dir: str, max_seq_length: int = 512) -> None:
     """Merge LoRA adapter with base model."""
     print(f"[EXPORT] Merging adapter with base model: {base_model_id}")
 
     # Try unsloth merge first — works with quantized models and avoids gated repo issues
-    if _try_unsloth_merge(adapter_dir, str(Path(output_dir))):
+    if _try_unsloth_merge(adapter_dir, str(Path(output_dir)), max_seq_length):
         return
 
-    # Fallback: standard transformers merge (requires full-precision base model access)
+    # Fallback: standard transformers merge — requires a FULL PRECISION base model
+    # (not BNB-quantized) so the merged result has clean fp16 tensors that
+    # convert_hf_to_gguf can handle.
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
-    print(f"[EXPORT] Loading base model (transformers fallback)...")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_id,
-        torch_dtype=torch.float16,
-        device_map="cpu",
-        trust_remote_code=True,
-    )
+    # Build candidate list: resolved (non-quantized) first, quantized last
+    # The resolved ID (base_model_id) should already be non-quantized
+    # (e.g. unsloth/Llama-3.2-1B-Instruct — public, full precision)
+    model_ids_to_try = [base_model_id]
+    adapter_cfg_path = Path(adapter_dir) / "adapter_config.json"
+    if adapter_cfg_path.exists():
+        try:
+            cfg = json.loads(adapter_cfg_path.read_text())
+            orig_id = cfg.get("base_model_name_or_path", "")
+            if orig_id and orig_id != base_model_id:
+                # Add quantized model as last resort only
+                model_ids_to_try.append(orig_id)
+        except Exception:
+            pass
 
-    print(f"[EXPORT] Loading adapter from: {adapter_dir}")
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
+    last_error = None
+    for mid in model_ids_to_try:
+        try:
+            # Skip BNB-quantized models — they produce quantized tensors
+            # that convert_hf_to_gguf cannot handle
+            is_quantized = any(q in mid.lower() for q in ("bnb-4bit", "bnb-8bit", "gptq", "awq"))
+            if is_quantized:
+                print(f"[EXPORT] Skipping quantized model for merge: {mid}")
+                continue
 
-    print("[EXPORT] Merging...")
-    merged = model.merge_and_unload()
+            print(f"[EXPORT] Loading base model (transformers fallback): {mid}")
+            base_model = AutoModelForCausalLM.from_pretrained(
+                mid,
+                torch_dtype=torch.float16,
+                device_map="cpu",
+                trust_remote_code=True,
+            )
 
-    print(f"[EXPORT] Saving merged model to: {output_dir}")
-    merged.save_pretrained(output_dir, safe_serialization=True)
+            print(f"[EXPORT] Loading adapter from: {adapter_dir}")
+            model = PeftModel.from_pretrained(base_model, adapter_dir)
 
-    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
-    tokenizer.save_pretrained(output_dir)
+            print("[EXPORT] Merging...")
+            merged = model.merge_and_unload()
 
-    print("[EXPORT] Merge complete!")
+            print(f"[EXPORT] Saving merged model to: {output_dir}")
+            merged.save_pretrained(output_dir, safe_serialization=True)
+
+            tokenizer = AutoTokenizer.from_pretrained(mid, trust_remote_code=True)
+            tokenizer.save_pretrained(output_dir)
+
+            print("[EXPORT] Merge complete!")
+            return
+        except (OSError, Exception) as e:
+            print(f"[EXPORT] Failed to load {mid}: {e}")
+            last_error = e
+            continue
+
+    raise RuntimeError(f"Could not load base model for merge: {last_error}")
 
 
 def _find_llama_cpp() -> Path | None:
     """Find llama.cpp installation."""
     candidates = [
+        Path.home() / ".unsloth" / "llama.cpp",
         Path("/opt/llama.cpp"),
         Path.home() / "llama.cpp",
         Path("llama.cpp"),
@@ -483,7 +568,7 @@ def _find_quantize_binary(llama_cpp_dir: Path | None) -> Path | None:
 def _convert_with_pip(model_dir: str, output_path: str) -> None:
     """Try converting using pip-installed gguf package."""
     try:
-        _run_cmd(["python", "-m", "gguf.convert",
+        _run_cmd([sys.executable, "-m", "gguf.convert",
                    "--model", model_dir, "--outfile", output_path, "--outtype", "f16"])
     except Exception:
         # Fallback: try the convert script from llama-cpp-python
@@ -492,7 +577,7 @@ def _convert_with_pip(model_dir: str, output_path: str) -> None:
             scripts_dir = Path(llama_cpp.__file__).parent.parent
             convert_script = scripts_dir / "scripts" / "convert_hf_to_gguf.py"
             if convert_script.exists():
-                _run_cmd(["python", str(convert_script), model_dir,
+                _run_cmd([sys.executable, str(convert_script), model_dir,
                            "--outfile", output_path, "--outtype", "f16"])
             else:
                 raise RuntimeError("No GGUF conversion tool found")
@@ -506,10 +591,15 @@ def _convert_with_pip(model_dir: str, output_path: str) -> None:
 def _run_cmd(cmd: list[str], cwd: Path | str | None = None) -> None:
     """Run a shell command."""
     print(f"[CMD] {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd)
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     if result.stdout:
         for line in result.stdout.strip().split("\n")[-5:]:
             print(f"  {line}")
+    if result.returncode != 0:
+        err_msg = result.stderr.strip() if result.stderr else "unknown error"
+        for line in err_msg.split("\n")[-10:]:
+            print(f"  [ERR] {line}")
+        raise subprocess.CalledProcessError(result.returncode, cmd)
 
 
 def _update_export_progress(tenant_id: str, job_id: str, pct: int, step: str) -> None:

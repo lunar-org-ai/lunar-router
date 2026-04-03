@@ -22,6 +22,9 @@ trl>=0.7.0
 peft>=0.6.0
 bitsandbytes>=0.41.0
 
+# --- GGUF Export ---
+gguf>=0.6.0
+
 # --- Utilities ---
 sentencepiece>=0.2.0
 protobuf>=3.20.0
