@@ -116,9 +116,50 @@ try:
     )
     from .profiler.model_profiler import ModelProfiler
 
+    from .training.auto_trainer import AutoTrainer, AutoTrainConfig, AutoTrainResult
+
     _TRAINING_AVAILABLE = True
 except ImportError:
     _TRAINING_AVAILABLE = False
+
+# Augmentation
+from .augmentation import (
+    LLMJudge,
+    JudgeVerdict,
+    PreferencePair,
+    PreferenceDataset,
+    GoldenAugmenter,
+    AugmentedSample,
+)
+
+# Feedback loop
+from .feedback import (
+    TraceToTraining,
+    ProductionPsiUpdate,
+    DriftDetector,
+    DriftReport,
+    IncrementalUpdater,
+    UpdateResult,
+)
+
+# Evaluation framework
+from .evaluation import (
+    RouterEvaluator,
+    EvaluationResult,
+    ParetoPoint,
+    ResponseCache,
+    CachedResponse,
+    compute_auroc,
+    compute_apgr,
+    compute_cpt,
+    compute_pgr_at_savings,
+    compute_win_rate,
+    RoutingMetrics,
+    RandomBaseline,
+    OracleBaseline,
+    AlwaysStrongBaseline,
+    AlwaysWeakBaseline,
+)
 
 # High-level convenience functions
 from .loader import load_router, create_router, load_router_from_state
@@ -204,6 +245,36 @@ __all__ = [
     "path",
     "Hub",
     "LUNAR_DATA_HOME",
+    # Augmentation
+    "LLMJudge",
+    "JudgeVerdict",
+    "PreferencePair",
+    "PreferenceDataset",
+    "GoldenAugmenter",
+    "AugmentedSample",
+    # Feedback loop
+    "TraceToTraining",
+    "ProductionPsiUpdate",
+    "DriftDetector",
+    "DriftReport",
+    "IncrementalUpdater",
+    "UpdateResult",
+    # Evaluation
+    "RouterEvaluator",
+    "EvaluationResult",
+    "ParetoPoint",
+    "ResponseCache",
+    "CachedResponse",
+    "compute_auroc",
+    "compute_apgr",
+    "compute_cpt",
+    "compute_pgr_at_savings",
+    "compute_win_rate",
+    "RoutingMetrics",
+    "RandomBaseline",
+    "OracleBaseline",
+    "AlwaysStrongBaseline",
+    "AlwaysWeakBaseline",
 ]
 
 # Add training exports if available
@@ -222,4 +293,7 @@ if _TRAINING_AVAILABLE:
         "quick_train",
         "TrainingConfig",
         "TrainingResult",
+        "AutoTrainer",
+        "AutoTrainConfig",
+        "AutoTrainResult",
     ])

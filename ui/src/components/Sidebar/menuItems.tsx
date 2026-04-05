@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  Brain,
   Database,
   Layers,
   Route,
@@ -58,6 +59,19 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/distill-metrics',
         icon: <Activity size={20} />,
         description: 'Evaluation metrics & experiments',
+      },
+    ],
+  },
+  {
+    id: 'intelligence',
+    label: 'INTELLIGENCE',
+    items: [
+      {
+        label: 'Router Intelligence',
+        value: 'router-intelligence',
+        path: '/router-intelligence',
+        icon: <Brain size={20} />,
+        description: 'Router efficiency, model performance & training',
       },
     ],
   },

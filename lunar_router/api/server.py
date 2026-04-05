@@ -26,6 +26,10 @@ from .schemas import (
     StatsResponse,
     HealthResponse,
     ErrorResponse,
+    KpiValue,
+    EfficiencyResponse,
+    ModelPerformanceResponse,
+    TrainingActivityResponse,
 )
 from ..router.uniroute import UniRouteRouter
 from ..models.llm_profile import LLMProfile
@@ -2297,6 +2301,357 @@ async def analytics_summary(hours: int = 24):
 
     start = datetime.now(timezone.utc) - timedelta(hours=hours)
     return query_summary(start=start)
+
+
+# --- Router Intelligence ---
+
+
+@app.get("/v1/intelligence/efficiency", response_model=EfficiencyResponse, tags=["intelligence"])
+async def intelligence_efficiency(days: int = 30):
+    """Router efficiency: cost savings, quality, model distribution."""
+    from datetime import datetime, timedelta, timezone
+
+    empty = EfficiencyResponse(
+        kpis={
+            "cost_saved": KpiValue(value=0),
+            "quality_score": KpiValue(value=0),
+            "avg_cost_per_request": KpiValue(value=0),
+            "requests_routed": KpiValue(value=0),
+        },
+    )
+
+    # Try to get data from the in-memory router stats first
+    has_router = False
+    try:
+        r = get_router()
+        stats = r.stats
+        profiles = r.registry.get_all()
+        has_router = bool(profiles)
+    except Exception:
+        pass
+
+    # Safely get ClickHouse client
+    from ..storage.clickhouse_client import get_client
+    try:
+        ch = get_client()
+    except Exception:
+        ch = None
+
+    # Compute from in-memory router stats if available
+    model_breakdown = []
+
+    if has_router and stats.total_requests > 0:
+        profile_map = {p.model_id: p for p in profiles}
+        max_cost = max(p.cost_per_1k_tokens for p in profiles)
+        total_reqs = stats.total_requests
+        actual_cost = 0.0
+        for model_id, count in stats.model_selections.items():
+            p = profile_map.get(model_id)
+            cost = p.cost_per_1k_tokens if p else 0.0
+            accuracy = (1.0 - p.overall_error_rate) if p else 0.0
+            actual_cost += cost * count
+            traffic_pct = (count / total_reqs * 100) if total_reqs > 0 else 0.0
+            model_breakdown.append({
+                "model": model_id, "requests": count,
+                "accuracy": round(accuracy, 4), "avg_cost": round(cost, 8),
+                "traffic_pct": round(traffic_pct, 1),
+            })
+        baseline_cost = max_cost * total_reqs
+        cost_saved = baseline_cost - actual_cost
+        avg_cost = actual_cost / total_reqs
+        quality = 1.0 - stats.avg_expected_error
+        kpis = {
+            "cost_saved": KpiValue(value=round(cost_saved, 6)),
+            "quality_score": KpiValue(value=round(quality, 4)),
+            "avg_cost_per_request": KpiValue(value=round(avg_cost, 8)),
+            "requests_routed": KpiValue(value=total_reqs),
+        }
+
+    elif ch is not None:
+        # Fallback: compute from ClickHouse traces directly
+        try:
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+            r_summary = ch.query(
+                "SELECT selected_model, count() AS cnt, sum(total_cost_usd) AS total_cost, "
+                "avg(total_cost_usd) AS avg_cost "
+                "FROM llm_traces WHERE timestamp >= {start:DateTime64(3)} "
+                "GROUP BY selected_model ORDER BY cnt DESC",
+                parameters={"start": start},
+            )
+            total_reqs = 0
+            total_cost = 0.0
+            max_cost_per_req = 0.0
+            for row in r_summary.result_rows:
+                model, cnt, model_total, model_avg = str(row[0]), int(row[1]), float(row[2]), float(row[3])
+                total_reqs += cnt
+                total_cost += model_total
+                if model_avg > max_cost_per_req:
+                    max_cost_per_req = model_avg
+                model_breakdown.append({
+                    "model": model, "requests": cnt,
+                    "accuracy": 0, "avg_cost": round(model_avg, 8),
+                    "traffic_pct": 0,
+                })
+            # Compute traffic percentages
+            for row in model_breakdown:
+                row["traffic_pct"] = round(row["requests"] / total_reqs * 100, 1) if total_reqs > 0 else 0
+            avg_cost = total_cost / total_reqs if total_reqs > 0 else 0
+            baseline_cost = max_cost_per_req * total_reqs
+            cost_saved = baseline_cost - total_cost
+            kpis = {
+                "cost_saved": KpiValue(value=round(cost_saved, 6)),
+                "quality_score": KpiValue(value=0),
+                "avg_cost_per_request": KpiValue(value=round(avg_cost, 8)),
+                "requests_routed": KpiValue(value=total_reqs),
+            }
+        except Exception:
+            return empty
+    else:
+        return empty
+
+    # ClickHouse time-series data (optional)
+    model_distribution = []
+    cost_savings_trend = []
+    if ch is not None:
+        try:
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+            r_dist = ch.query(
+                "SELECT toDate(timestamp) AS day, selected_model, count() AS cnt "
+                "FROM llm_traces WHERE timestamp >= {start:DateTime64(3)} "
+                "GROUP BY day, selected_model ORDER BY day",
+                parameters={"start": start},
+            )
+            # Pivot into [{date, model_a: N, model_b: N}, ...]
+            day_map: dict[str, dict] = {}
+            for row in r_dist.result_rows:
+                day_str = str(row[0])
+                model = str(row[1])
+                cnt = int(row[2])
+                if day_str not in day_map:
+                    day_map[day_str] = {"date": day_str}
+                day_map[day_str][model] = cnt
+            model_distribution = list(day_map.values())
+
+            # Get the most expensive model's avg cost for baseline calculation
+            r_max = ch.query(
+                "SELECT max(avg_cost) FROM ("
+                "  SELECT avg(total_cost_usd / greatest(total_tokens, 1) * 1000) AS avg_cost "
+                "  FROM llm_traces WHERE timestamp >= {start:DateTime64(3)} "
+                "  GROUP BY selected_model"
+                ")",
+                parameters={"start": start},
+            )
+            max_model_avg_cost = float(r_max.result_rows[0][0]) if r_max.result_rows else 0
+
+            r_cost = ch.query(
+                "SELECT toDate(timestamp) AS day, "
+                "  sum(total_cost_usd) AS actual, "
+                "  count() AS cnt, "
+                "  sum(total_tokens) AS tokens "
+                "FROM llm_traces WHERE timestamp >= {start:DateTime64(3)} "
+                "GROUP BY day ORDER BY day",
+                parameters={"start": start},
+            )
+            for row in r_cost.result_rows:
+                day_str = str(row[0])
+                actual_day = float(row[1])
+                day_cnt = int(row[2])
+                day_tokens = int(row[3])
+                # Baseline = what it would cost if all tokens used most expensive model
+                baseline_day = max_model_avg_cost * day_tokens / 1000 if max_model_avg_cost > 0 else actual_day * 2
+                cost_savings_trend.append({
+                    "date": day_str,
+                    "actual": round(actual_day, 6),
+                    "baseline": round(baseline_day, 6),
+                    "saved": round(baseline_day - actual_day, 6),
+                })
+        except Exception:
+            pass
+
+    return EfficiencyResponse(
+        kpis=kpis,
+        model_distribution=model_distribution,
+        cost_savings_trend=cost_savings_trend,
+        model_breakdown=sorted(model_breakdown, key=lambda x: -x["requests"]),
+    )
+
+
+@app.get("/v1/intelligence/models", response_model=ModelPerformanceResponse, tags=["intelligence"])
+async def intelligence_models():
+    """Model performance: profiles, cluster accuracy, leaderboard."""
+    try:
+        r = get_router()
+    except Exception:
+        return ModelPerformanceResponse()
+
+    profiles = r.registry.get_all()
+    if not profiles:
+        return ModelPerformanceResponse()
+
+    # KPIs
+    best = min(profiles, key=lambda p: p.overall_error_rate)
+    cheapest = min(profiles, key=lambda p: p.cost_per_1k_tokens)
+    best_value = max(
+        profiles,
+        key=lambda p: (1 - p.overall_error_rate) / max(p.cost_per_1k_tokens, 1e-10),
+    )
+
+    kpis = {
+        "models_profiled": len(profiles),
+        "best_model": {"model": best.model_id, "accuracy": round(best.overall_accuracy, 4)},
+        "cheapest_model": {"model": cheapest.model_id, "cost": cheapest.cost_per_1k_tokens},
+        "best_value": {
+            "model": best_value.model_id,
+            "ratio": round((1 - best_value.overall_error_rate) / max(best_value.cost_per_1k_tokens, 1e-10), 1),
+        },
+    }
+
+    # Cluster accuracy from Psi vectors
+    cluster_accuracy = []
+    for p in profiles:
+        clusters = {}
+        for i, err in enumerate(p.psi_vector.tolist()):
+            clusters[str(i)] = round(1.0 - err, 4)
+        cluster_accuracy.append({"model": p.model_id, "clusters": clusters})
+
+    # Leaderboard
+    leaderboard = []
+    for p in profiles:
+        strong = [c for c, _ in p.strongest_clusters(3)]
+        weak = [c for c, _ in p.weakest_clusters(3)]
+        leaderboard.append({
+            "model": p.model_id,
+            "accuracy": round(p.overall_accuracy, 4),
+            "cost": p.cost_per_1k_tokens,
+            "strongest_clusters": strong,
+            "weakest_clusters": weak,
+        })
+    leaderboard.sort(key=lambda x: -x["accuracy"])
+
+    # Teacher-student comparison (from distillation jobs if available)
+    teacher_student = None
+    from ..storage.clickhouse_client import get_client
+    ch = get_client()
+    if ch is not None:
+        try:
+            r_dist = ch.query(
+                "SELECT config, status FROM distillation_jobs "
+                "WHERE status = 'completed' ORDER BY created_at DESC LIMIT 1"
+            )
+            if r_dist.result_rows:
+                import json as _json
+                cfg = _json.loads(r_dist.result_rows[0][0])
+                teacher = cfg.get("teacher_model", "")
+                student = cfg.get("student_model", "")
+                teacher_profile = r.registry.get(teacher)
+                if teacher_profile:
+                    teacher_student = {
+                        "teacher": teacher,
+                        "student": student,
+                        "teacher_accuracy": round(teacher_profile.overall_accuracy, 4),
+                        "teacher_cost": teacher_profile.cost_per_1k_tokens,
+                    }
+        except Exception:
+            pass
+
+    return ModelPerformanceResponse(
+        kpis=kpis,
+        cluster_accuracy=cluster_accuracy,
+        leaderboard=leaderboard,
+        teacher_student=teacher_student,
+    )
+
+
+@app.get("/v1/intelligence/training", response_model=TrainingActivityResponse, tags=["intelligence"])
+async def intelligence_training(days: int = 30):
+    """Training activity: advisor decisions, training history, signal trends."""
+    from ..harness.memory_store import get_memory_store
+
+    store = get_memory_store()
+
+    # Query advisor decisions
+    decisions_raw = store.query(
+        agent="training_advisor",
+        category="training_decision",
+        limit=50,
+    )
+
+    advisor_decisions = []
+    signal_trends = []
+    latest_rec = {"recommendation": "none", "confidence": 0}
+
+    for entry in decisions_raw:
+        ev = getattr(entry, "evaluation", {}) or {}
+        advisor_decisions.append({
+            "id": getattr(entry, "id", ""),
+            "timestamp": getattr(entry, "created_at", ""),
+            "recommendation": ev.get("recommendation", "unknown"),
+            "confidence": ev.get("confidence", 0),
+            "reason": ev.get("reason", ""),
+            "source": ev.get("source", "heuristic"),
+            "signals": ev.get("signals", []),
+        })
+
+        # Extract signal data for trends
+        for sig in ev.get("signals", []):
+            if sig.get("name") in ("error_rate_increase", "drift_ratio", "high_severity_issues"):
+                signal_trends.append({
+                    "date": getattr(entry, "created_at", ""),
+                    "signal": sig["name"],
+                    "value": sig.get("value", 0),
+                    "triggered": sig.get("triggered", False),
+                })
+
+    if advisor_decisions:
+        latest_rec = {
+            "recommendation": advisor_decisions[0].get("recommendation", "none"),
+            "confidence": advisor_decisions[0].get("confidence", 0),
+        }
+
+    # Query training cycle results
+    training_cycles_raw = store.query(
+        agent="auto_trainer",
+        category="run_result",
+        limit=20,
+    )
+
+    training_history = []
+    training_cycles = []
+    models_updated = 0
+
+    for entry in training_cycles_raw:
+        ev = getattr(entry, "evaluation", {}) or {}
+        promoted = ev.get("promoted", False)
+        training_history.append({
+            "date": getattr(entry, "created_at", ""),
+            "promoted": promoted,
+            "reason": ev.get("reason", ""),
+        })
+        training_cycles.append({
+            "id": getattr(entry, "id", ""),
+            "timestamp": getattr(entry, "created_at", ""),
+            "promoted": promoted,
+            "reason": ev.get("reason", ""),
+            "baseline": ev.get("baseline_metrics", {}),
+            "new_metrics": ev.get("new_metrics", {}),
+        })
+        if promoted:
+            models_updated += ev.get("models_updated", 0)
+
+    kpis = {
+        "training_runs": len(training_history),
+        "last_training": training_history[0]["date"] if training_history else None,
+        "advisor_status": latest_rec,
+        "models_updated": models_updated,
+    }
+
+    return TrainingActivityResponse(
+        kpis=kpis,
+        training_history=training_history,
+        signal_trends=signal_trends,
+        advisor_decisions=advisor_decisions,
+        training_cycles=training_cycles,
+    )
 
 
 # --- Initialization (for programmatic setup) ---

@@ -43,7 +43,7 @@ export function useClusterDatasets(): UseClusterDatasetsReturn {
   const [error, setError] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
-  const [statusFilter, setStatusFilter] = useState('active');
+  const [statusFilter, setStatusFilter] = useState('all');
 
   // Load datasets on mount
   const refreshDatasets = useCallback(async () => {

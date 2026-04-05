@@ -34,6 +34,7 @@ func (s *Server) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/config/keys", s.handleListKeys)
 	mux.HandleFunc("DELETE /v1/config/keys/{provider}", s.handleDeleteKey)
 	mux.HandleFunc("POST /v1/config/reload", s.handleReloadKeys)
+	mux.HandleFunc("POST /v1/weights/reload", s.handleReloadWeights)
 	mux.HandleFunc("POST /v1/traces", s.handleIngestTraces)
 	mux.HandleFunc("POST /v1/datasets/{runId}/{clusterId}/traces", s.handleAddTracesToDataset)
 	mux.HandleFunc("POST /v1/datasets/{runId}/{clusterId}/assign", s.handleAssignTracesToDataset)
@@ -327,6 +328,50 @@ func (s *Server) handleReloadKeys(w http.ResponseWriter, r *http.Request) {
 		"message":              "keys reloaded",
 		"loaded":               loaded,
 		"configured_providers": s.Providers.ConfiguredProviders(),
+	})
+}
+
+// --- Weights Reload ---
+
+func (s *Server) handleReloadWeights(w http.ResponseWriter, r *http.Request) {
+	// Optional: accept a custom weights path in the request body
+	var body struct {
+		WeightsPath string `json:"weights_path,omitempty"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	weightsPath := body.WeightsPath
+	if weightsPath == "" {
+		weightsPath = s.Router.WeightsPath
+	}
+
+	if weightsPath == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": "no weights path configured — provide weights_path in body or start engine with --weights",
+		})
+		return
+	}
+
+	oldGen := s.Router.Generation()
+	err := s.Router.ReloadWeights(weightsPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": fmt.Sprintf("failed to reload weights: %v", err),
+		})
+		return
+	}
+
+	newGen := s.Router.Generation()
+	newState := s.Router.ClusterAssigner()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"message":        "weights reloaded",
+		"weights_path":   weightsPath,
+		"old_generation": oldGen,
+		"new_generation": newGen,
+		"num_clusters":   newState.NumClusters(),
+		"num_models":     s.Registry.Len(),
 	})
 }
 
