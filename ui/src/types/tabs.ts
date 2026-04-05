@@ -11,6 +11,8 @@ export type TabKey =
   | 'production'
   // Validate
   | 'compare'
+  // Intelligence
+  | 'router-intelligence'
   // Monitor
   | 'observability'
   | 'traces'

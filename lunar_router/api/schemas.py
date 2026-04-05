@@ -175,3 +175,39 @@ class ErrorResponse(BaseModel):
     error: str = Field(..., description="Error type")
     message: str = Field(..., description="Error message")
     details: Optional[dict[str, Any]] = Field(None, description="Additional details")
+
+
+# ── Router Intelligence ──────────────────────────────────────────────────────
+
+
+class KpiValue(BaseModel):
+    value: Any
+    delta_pct: Optional[float] = None
+
+
+class EfficiencyResponse(BaseModel):
+    """Router efficiency metrics."""
+
+    kpis: dict[str, KpiValue] = Field(default_factory=dict)
+    model_distribution: list[dict[str, Any]] = Field(default_factory=list)
+    cost_savings_trend: list[dict[str, Any]] = Field(default_factory=list)
+    model_breakdown: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ModelPerformanceResponse(BaseModel):
+    """Model performance and comparison data."""
+
+    kpis: dict[str, Any] = Field(default_factory=dict)
+    cluster_accuracy: list[dict[str, Any]] = Field(default_factory=list)
+    leaderboard: list[dict[str, Any]] = Field(default_factory=list)
+    teacher_student: Optional[dict[str, Any]] = None
+
+
+class TrainingActivityResponse(BaseModel):
+    """Auto-training activity and advisor decisions."""
+
+    kpis: dict[str, Any] = Field(default_factory=dict)
+    training_history: list[dict[str, Any]] = Field(default_factory=list)
+    signal_trends: list[dict[str, Any]] = Field(default_factory=list)
+    advisor_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    training_cycles: list[dict[str, Any]] = Field(default_factory=list)

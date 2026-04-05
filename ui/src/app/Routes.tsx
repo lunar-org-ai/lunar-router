@@ -12,6 +12,7 @@ const ClusterDatasetDetail = lazy(
   () => import('@/features/distill-dataset/components/ClusterDatasetDetailPage')
 );
 const DistillMetrics = lazy(() => import('@/features/evaluations'));
+const RouterIntelligence = lazy(() => import('@/features/router-intelligence'));
 
 export function AppRoutes() {
   return (
@@ -26,6 +27,7 @@ export function AppRoutes() {
           <Route path="distill-datasets" element={<DistillDatasets />} />
           <Route path="distill-datasets/:runId/:clusterId" element={<ClusterDatasetDetail />} />
           <Route path="distill-metrics" element={<DistillMetrics />} />
+          <Route path="router-intelligence" element={<RouterIntelligence />} />
         </Route>
 
         <Route path="*" element={<Navigate to="traces" replace />} />
