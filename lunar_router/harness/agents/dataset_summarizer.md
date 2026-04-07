@@ -1,7 +1,7 @@
 ---
 name: dataset_summarizer
 description: Generates a rich summary for a domain dataset
-model: mistral-small-latest
+model: mistral/mistral-small-latest
 temperature: 0.2
 max_tokens: 600
 output_schema:

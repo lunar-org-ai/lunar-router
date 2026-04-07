@@ -494,6 +494,7 @@ export interface TraceIssue {
   trace_output: string;
   detected_at: string;
   resolved: boolean;
+  dismissed?: boolean;
   suggested_action?: string;
   suggested_eval_config?: EvalPrefillConfig;
 }

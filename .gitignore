@@ -108,6 +108,9 @@ Thumbs.db
 .lunar/
 secrets.json
 
+# Harness memory (runtime-generated)
+lunar_router/harness/memory/*.md
+
 # Go build artifacts
 go/bin/
 

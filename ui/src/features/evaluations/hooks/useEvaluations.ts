@@ -21,7 +21,7 @@ const ACTIVE_STATUSES: EvaluationStatus[] = ['queued', 'starting', 'running'];
 const TERMINAL_STATUSES: EvaluationStatus[] = ['completed', 'failed', 'cancelled'];
 
 export function useEvaluations() {
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 

@@ -3,7 +3,7 @@ import { useEvaluationsService } from '../api/evaluationsService';
 import type { AvailableModel } from '../types';
 
 export function useAvailableModels() {
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 

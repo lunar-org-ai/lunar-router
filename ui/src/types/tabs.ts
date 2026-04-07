@@ -13,6 +13,8 @@ export type TabKey =
   | 'compare'
   // Evaluate
   | 'evaluations'
+  // Intelligence
+  | 'router-intelligence'
   // Monitor
   | 'observability'
   | 'traces'

@@ -159,10 +159,20 @@ export const UserProvider = ({ children }: UserProviderProps) => {
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
 };
 
+const FALLBACK_USER_CONTEXT: UserContextType = {
+  user: null,
+  idToken: null,
+  accessToken: null,
+  tenantId: null,
+  loading: false,
+  error: null,
+  refetchUser: async () => {},
+  apiKey: null,
+  profile: null,
+  updateProfile: async () => {},
+};
+
 export const useUser = (): UserContextType => {
   const context = useContext(UserContext);
-  if (!context) {
-    throw new Error('useUser must be used within UserProvider');
-  }
-  return context;
+  return context ?? FALLBACK_USER_CONTEXT;
 };

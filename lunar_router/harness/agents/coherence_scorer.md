@@ -1,7 +1,7 @@
 ---
 name: coherence_scorer
 description: Rates how coherent a group of prompts is (same domain/topic)
-model: mistral-small-latest
+model: mistral/mistral-small-latest
 temperature: 0.1
 max_tokens: 200
 output_schema:

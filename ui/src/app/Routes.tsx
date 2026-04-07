@@ -16,6 +16,8 @@ const DistillJobs = lazy(() => import('@/views/DistillJobs'));
 const NewDistillationJob = lazy(() => import('@/views/NewDistillationJob'));
 const DistillationJobView = lazy(() => import('@/views/DistillationJobView'));
 const DistillationResults = lazy(() => import('@/views/DistillationResults'));
+const RouterIntelligence = lazy(() => import('@/features/router-intelligence'));
+
 export function AppRoutes() {
   return (
     <Suspense fallback={<FullScreenSpinner />}>
@@ -33,7 +35,8 @@ export function AppRoutes() {
           <Route path="distill-new" element={<NewDistillationJob />} />
           <Route path="distill-job/:jobId" element={<DistillationJobView />} />
           <Route path="distill-job/:jobId/results" element={<DistillationResults />} />
-          <Route path="evaluations" element={<Evaluations />} />
+          <Route path="distill-metrics" element={<Evaluations />} />
+          <Route path="router-intelligence" element={<RouterIntelligence />} />
         </Route>
 
         <Route path="*" element={<Navigate to="traces" replace />} />

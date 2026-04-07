@@ -4,6 +4,17 @@ import type { TraceIssue, TraceScan } from '../types/evaluationsTypes';
 
 const POLL_INTERVAL_MS = 1_000;
 
+export interface ScheduleConfig {
+  enabled: boolean;
+  interval_seconds: number;
+  days_lookback: number;
+  trace_limit: number;
+  last_run_at: string | null;
+  next_run_at: string | null;
+  total_runs: number;
+  total_issues_found: number;
+}
+
 function normalizeIssue(raw: Record<string, unknown>): TraceIssue {
   return {
     id: (raw.issue_id as string) || (raw.id as string),
@@ -18,6 +29,7 @@ function normalizeIssue(raw: Record<string, unknown>): TraceIssue {
     trace_output: raw.trace_output,
     detected_at: raw.detected_at,
     resolved: raw.resolved,
+    dismissed: raw.dismissed,
     suggested_action: raw.suggested_action,
     suggested_eval_config: raw.suggested_eval_config,
   } as TraceIssue;
@@ -27,33 +39,49 @@ export function useTraceIssues() {
   const accessToken = '';
   const service = useEvaluationsService();
 
+  // Backend trace-issue endpoints don't require auth — use empty string as fallback
+  const token = accessToken ?? '';
+
   const [issues, setIssues] = useState<TraceIssue[]>([]);
   const [scanning, setScanning] = useState(false);
   const [lastScan, setLastScan] = useState<TraceScan | null>(null);
   const [loading, setLoading] = useState(true);
+  const [schedule, setSchedule] = useState<ScheduleConfig | null>(null);
+  const [scheduleRunning, setScheduleRunning] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchIssues = useCallback(async () => {
     try {
-      const data = await service.listTraceIssues(accessToken);
+      const data = await service.listTraceIssues(token);
       setIssues((data.issues || []).map(normalizeIssue));
     } catch (err) {
       console.error('[useTraceIssues] fetch failed:', err);
     } finally {
       setLoading(false);
     }
-  }, [accessToken, service]);
+  }, [token, service]);
+
+  const fetchSchedule = useCallback(async () => {
+    try {
+      const data = await service.getScheduleConfig(token);
+      setSchedule(data.schedule as ScheduleConfig);
+      setScheduleRunning(data.running as boolean);
+    } catch (err) {
+      console.error('[useTraceIssues] schedule fetch failed:', err);
+    }
+  }, [token, service]);
 
   useEffect(() => {
     fetchIssues();
-  }, [fetchIssues]);
+    fetchSchedule();
+  }, [fetchIssues, fetchSchedule]);
 
   const triggerScan = useCallback(async () => {
     if (scanning) return;
     setScanning(true);
 
     try {
-      const { scan_id: scanId } = await service.triggerTraceScan(accessToken);
+      const { scan_id: scanId } = await service.triggerTraceScan(token);
 
       setLastScan({
         id: scanId,
@@ -65,7 +93,7 @@ export function useTraceIssues() {
 
       const poll = setInterval(async () => {
         try {
-          const s = await service.getTraceScanStatus(accessToken, scanId);
+          const s = await service.getTraceScanStatus(token, scanId);
           const status = s.status as TraceScan['status'];
 
           setLastScan({
@@ -96,18 +124,45 @@ export function useTraceIssues() {
       console.error('[useTraceIssues] scan trigger failed:', err);
       setScanning(false);
     }
-  }, [scanning, service, fetchIssues]);
+  }, [scanning, token, service, fetchIssues]);
 
   const resolveIssue = useCallback(
     async (id: string) => {
       try {
-        await service.resolveTraceIssue(accessToken, id);
+        await service.resolveTraceIssue(token, id);
         setIssues((prev) => prev.map((i) => (i.id === id ? { ...i, resolved: true } : i)));
       } catch (err) {
         console.error('[useTraceIssues] resolve failed:', err);
       }
     },
-    [accessToken, service]
+    [token, service]
+  );
+
+  const dismissIssue = useCallback(
+    async (id: string, reason?: string) => {
+      try {
+        await service.dismissTraceIssue(token, id, reason);
+        setIssues((prev) =>
+          prev.map((i) => (i.id === id ? { ...i, resolved: true, dismissed: true } : i))
+        );
+      } catch (err) {
+        console.error('[useTraceIssues] dismiss failed:', err);
+      }
+    },
+    [token, service]
+  );
+
+  const updateSchedule = useCallback(
+    async (config: Partial<ScheduleConfig>) => {
+      try {
+        const data = await service.updateScheduleConfig(token, config);
+        setSchedule(data.schedule as ScheduleConfig);
+        setScheduleRunning(data.running as boolean);
+      } catch (err) {
+        console.error('[useTraceIssues] schedule update failed:', err);
+      }
+    },
+    [token, service]
   );
 
   const refresh = useCallback(() => {
@@ -121,5 +176,17 @@ export function useTraceIssues() {
     };
   }, []);
 
-  return { issues, scanning, lastScan, triggerScan, resolveIssue, refresh, loading };
+  return {
+    issues,
+    scanning,
+    lastScan,
+    triggerScan,
+    resolveIssue,
+    dismissIssue,
+    refresh,
+    loading,
+    schedule,
+    scheduleRunning,
+    updateSchedule,
+  };
 }

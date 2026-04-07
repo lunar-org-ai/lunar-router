@@ -1,4 +1,4 @@
-import { WandSparkles, ChevronRight } from 'lucide-react';
+import { WandSparkles, ChevronRight, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -19,9 +19,10 @@ interface IssueTableProps {
   issues: TraceIssue[];
   onViewDetails: (issue: TraceIssue) => void;
   onResolve: (id: string) => void;
+  onDismiss: (id: string) => void;
 }
 
-export function IssueTable({ issues, onViewDetails, onResolve }: IssueTableProps) {
+export function IssueTable({ issues, onViewDetails, onResolve, onDismiss }: IssueTableProps) {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="overflow-hidden rounded-lg border">
@@ -60,7 +61,12 @@ export function IssueTable({ issues, onViewDetails, onResolve }: IssueTableProps
                   <TableCell>
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="font-medium truncate">{issue.title}</span>
-                      {issue.resolved && (
+                      {issue.dismissed && (
+                        <Badge variant="outline" className="px-1.5 text-muted-foreground shrink-0">
+                          Dismissed
+                        </Badge>
+                      )}
+                      {issue.resolved && !issue.dismissed && (
                         <Badge variant="outline" className="px-1.5 text-muted-foreground shrink-0">
                           Resolved
                         </Badge>
@@ -93,22 +99,40 @@ export function IssueTable({ issues, onViewDetails, onResolve }: IssueTableProps
                   <TableCell>
                     <div className="flex items-center justify-end gap-1">
                       {!issue.resolved && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-7 text-muted-foreground hover:text-emerald-600 transition-colors"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onResolve(issue.id);
-                              }}
-                            >
-                              <WandSparkles className="size-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Resolve</TooltipContent>
-                        </Tooltip>
+                        <>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-7 text-muted-foreground hover:text-emerald-600 transition-colors"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onResolve(issue.id);
+                                }}
+                              >
+                                <WandSparkles className="size-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Resolve</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="size-7 text-muted-foreground hover:text-amber-600 transition-colors"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onDismiss(issue.id);
+                                }}
+                              >
+                                <XCircle className="size-4" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Not an Error</TooltipContent>
+                          </Tooltip>
+                        </>
                       )}
                       <ChevronRight className="size-4 text-border group-hover/row:text-muted-foreground transition-colors" />
                     </div>

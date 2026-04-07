@@ -11,7 +11,7 @@ import type {
 } from '../features/evaluations/types/evaluationsTypes';
 
 export function useDatasets() {
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 

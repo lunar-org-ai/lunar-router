@@ -8,7 +8,7 @@ interface MetricsState {
 }
 
 export function useMetrics() {
-  const accessToken = '';
+  const accessToken = 'no-auth';
   const service = useEvaluationsService();
   const loaded = useRef(false);
 

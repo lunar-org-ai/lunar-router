@@ -1,4 +1,13 @@
-import { BarChart3, Database, FlaskConical, Layers, Route, BookOpen, Sparkles } from 'lucide-react';
+import {
+  Activity,
+  BarChart3,
+  Brain,
+  Database,
+  Layers,
+  Route,
+  BookOpen,
+  Sparkles,
+} from 'lucide-react';
 import type { TabKey } from '../../types/tabs';
 
 export interface MenuItem {
@@ -52,18 +61,25 @@ export const MENU_SECTIONS: MenuSection[] = [
         icon: <Sparkles size={20} />,
         description: 'Distillation & fine-tuning jobs',
       },
+      {
+        label: 'Metrics',
+        value: 'distill-metrics',
+        path: '/distill-metrics',
+        icon: <Activity size={20} />,
+        description: 'Evaluation metrics & experiments',
+      },
     ],
   },
   {
-    id: 'evaluate',
-    label: 'EVALUATE',
+    id: 'intelligence',
+    label: 'INTELLIGENCE',
     items: [
       {
-        label: 'Evaluations',
-        value: 'evaluations',
-        path: '/evaluations',
-        icon: <FlaskConical size={20} />,
-        description: 'Run and manage LLM evaluations',
+        label: 'Router Intelligence',
+        value: 'router-intelligence',
+        path: '/router-intelligence',
+        icon: <Brain size={20} />,
+        description: 'Router efficiency, model performance & training',
       },
     ],
   },
