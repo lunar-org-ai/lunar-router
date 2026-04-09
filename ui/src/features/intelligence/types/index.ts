@@ -1,4 +1,4 @@
-export type IntelligenceTabId = 'overview' | 'costs' | 'performance' | 'models' | 'routing';
+export type IntelligenceTabId = 'overview' | 'costs' | 'distillation' | 'models' | 'routing';
 
 export type Period = '7d' | '14d' | '30d';
 
@@ -38,6 +38,10 @@ export interface TrainingRunDetail {
   cost: number;
   duration: string;
   reason: string;
+  teacherModel: string;
+  studentModel: string;
+  qualityScore: number;
+  status: string;
 }
 
 export interface ModelCapability {

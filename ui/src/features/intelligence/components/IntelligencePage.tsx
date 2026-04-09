@@ -1,7 +1,7 @@
 import { useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { createElement } from 'react';
-import { RefreshCw, BarChart3, DollarSign, Gauge, Layers, Route } from 'lucide-react';
+import { RefreshCw, BarChart3, DollarSign, GraduationCap, Layers, Route } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { PageHeader } from '@/components/shared/PageHeader';
@@ -18,7 +18,11 @@ import { RoutingIntelligenceTab } from './RoutingIntelligenceTab';
 const TABS: PageTab<IntelligenceTabId>[] = [
   { id: 'overview', label: 'Overview', icon: createElement(BarChart3, { className: 'size-4' }) },
   { id: 'costs', label: 'Cost Analysis', icon: createElement(DollarSign, { className: 'size-4' }) },
-  { id: 'performance', label: 'Performance', icon: createElement(Gauge, { className: 'size-4' }) },
+  {
+    id: 'distillation',
+    label: 'Distillation',
+    icon: createElement(GraduationCap, { className: 'size-4' }),
+  },
   { id: 'models', label: 'Models', icon: createElement(Layers, { className: 'size-4' }) },
   {
     id: 'routing',
@@ -27,7 +31,7 @@ const TABS: PageTab<IntelligenceTabId>[] = [
   },
 ];
 
-const VALID_TABS = new Set<string>(['overview', 'costs', 'performance', 'models', 'routing']);
+const VALID_TABS = new Set<string>(['overview', 'costs', 'distillation', 'models', 'routing']);
 const VALID_PERIODS = new Set<string>(['7d', '14d', '30d']);
 
 function parseTab(value: string | null): IntelligenceTabId {
@@ -99,7 +103,7 @@ export default function IntelligencePage() {
       <main className="mx-auto max-w-350 px-6 py-6">
         {activeTab === 'overview' && <OverviewTab data={data} />}
         {activeTab === 'costs' && <CostAnalysisTab data={data} />}
-        {activeTab === 'performance' && <PerformanceTab data={data} />}
+        {activeTab === 'distillation' && <PerformanceTab data={data} />}
         {activeTab === 'models' && <ModelsTab data={data} />}
         {activeTab === 'routing' && <RoutingIntelligenceTab data={data} />}
       </main>

@@ -192,7 +192,11 @@ function buildTrainingRuns(
       cost: r.cost,
       duration: r.duration,
       reason: r.reason,
-    }));
+      teacherModel: r.teacher_model ?? '',
+      studentModel: r.student_model ?? '',
+      qualityScore: r.quality_score ?? 0,
+      status: r.status ?? r.outcome,
+    })) as TrainingRunDetail[];
   }
 
   // Fallback: build from training_history + distillation_jobs
@@ -210,6 +214,10 @@ function buildTrainingRuns(
         cost: 0,
         duration: '\u2014',
         reason: h.reason,
+        teacherModel: '',
+        studentModel: '',
+        qualityScore: 0,
+        status: h.promoted ? 'completed' : 'failed',
       });
     }
   }
@@ -236,6 +244,10 @@ function buildTrainingRuns(
           cost: job.cost_accrued,
           duration,
           reason: 'Distillation run',
+          teacherModel: '',
+          studentModel: '',
+          qualityScore: 0,
+          status: job.status,
         });
       }
     }

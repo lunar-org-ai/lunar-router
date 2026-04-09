@@ -1,8 +1,5 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
-  Activity,
-  AlertCircle,
-  Clock,
   Brain,
   Zap,
   BarChart3,
@@ -11,19 +8,14 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  Ban,
   Download,
+  ChevronDown,
+  ChevronRight,
+  ArrowRight,
 } from 'lucide-react';
-import {
-  BarChart,
-  Bar,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Cell,
-  ResponsiveContainer,
-} from 'recharts';
+// recharts: only PieChart needed now
+import { PieChart, Pie, Cell, Label } from 'recharts';
 import {
   Card,
   CardAction,
@@ -45,8 +37,6 @@ import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
-  ChartLegend,
-  ChartLegendContent,
 } from '@/components/ui/chart';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -59,468 +49,613 @@ import {
   exportTableToCsv,
 } from '../utils/intelligenceHelpers';
 import type { IntelligenceData } from '../hooks/useIntelligenceData';
+import type { DistillationSummary } from '@/features/router-intelligence/types';
+import type { TrainingRunDetail } from '../types';
 import { MetricCard } from './shared/MetricCard';
 import { PerformanceSkeleton, EmptyState, ErrorState } from './shared';
+
+/* ── Constants ──────────────────────────────────────────────────────── */
+
+const CHART_COLORS = [
+  'var(--chart-1)',
+  'var(--chart-2)',
+  'var(--chart-3)',
+  'var(--chart-4)',
+  'var(--chart-5)',
+];
+
+const STATUS_META: Record<
+  string,
+  {
+    label: string;
+    variant: 'default' | 'secondary' | 'destructive' | 'outline';
+    icon: React.ElementType;
+  }
+> = {
+  completed: { label: 'Completed', variant: 'default', icon: CheckCircle2 },
+  failed: { label: 'Failed', variant: 'destructive', icon: XCircle },
+  running: { label: 'Running', variant: 'outline', icon: Loader2 },
+  cancelled: { label: 'Cancelled', variant: 'secondary', icon: Ban },
+};
+
+/* ── Entry ──────────────────────────────────────────────────────────── */
 
 interface PerformanceTabProps {
   data: IntelligenceData;
 }
 
 export function PerformanceTab({ data }: PerformanceTabProps) {
-  const { loading, error, training, performanceData, refreshData } = data;
+  const { loading, error, training, refreshData } = data;
 
   if (loading) return <PerformanceSkeleton />;
   if (error) return <ErrorState error={error} onRetry={refreshData} />;
-  if (!training && !performanceData)
-    return <EmptyState message="No performance data available yet." onRefresh={refreshData} />;
+  if (!training)
+    return <EmptyState message="No distillation data available yet." onRefresh={refreshData} />;
 
   return <PerformanceContent data={data} />;
 }
 
+/* ── Main content ───────────────────────────────────────────────────── */
+
 function PerformanceContent({ data }: { data: IntelligenceData }) {
-  const { training, costData, performanceData, overviewData, trainingRuns, selectedDays } = data;
+  const { training, trainingRuns, selectedDays } = data;
+  const distSummary = training?.distillation_summary ?? null;
 
-  const kpis = training?.kpis as Record<string, unknown> | undefined;
-  const advisorStatus = kpis?.advisor_status as
-    | { recommendation: string; confidence: number }
-    | undefined;
-
-  const distSummary = training?.distillation_summary;
-
-  const avgDailyCost = useMemo(() => {
-    const externalCosts = costData?.externalCosts || [];
-    const totalCost = externalCosts.reduce((sum, item) => sum + item.cost, 0);
-    return totalCost / selectedDays;
-  }, [costData, selectedDays]);
-
-  const advisorLabel = useMemo((): string => {
-    const rec = advisorStatus?.recommendation;
-    if (!rec) return 'Waiting for data';
-    return formatStatus(rec);
-  }, [advisorStatus]);
-
-  const signalChartData = useMemo(() => {
-    if (!training?.signal_trends?.length) return [];
-    const signalMap = new Map<string, Record<string, number | string>>();
-    for (const s of training.signal_trends) {
-      const dateKey = s.date.split('T')[0];
-      if (!signalMap.has(dateKey)) signalMap.set(dateKey, { date: dateKey });
-      const entry = signalMap.get(dateKey)!;
-      entry[s.signal] = s.value;
-    }
-    return Array.from(signalMap.values());
-  }, [training]);
-
-  const signalConfig = useMemo<ChartConfig>(
-    () => ({
-      error_rate_increase: { label: 'Error Rate', color: 'var(--chart-1)' },
-      drift_ratio: { label: 'Drift Ratio', color: 'var(--chart-3)' },
-      high_severity_issues: { label: 'Issues', color: 'var(--chart-2)' },
-    }),
-    []
+  const stats = useMemo(() => buildStats(trainingRuns, distSummary), [trainingRuns, distSummary]);
+  const teacherData = useMemo(
+    () => buildModelPieData(trainingRuns, 'teacherModel'),
+    [trainingRuns]
   );
-
-  const latencyP95 = overviewData?.kpis?.find((k) => k.icon === 'trending')?.value ?? '—';
-  const errorRate = overviewData?.kpis?.find((k) => k.icon === 'alert')?.value ?? '—';
-  const totalRequests = overviewData?.kpis?.find((k) => k.icon === 'activity')?.value ?? '0';
-
-  const latencyHistogram = performanceData?.latencyHistogram ?? [];
-  const latencyConfig = useMemo<ChartConfig>(
-    () => ({ count: { label: 'Requests', color: 'var(--chart-2)' } }),
-    []
+  const studentData = useMemo(
+    () => buildModelPieData(trainingRuns, 'studentModel'),
+    [trainingRuns]
   );
-
-  const errorData = performanceData?.errors ?? [];
-  const errorConfig = useMemo<ChartConfig>(
-    () => ({ errors: { label: 'Errors', color: 'var(--chart-1)' } }),
-    []
-  );
-
-  const handleExportRuns = () => {
-    const headers = ['Name', 'Date', 'Outcome', 'Confidence', 'Cost', 'Duration', 'Details'];
-    const rows = trainingRuns
-      .slice(0, 10)
-      .map((r) => [
-        r.name,
-        formatDateWithYear(r.date),
-        formatStatus(r.outcome),
-        formatPercent(r.confidence, false),
-        formatCost(r.cost),
-        r.duration,
-        r.reason,
-      ]);
-    exportTableToCsv(headers, rows, 'training-runs');
-  };
 
   return (
     <div className="space-y-8">
+      {/* KPI cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
         <MetricCard
-          label="Latency P95"
-          value={latencyP95}
-          icon={Clock}
-          tooltip="95th percentile response time across all requests"
-        />
-        <MetricCard
-          label="Error Rate"
-          value={errorRate}
-          icon={AlertCircle}
-          tooltip="Percentage of requests that resulted in an error"
-        />
-        <MetricCard
-          label="Total Requests"
-          value={totalRequests}
-          icon={Activity}
-          tooltip="Total requests processed in this period"
-        />
-        <MetricCard
-          label="Avg Daily Cost"
-          value={formatCost(avgDailyCost)}
-          icon={Zap}
-          tooltip="Average daily cost across all external API calls"
-        />
-        <MetricCard
-          label="Training Runs"
-          value={String(kpis?.training_runs ?? 0)}
+          label="Total Jobs"
+          value={String(stats.total)}
           icon={GraduationCap}
-          tooltip="Total number of model training runs executed"
+          tooltip="Total distillation jobs executed"
         />
         <MetricCard
-          label="Advisor Status"
-          value={advisorLabel}
+          label="Completed"
+          value={String(stats.completed)}
+          icon={CheckCircle2}
+          tooltip="Successfully completed distillation jobs"
+        />
+        <MetricCard
+          label="Failed"
+          value={String(stats.failed)}
+          icon={XCircle}
+          tooltip="Failed distillation jobs"
+        />
+        <MetricCard
+          label="Success Rate"
+          value={formatPercent(stats.successRate, true)}
+          icon={TrendingUp}
+          tooltip="Percentage of jobs completed successfully"
+        />
+        <MetricCard
+          label="Avg Quality"
+          value={stats.avgQuality > 0 ? formatPercent(stats.avgQuality, true) : '—'}
           icon={Brain}
-          tooltip="Current recommendation from the training advisor"
+          tooltip="Average quality score across completed runs"
+        />
+        <MetricCard
+          label="Training Cost"
+          value={formatCost(stats.totalCost)}
+          icon={Zap}
+          tooltip="Total cost of all distillation runs"
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Latency Distribution</CardTitle>
-            <CardDescription>Request count by response time bucket</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {latencyHistogram.length > 0 ? (
-              <ChartContainer config={latencyConfig} className="h-64 w-full">
-                <BarChart data={latencyHistogram}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
-                  <XAxis
-                    dataKey="bucket"
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={40} />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="count" fill="var(--chart-2)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ChartContainer>
-            ) : (
-              <ChartEmpty icon={Clock} message="No latency data yet" />
-            )}
-          </CardContent>
-        </Card>
+      {/* Distillation Pipeline */}
+      {distSummary && <PipelineCard summary={distSummary} />}
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Errors Over Time</CardTitle>
-            <CardDescription>Error occurrences by type &middot; {selectedDays}d</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {errorData.length > 0 ? (
-              <ChartContainer config={errorConfig} className="h-64 w-full">
-                <BarChart data={errorData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={35} />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <Bar dataKey="errors" fill="var(--chart-1)" radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ChartContainer>
-            ) : (
-              <ChartEmpty icon={AlertCircle} message="No error data yet" />
-            )}
-          </CardContent>
-        </Card>
+      {/* Model charts */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <ModelDonutCard
+          title="Teacher Models"
+          description="Distribution across teacher models"
+          data={teacherData.items}
+          config={teacherData.config}
+          total={teacherData.total}
+        />
+        <ModelDonutCard
+          title="Student Models"
+          description="Distribution across student models"
+          data={studentData.items}
+          config={studentData.config}
+          total={studentData.total}
+        />
       </div>
 
-      {distSummary && (
-        <Card>
-          <CardHeader>
-            <div className="flex items-center gap-2">
-              <GraduationCap className="size-4 text-muted-foreground" />
-              <CardTitle className="text-base">Distillation Pipeline</CardTitle>
+      {/* Distillation Runs table */}
+      {trainingRuns.length > 0 && <RunsTable runs={trainingRuns} days={selectedDays} />}
+    </div>
+  );
+}
+
+/* ── Pipeline Card — centered grid ──────────────────────────────────── */
+
+function PipelineCard({ summary }: { summary: DistillationSummary }) {
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <GraduationCap className="size-4 text-muted-foreground" />
+          <CardTitle className="text-base">Distillation Pipeline</CardTitle>
+        </div>
+        <CardDescription>Model training pipeline status</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5">
+        {/* Status counters — evenly spaced across card */}
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <StatusBox
+            icon={CheckCircle2}
+            iconClass="text-emerald-500"
+            bgClass="bg-emerald-500/10"
+            count={summary.completed_jobs}
+            label="Completed"
+          />
+          <StatusBox
+            icon={Loader2}
+            iconClass="text-blue-500 animate-spin"
+            bgClass="bg-blue-500/10"
+            count={summary.running_jobs}
+            label="Running"
+          />
+          <StatusBox
+            icon={XCircle}
+            iconClass="text-red-500"
+            bgClass="bg-red-500/10"
+            count={summary.failed_jobs}
+            label="Failed"
+          />
+          <StatusBox
+            icon={GraduationCap}
+            iconClass="text-muted-foreground"
+            bgClass="bg-muted"
+            count={summary.total_jobs}
+            label="Total"
+          />
+        </div>
+
+        {/* Latest completed job */}
+        {summary.latest_completed_job && (
+          <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="text-xs text-muted-foreground">Latest completed job</p>
+              <p className="text-sm font-medium">{summary.latest_completed_job.name}</p>
             </div>
-            <CardDescription>Model training pipeline status</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center gap-6">
-              <div className="flex items-center gap-2">
-                <div className="flex size-8 items-center justify-center rounded-full bg-emerald-500/10">
-                  <CheckCircle2 className="size-4 text-emerald-500" />
-                </div>
-                <div>
-                  <p className="text-lg font-semibold tabular-nums">{distSummary.completed_jobs}</p>
-                  <p className="text-xs text-muted-foreground">Completed</p>
-                </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Teacher</span>
+                <Badge variant="outline" className="text-xs font-mono">
+                  {summary.latest_completed_job.teacher_model || '—'}
+                </Badge>
               </div>
-              {distSummary.running_jobs > 0 && (
-                <div className="flex items-center gap-2">
-                  <div className="flex size-8 items-center justify-center rounded-full bg-blue-500/10">
-                    <Loader2 className="size-4 animate-spin text-blue-500" />
-                  </div>
-                  <div>
-                    <p className="text-lg font-semibold tabular-nums">{distSummary.running_jobs}</p>
-                    <p className="text-xs text-muted-foreground">Running</p>
-                  </div>
-                </div>
-              )}
-              {distSummary.failed_jobs > 0 && (
-                <div className="flex items-center gap-2">
-                  <div className="flex size-8 items-center justify-center rounded-full bg-destructive/10">
-                    <XCircle className="size-4 text-destructive" />
-                  </div>
-                  <div>
-                    <p className="text-lg font-semibold tabular-nums">{distSummary.failed_jobs}</p>
-                    <p className="text-xs text-muted-foreground">Failed</p>
-                  </div>
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <div className="flex size-8 items-center justify-center rounded-full bg-muted">
-                  <GraduationCap className="size-4 text-muted-foreground" />
-                </div>
-                <div>
-                  <p className="text-lg font-semibold tabular-nums">{distSummary.total_jobs}</p>
-                  <p className="text-xs text-muted-foreground">Total jobs</p>
-                </div>
+              <ArrowRight className="hidden size-3 text-muted-foreground sm:block" />
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs text-muted-foreground">Student</span>
+                <Badge variant="secondary" className="text-xs font-mono">
+                  {summary.latest_completed_job.student_model || '—'}
+                </Badge>
               </div>
+              {summary.latest_completed_job.cost > 0 && (
+                <Badge variant="outline" className="text-xs">
+                  {formatCost(summary.latest_completed_job.cost)}
+                </Badge>
+              )}
             </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
-            {distSummary.latest_completed_job && (
-              <div className="flex flex-wrap items-center gap-4 rounded-lg border bg-muted/30 px-4 py-3">
-                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  Latest
-                </span>
-                <span className="text-sm font-semibold">
-                  {distSummary.latest_completed_job.name}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Teacher:</span>
-                  <Badge variant="outline" className="text-xs">
-                    {distSummary.latest_completed_job.teacher_model || '—'}
-                  </Badge>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-muted-foreground">Student:</span>
-                  <Badge variant="secondary" className="text-xs">
-                    {distSummary.latest_completed_job.student_model || '—'}
-                  </Badge>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {trainingRuns.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Training Runs History</CardTitle>
-            <CardDescription>
-              Detailed history of all training runs &middot; {selectedDays}d
-            </CardDescription>
-            <CardAction>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 gap-1.5"
-                    onClick={handleExportRuns}
-                  >
-                    <Download className="size-3" />
-                    CSV
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Export training runs as CSV</TooltipContent>
-              </Tooltip>
-            </CardAction>
-          </CardHeader>
-          <CardContent className="px-6">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Outcome</TableHead>
-                  <TableHead className="text-right">Confidence</TableHead>
-                  <TableHead className="text-right">Cost</TableHead>
-                  <TableHead>Duration</TableHead>
-                  <TableHead>Details</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {trainingRuns.slice(0, 10).map((run) => (
-                  <TableRow key={run.runId}>
-                    <TableCell className="max-w-48 truncate font-medium">{run.name}</TableCell>
-                    <TableCell className="text-sm text-muted-foreground">
-                      {formatDateWithYear(run.date)}
-                    </TableCell>
-                    <TableCell>
-                      <Badge
-                        variant={run.outcome === 'promoted' ? 'default' : 'secondary'}
-                        className="text-xs"
-                      >
-                        {formatStatus(run.outcome)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {run.confidence > 0 ? formatPercent(run.confidence, false) : '—'}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {formatCost(run.cost)}
-                    </TableCell>
-                    <TableCell className="text-sm text-muted-foreground">{run.duration}</TableCell>
-                    <TableCell className="max-w-48 truncate text-sm text-muted-foreground">
-                      {run.reason}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      )}
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Training History</CardTitle>
-            <CardDescription>Run outcomes over time</CardDescription>
-            <CardAction>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="flex items-center gap-1">
-                  <span className="inline-block size-2.5 rounded-full bg-chart-2" />
-                  Promoted
-                </span>
-                <span className="flex items-center gap-1">
-                  <span className="inline-block size-2.5 rounded-full bg-chart-1" />
-                  Rejected
-                </span>
-              </div>
-            </CardAction>
-          </CardHeader>
-          <CardContent>
-            {training?.training_history && training.training_history.length > 0 ? (
-              <ResponsiveContainer width="100%" height={250}>
-                <BarChart
-                  data={training.training_history.map((h, i) => ({
-                    ...h,
-                    idx: i + 1,
-                    value: 1,
-                  }))}
-                >
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
-                  <XAxis
-                    dataKey="idx"
-                    tick={{ fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    label={{
-                      value: 'Run #',
-                      position: 'insideBottom',
-                      offset: -5,
-                      style: { fontSize: 11, fill: 'var(--color-muted-foreground)' },
-                    }}
-                  />
-                  <YAxis hide />
-                  <ChartTooltip
-                    content={({ active, payload }) => {
-                      if (!active || !payload?.[0]) return null;
-                      const d = payload[0].payload as {
-                        promoted: boolean;
-                        reason: string;
-                        date: string;
-                      };
-                      return (
-                        <div className="rounded-md border bg-popover px-3 py-2 text-sm">
-                          <p className="font-medium">{d.promoted ? 'Promoted' : 'Rejected'}</p>
-                          <p className="text-muted-foreground">{d.reason}</p>
-                          <p className="mt-1 text-xs text-muted-foreground">
-                            {formatDateWithYear(d.date)}
-                          </p>
-                        </div>
-                      );
-                    }}
-                  />
-                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                    {training.training_history.map((h, i) => (
-                      <Cell key={i} fill={h.promoted ? 'var(--chart-2)' : 'var(--chart-1)'} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
-            ) : (
-              <ChartEmpty icon={BarChart3} message="No training runs yet" />
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Signal Trends</CardTitle>
-            <CardDescription>Drift and issue signals by type over time</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {signalChartData.length > 0 ? (
-              <ChartContainer config={signalConfig} className="h-62.5 w-full">
-                <LineChart data={signalChartData}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
-                  <XAxis dataKey="date" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={35} />
-                  <ChartTooltip content={<ChartTooltipContent />} />
-                  <ChartLegend content={<ChartLegendContent />} />
-                  <Line
-                    type="monotone"
-                    dataKey="error_rate_increase"
-                    stroke="var(--chart-1)"
-                    strokeWidth={1.5}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="drift_ratio"
-                    stroke="var(--chart-3)"
-                    strokeWidth={1.5}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="high_severity_issues"
-                    stroke="var(--chart-2)"
-                    strokeWidth={1.5}
-                    dot={false}
-                  />
-                </LineChart>
-              </ChartContainer>
-            ) : (
-              <ChartEmpty icon={TrendingUp} message="No signal data yet" />
-            )}
-          </CardContent>
-        </Card>
+function StatusBox({
+  icon: Icon,
+  iconClass,
+  bgClass,
+  count,
+  label,
+}: {
+  icon: React.ElementType;
+  iconClass: string;
+  bgClass: string;
+  count: number;
+  label: string;
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-lg border bg-card p-3">
+      <div className={`flex size-9 shrink-0 items-center justify-center rounded-full ${bgClass}`}>
+        <Icon className={`size-4 ${iconClass}`} />
+      </div>
+      <div>
+        <p className="text-xl font-semibold tabular-nums leading-none">{count}</p>
+        <p className="mt-0.5 text-xs text-muted-foreground">{label}</p>
       </div>
     </div>
   );
 }
 
+/* ── Model Donut Chart ──────────────────────────────────────────────── */
+
+interface PieItem {
+  name: string;
+  count: number;
+  fill: string;
+}
+
+function ModelDonutCard({
+  title,
+  description,
+  data,
+  config,
+  total,
+}: {
+  title: string;
+  description: string;
+  data: PieItem[];
+  config: ChartConfig;
+  total: number;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {data.length > 0 ? (
+          <ChartContainer config={config} className="mx-auto aspect-square max-h-52">
+            <PieChart>
+              <ChartTooltip content={<ChartTooltipContent nameKey="name" hideLabel />} />
+              <Pie
+                data={data}
+                dataKey="count"
+                nameKey="name"
+                innerRadius={55}
+                outerRadius={80}
+                strokeWidth={2}
+                stroke="hsl(var(--card))"
+              >
+                {data.map((entry) => (
+                  <Cell key={entry.name} fill={entry.fill} />
+                ))}
+                <Label
+                  content={({ viewBox }) => {
+                    if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                      return (
+                        <text
+                          x={viewBox.cx}
+                          y={viewBox.cy}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                        >
+                          <tspan
+                            x={viewBox.cx}
+                            y={(viewBox.cy ?? 0) - 6}
+                            className="fill-foreground text-2xl font-semibold"
+                          >
+                            {total}
+                          </tspan>
+                          <tspan
+                            x={viewBox.cx}
+                            y={(viewBox.cy ?? 0) + 14}
+                            className="fill-muted-foreground text-xs"
+                          >
+                            runs
+                          </tspan>
+                        </text>
+                      );
+                    }
+                    return null;
+                  }}
+                />
+              </Pie>
+            </PieChart>
+          </ChartContainer>
+        ) : (
+          <ChartEmpty icon={BarChart3} message={`No ${title.toLowerCase()} data`} />
+        )}
+        {data.length > 0 && (
+          <div className="mt-2 space-y-1.5">
+            {data.map((d) => (
+              <div key={d.name} className="flex items-center justify-between text-sm">
+                <div className="flex items-center gap-2">
+                  <span
+                    className="inline-block size-2.5 rounded-full"
+                    style={{ backgroundColor: d.fill }}
+                  />
+                  <code className="font-mono text-xs">{d.name}</code>
+                </div>
+                <span className="tabular-nums text-muted-foreground">
+                  {d.count}{' '}
+                  <span className="text-xs">
+                    ({total > 0 ? ((d.count / total) * 100).toFixed(0) : 0}%)
+                  </span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/* ── Runs table with expandable rows ────────────────────────────────── */
+
+type Filter = 'all' | 'completed' | 'failed' | 'running' | 'cancelled';
+
+function RunsTable({ runs, days }: { runs: TrainingRunDetail[]; days: number }) {
+  const [filter, setFilter] = useState<Filter>('all');
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const filtered = useMemo(
+    () => (filter === 'all' ? runs : runs.filter((r) => r.status === filter)),
+    [runs, filter]
+  );
+
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: runs.length };
+    for (const r of runs) c[r.status] = (c[r.status] ?? 0) + 1;
+    return c;
+  }, [runs]);
+
+  const exportCsv = () => {
+    const headers = ['Name', 'Date', 'Status', 'Teacher', 'Student', 'Quality', 'Duration'];
+    const rows = filtered.map((r) => [
+      r.name,
+      formatDateWithYear(r.date),
+      r.status || r.outcome,
+      r.teacherModel,
+      r.studentModel,
+      r.qualityScore > 0 ? formatPercent(r.qualityScore, true) : '',
+      humanDuration(r.duration),
+    ]);
+    exportTableToCsv(headers, rows, 'distillation-runs');
+  };
+
+  const filterOptions: { key: Filter; label: string }[] = [
+    { key: 'all', label: 'All' },
+    { key: 'completed', label: 'Completed' },
+    { key: 'failed', label: 'Failed' },
+    { key: 'running', label: 'Running' },
+    { key: 'cancelled', label: 'Cancelled' },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base">Distillation Runs</CardTitle>
+        <CardDescription>Detailed history of all runs &middot; {days}d</CardDescription>
+        <CardAction>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" size="sm" className="h-7 gap-1.5" onClick={exportCsv}>
+                <Download className="size-3" />
+                CSV
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Export runs as CSV</TooltipContent>
+          </Tooltip>
+        </CardAction>
+      </CardHeader>
+
+      {/* Filter row */}
+      <div className="flex items-center gap-3 px-5 pb-2 text-sm">
+        {filterOptions.map((f) => {
+          const n = counts[f.key] ?? 0;
+          if (f.key !== 'all' && n === 0) return null;
+          const active = filter === f.key;
+          return (
+            <button
+              key={f.key}
+              onClick={() => setFilter(f.key)}
+              className={`tabular-nums ${active ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              {f.label} <span className="text-xs opacity-60">{n}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <CardContent className="px-5 pt-0">
+        <div className="max-h-[520px] overflow-auto">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-card">
+              <TableRow>
+                <TableHead className="w-6" />
+                <TableHead>Name</TableHead>
+                <TableHead>Date</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Teacher</TableHead>
+                <TableHead>Student</TableHead>
+                <TableHead className="text-right">Quality</TableHead>
+                <TableHead>Duration</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filtered.slice(0, 30).map((run) => {
+                const open = expandedId === run.runId;
+                return (
+                  <RunRow
+                    key={run.runId}
+                    run={run}
+                    open={open}
+                    toggle={() => setExpandedId(open ? null : run.runId)}
+                  />
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function RunRow({
+  run,
+  open,
+  toggle,
+}: {
+  run: TrainingRunDetail;
+  open: boolean;
+  toggle: () => void;
+}) {
+  const meta = STATUS_META[run.status] ?? STATUS_META.failed;
+  const Icon = meta.icon;
+  const dur = humanDuration(run.duration);
+
+  return (
+    <>
+      <TableRow className="cursor-pointer" onClick={toggle}>
+        <TableCell className="w-6 px-1">
+          {open ? (
+            <ChevronDown className="size-3 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="size-3 text-muted-foreground" />
+          )}
+        </TableCell>
+        <TableCell className="max-w-44 truncate font-medium">{run.name}</TableCell>
+        <TableCell className="text-sm text-muted-foreground">
+          {formatDateWithYear(run.date)}
+        </TableCell>
+        <TableCell>
+          <Badge variant={meta.variant} className="gap-1 text-xs">
+            <Icon className={`size-3 ${run.status === 'running' ? 'animate-spin' : ''}`} />
+            {meta.label}
+          </Badge>
+        </TableCell>
+        <TableCell>
+          {run.teacherModel ? (
+            <code className="font-mono text-xs">{run.teacherModel}</code>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell>
+          {run.studentModel ? (
+            <code className="font-mono text-xs">{run.studentModel}</code>
+          ) : (
+            <span className="text-muted-foreground">—</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right tabular-nums text-sm">
+          {run.qualityScore > 0 ? formatPercent(run.qualityScore, true) : '—'}
+        </TableCell>
+        <TableCell className="text-sm text-muted-foreground">{dur}</TableCell>
+      </TableRow>
+
+      {open && (
+        <TableRow className="bg-muted/20 hover:bg-muted/20">
+          <TableCell colSpan={8} className="px-8 py-2.5">
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1.5 text-xs sm:grid-cols-4">
+              <DetailField label="Run ID" value={run.runId.slice(0, 8)} mono />
+              <DetailField label="Outcome" value={formatStatus(run.outcome)} />
+              <DetailField
+                label="Confidence"
+                value={run.confidence > 0 ? formatPercent(run.confidence, true) : '—'}
+              />
+              <DetailField label="Details" value={run.reason || '—'} />
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+function DetailField({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <p className="text-muted-foreground">{label}</p>
+      <p className={`${mono ? 'font-mono' : ''} truncate`}>{value}</p>
+    </div>
+  );
+}
+
+/* ── Chart empty state ──────────────────────────────────────────────── */
+
 function ChartEmpty({ icon: Icon, message }: { icon: React.ElementType; message: string }) {
   return (
-    <div className="flex h-56 flex-col items-center justify-center gap-3">
-      <div className="flex size-12 items-center justify-center rounded-full bg-muted">
-        <Icon className="size-5 text-muted-foreground" />
+    <div className="flex h-48 flex-col items-center justify-center gap-3">
+      <div className="flex size-10 items-center justify-center rounded-full bg-muted">
+        <Icon className="size-4 text-muted-foreground" />
       </div>
       <p className="text-sm text-muted-foreground">{message}</p>
     </div>
   );
+}
+
+/* ── Pure data helpers ──────────────────────────────────────────────── */
+
+interface Stats {
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  successRate: number;
+  avgQuality: number;
+  totalCost: number;
+}
+
+function buildStats(runs: TrainingRunDetail[], summary: DistillationSummary | null): Stats {
+  const completed = summary?.completed_jobs ?? runs.filter((r) => r.status === 'completed').length;
+  const failed = summary?.failed_jobs ?? runs.filter((r) => r.status === 'failed').length;
+  const running = summary?.running_jobs ?? runs.filter((r) => r.status === 'running').length;
+  const total = summary?.total_jobs ?? runs.length;
+  const successRate = total > 0 ? completed / total : 0;
+
+  const scored = runs.filter((r) => r.qualityScore > 0);
+  const avgQuality =
+    scored.length > 0 ? scored.reduce((s, r) => s + r.qualityScore, 0) / scored.length : 0;
+
+  return {
+    total,
+    completed,
+    failed,
+    running,
+    successRate,
+    avgQuality,
+    totalCost: summary?.total_training_cost ?? 0,
+  };
+}
+
+function buildModelPieData(
+  runs: TrainingRunDetail[],
+  field: 'teacherModel' | 'studentModel'
+): { items: PieItem[]; config: ChartConfig; total: number } {
+  const map = new Map<string, number>();
+  for (const r of runs) {
+    const name = r[field];
+    if (!name) continue;
+    map.set(name, (map.get(name) ?? 0) + 1);
+  }
+  const sorted = Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  const items: PieItem[] = sorted.map(([name, count], i) => ({
+    name,
+    count,
+    fill: CHART_COLORS[i % CHART_COLORS.length],
+  }));
+  const config: ChartConfig = {};
+  for (const item of items) {
+    config[item.name] = { label: item.name, color: item.fill };
+  }
+  const total = items.reduce((s, d) => s + d.count, 0);
+  return { items, config, total };
+}
+
+function humanDuration(raw: string): string {
+  if (!raw || raw === '0s' || raw === '—') return '—';
+  return raw;
 }

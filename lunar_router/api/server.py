@@ -2948,6 +2948,10 @@ def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
                 "cost": 0,
                 "duration": "—",
                 "reason": h.get("reason", ""),
+                "teacher_model": "",
+                "student_model": "",
+                "quality_score": 0,
+                "status": "completed" if h.get("promoted") else "failed",
             })
         return runs
 
@@ -2996,8 +3000,10 @@ def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
                 try:
                     dt_start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
                     dt_end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
-                    total_secs = max(0, round((dt_end - dt_start).total_seconds()))
-                    if total_secs < 60:
+                    total_secs = round((dt_end - dt_start).total_seconds())
+                    if total_secs <= 0:
+                        duration = "—"
+                    elif total_secs < 60:
                         duration = f"{total_secs}s"
                     elif total_secs < 3600:
                         mins = total_secs // 60
@@ -3030,18 +3036,28 @@ def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
 
             outcome = "promoted" if status == "completed" else "rejected"
 
-            # Extract a meaningful reason from config or results
-            reason = ""
+            # Extract teacher/student from config + quality_score from results
+            teacher = ""
+            student = ""
+            quality_score = 0.0
             try:
                 config = _json.loads(config_raw) if isinstance(config_raw, str) and config_raw else {}
                 teacher = config.get("teacher_model", "")
                 student = config.get("student_model", "")
-                if teacher and student:
-                    reason = f"{teacher} → {student}"
-                elif teacher:
-                    reason = f"Teacher: {teacher}"
             except Exception:
                 pass
+            try:
+                results = _json.loads(results_raw) if isinstance(results_raw, str) and results_raw else {}
+                quality_score = results.get("quality_score", 0) or 0
+            except Exception:
+                pass
+
+            # Build reason string
+            reason = ""
+            if teacher and student:
+                reason = f"{teacher} → {student}"
+            elif teacher:
+                reason = f"Teacher: {teacher}"
             if not reason:
                 reason = "Distillation run" if status == "completed" else f"Status: {status}"
 
@@ -3054,6 +3070,10 @@ def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
                 "cost": round(cost, 4),
                 "duration": duration,
                 "reason": reason,
+                "teacher_model": teacher,
+                "student_model": student,
+                "quality_score": round(quality_score, 4),
+                "status": status,
             })
     except Exception:
         pass
@@ -3072,6 +3092,10 @@ def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
                 "cost": 0,
                 "duration": "—",
                 "reason": h.get("reason", ""),
+                "teacher_model": "",
+                "student_model": "",
+                "quality_score": 0,
+                "status": "completed" if h.get("promoted") else "failed",
             })
 
     runs.sort(key=lambda x: x.get("date", ""), reverse=True)
