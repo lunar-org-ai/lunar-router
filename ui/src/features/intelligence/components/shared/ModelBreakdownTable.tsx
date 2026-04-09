@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { ArrowUpDown } from 'lucide-react';
+import { ArrowUpDown, Crown } from 'lucide-react';
 import {
   Table,
   TableHeader,
@@ -10,7 +10,15 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { formatCost } from '@/utils/formatUtils';
 import type { UnifiedModelRow } from '../../types';
 
@@ -19,14 +27,7 @@ interface ModelBreakdownTableProps {
   title?: string;
 }
 
-type SortKey =
-  | 'model'
-  | 'provider'
-  | 'requests'
-  | 'trafficPct'
-  | 'accuracy'
-  | 'avgCost'
-  | 'totalCost';
+type SortKey = 'model' | 'provider' | 'requests' | 'accuracy' | 'avgCost' | 'totalCost';
 type SortDir = 'asc' | 'desc';
 
 export function ModelBreakdownTable({
@@ -75,19 +76,28 @@ export function ModelBreakdownTable({
     { key: 'model', label: 'Model' },
     { key: 'provider', label: 'Provider' },
     { key: 'requests', label: 'Requests', align: 'right' },
-    { key: 'trafficPct', label: 'Traffic %', align: 'right' },
     { key: 'accuracy', label: 'Accuracy', align: 'right' },
     { key: 'avgCost', label: 'Avg Cost', align: 'right' },
     { key: 'totalCost', label: 'Total Cost', align: 'right' },
   ];
+
+  const totalCost = rows.reduce((s, r) => s + r.totalCost, 0);
+  const totalReqs = rows.reduce((s, r) => s + r.requests, 0);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">{title}</CardTitle>
         <CardDescription>
-          {rows.length} model{rows.length !== 1 ? 's' : ''} tracked
+          {rows.length} model{rows.length !== 1 ? 's' : ''} &middot; {totalReqs.toLocaleString()}{' '}
+          requests &middot; {formatCost(totalCost)} total cost
         </CardDescription>
+        <CardAction>
+          <Badge variant="outline" className="text-xs">
+            Sorted by {columns.find((c) => c.key === sortKey)?.label}{' '}
+            {sortDir === 'desc' ? '↓' : '↑'}
+          </Badge>
+        </CardAction>
       </CardHeader>
       <CardContent>
         <Table>
@@ -111,9 +121,21 @@ export function ModelBreakdownTable({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sorted.map((row) => (
+            {sorted.map((row, idx) => (
               <TableRow key={row.model} className="transition-colors hover:bg-muted/30">
-                <TableCell className="font-medium">{row.model}</TableCell>
+                <TableCell>
+                  <div className="flex items-center gap-2">
+                    {idx === 0 && sortKey === 'requests' && sortDir === 'desc' && (
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <Crown className="size-3.5 text-amber-500" />
+                        </TooltipTrigger>
+                        <TooltipContent>Most used model</TooltipContent>
+                      </Tooltip>
+                    )}
+                    <span className="font-medium">{row.model}</span>
+                  </div>
+                </TableCell>
                 <TableCell>
                   <Badge variant="outline" className="text-xs font-normal">
                     {row.provider}
@@ -122,11 +144,22 @@ export function ModelBreakdownTable({
                 <TableCell className="text-right tabular-nums">
                   {row.requests.toLocaleString()}
                 </TableCell>
-                <TableCell className="text-right">
-                  <span className="tabular-nums">{row.trafficPct.toFixed(1)}%</span>
-                </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {row.accuracy !== null ? `${(row.accuracy * 100).toFixed(1)}%` : '—'}
+                  {row.accuracy !== null ? (
+                    <span
+                      className={
+                        row.accuracy >= 0.8
+                          ? 'text-chart-2'
+                          : row.accuracy >= 0.5
+                            ? 'text-amber-500'
+                            : ''
+                      }
+                    >
+                      {(row.accuracy * 100).toFixed(1)}%
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground/50">—</span>
+                  )}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">{formatCost(row.avgCost)}</TableCell>
                 <TableCell className="text-right tabular-nums">
