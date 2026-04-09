@@ -1,24 +1,14 @@
 export type TabKey =
-  // Core
   | 'command-center'
-  // Data
   | 'data-sources'
-  // Build
   | 'distill-jobs'
   | 'distill-datasets'
   | 'distill-metrics'
-  // Ship
   | 'production'
-  // Validate
   | 'compare'
-  // Evaluate
   | 'evaluations'
-  // Intelligence
-  | 'router-intelligence'
-  // Monitor
-  | 'observability'
+  | 'intelligence'
   | 'traces'
-  // Config
   | 'api-keys'
   | 'billing'
   | 'documentation'
