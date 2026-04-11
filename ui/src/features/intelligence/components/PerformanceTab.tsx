@@ -13,9 +13,24 @@ import {
   ChevronDown,
   ChevronRight,
   ArrowRight,
+  Activity,
+  Clock,
+  Users,
+  AlertTriangle,
 } from 'lucide-react';
-// recharts: only PieChart needed now
-import { PieChart, Pie, Cell, Label } from 'recharts';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  Label,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+} from 'recharts';
 import {
   Card,
   CardAction,
@@ -37,6 +52,8 @@ import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
+  ChartLegend,
+  ChartLegendContent,
 } from '@/components/ui/chart';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -49,7 +66,11 @@ import {
   exportTableToCsv,
 } from '../utils/intelligenceHelpers';
 import type { IntelligenceData } from '../hooks/useIntelligenceData';
-import type { DistillationSummary } from '@/features/router-intelligence/types';
+import type {
+  DistillationSummary,
+  TrainingActivityData,
+  ModelPerformanceData,
+} from '@/features/router-intelligence/types';
 import type { TrainingRunDetail } from '../types';
 import { MetricCard } from './shared/MetricCard';
 import { PerformanceSkeleton, EmptyState, ErrorState } from './shared';
@@ -78,7 +99,19 @@ const STATUS_META: Record<
   cancelled: { label: 'Cancelled', variant: 'secondary', icon: Ban },
 };
 
-/* ── Entry ──────────────────────────────────────────────────────────── */
+const REC_COLORS: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
+  train_now: 'destructive',
+  wait: 'default',
+  investigate: 'outline',
+  none: 'secondary',
+};
+
+const SIGNAL_CHART_CONFIG: ChartConfig = {
+  error_rate_increase: { label: 'Error Rate', color: 'var(--chart-1)' },
+  drift_ratio: { label: 'Drift Ratio', color: 'var(--chart-3)' },
+  high_severity_issues: { label: 'Issues', color: 'var(--chart-4)' },
+};
+
 
 interface PerformanceTabProps {
   data: IntelligenceData;
@@ -94,8 +127,6 @@ export function PerformanceTab({ data }: PerformanceTabProps) {
 
   return <PerformanceContent data={data} />;
 }
-
-/* ── Main content ───────────────────────────────────────────────────── */
 
 function PerformanceContent({ data }: { data: IntelligenceData }) {
   const { training, trainingRuns, selectedDays } = data;
@@ -174,13 +205,17 @@ function PerformanceContent({ data }: { data: IntelligenceData }) {
         />
       </div>
 
+      {/* Teacher vs Student comparison */}
+      {data.models?.teacher_student && <TeacherVsStudentCard ts={data.models.teacher_student} />}
+
+      {/* Training Activity section */}
+      {training && <TrainingActivitySection training={training} selectedDays={selectedDays} />}
+
       {/* Distillation Runs table */}
       {trainingRuns.length > 0 && <RunsTable runs={trainingRuns} days={selectedDays} />}
     </div>
   );
 }
-
-/* ── Pipeline Card — centered grid ──────────────────────────────────── */
 
 function PipelineCard({ summary }: { summary: DistillationSummary }) {
   return (
@@ -284,8 +319,6 @@ function StatusBox({
     </div>
   );
 }
-
-/* ── Model Donut Chart ──────────────────────────────────────────────── */
 
 interface PieItem {
   name: string;
@@ -391,8 +424,6 @@ function ModelDonutCard({
   );
 }
 
-/* ── Runs table with expandable rows ────────────────────────────────── */
-
 type Filter = 'all' | 'completed' | 'failed' | 'running' | 'cancelled';
 
 function RunsTable({ runs, days }: { runs: TrainingRunDetail[]; days: number }) {
@@ -450,7 +481,6 @@ function RunsTable({ runs, days }: { runs: TrainingRunDetail[]; days: number }) 
         </CardAction>
       </CardHeader>
 
-      {/* Filter row */}
       <div className="flex items-center gap-3 px-5 pb-2 text-sm">
         {filterOptions.map((f) => {
           const n = counts[f.key] ?? 0;
@@ -584,7 +614,330 @@ function DetailField({ label, value, mono }: { label: string; value: string; mon
   );
 }
 
-/* ── Chart empty state ──────────────────────────────────────────────── */
+function TeacherVsStudentCard({
+  ts,
+}: {
+  ts: NonNullable<ModelPerformanceData['teacher_student']>;
+}) {
+  return (
+    <Card className="border-2 border-dashed border-primary/30">
+      <CardHeader>
+        <div className="flex items-center gap-2">
+          <GraduationCap className="size-4 text-muted-foreground" />
+          <CardTitle className="text-base">Distilled Model Comparison</CardTitle>
+        </div>
+        <CardDescription>Teacher vs student model accuracy &amp; cost</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
+          <div className="space-y-1.5 rounded-lg border p-4">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Teacher
+            </p>
+            <p className="text-lg font-semibold">{ts.teacher}</p>
+            <p className="text-sm tabular-nums">
+              {ts.teacher_accuracy > 0
+                ? `${formatPercent(ts.teacher_accuracy, true)} accuracy`
+                : 'Accuracy not profiled yet'}
+            </p>
+            <p className="text-sm tabular-nums text-muted-foreground">
+              {ts.teacher_cost > 0 ? `$${ts.teacher_cost}/1k tokens` : '—'}
+            </p>
+          </div>
+          <div className="space-y-1.5 rounded-lg border p-4">
+            <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              Student
+            </p>
+            <p className="text-lg font-semibold">{ts.student}</p>
+            <Badge variant="secondary" className="mt-1 text-xs">
+              distilled
+            </Badge>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TrainingActivitySection({
+  training,
+  selectedDays,
+}: {
+  training: TrainingActivityData;
+  selectedDays: number;
+}) {
+  const kpis = training.kpis as Record<string, unknown>;
+  const advisorStatus = kpis.advisor_status as
+    | { recommendation: string; confidence: number }
+    | undefined;
+
+  // Pivot signal trends: { date, error_rate_increase, drift_ratio, high_severity_issues }
+  const signalChartData = useMemo(() => {
+    const map = new Map<string, Record<string, number | string>>();
+    for (const s of training.signal_trends) {
+      const dateKey = s.date.split('T')[0];
+      if (!map.has(dateKey)) map.set(dateKey, { date: dateKey });
+      const entry = map.get(dateKey)!;
+      entry[s.signal] = s.value;
+    }
+    return Array.from(map.values());
+  }, [training.signal_trends]);
+
+  const hasActivity =
+    training.training_history.length > 0 ||
+    signalChartData.length > 0 ||
+    training.advisor_decisions.length > 0 ||
+    training.training_cycles.length > 0;
+
+  if (!hasActivity) return null;
+
+  return (
+    <>
+      {/* Training Activity KPIs */}
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+        <MetricCard
+          label="Training Runs"
+          value={String(kpis.training_runs ?? 0)}
+          icon={Activity}
+          tooltip="Total auto-training runs triggered by the advisor"
+        />
+        <MetricCard
+          label="Last Training"
+          value={
+            kpis.last_training
+              ? new Date(kpis.last_training as string).toLocaleDateString()
+              : 'Never'
+          }
+          icon={Clock}
+          tooltip="Date of the most recent training run"
+        />
+        <MetricCard
+          label="Advisor Status"
+          value={
+            advisorStatus?.recommendation && advisorStatus.recommendation !== 'none'
+              ? advisorStatus.recommendation
+              : 'Idle'
+          }
+          icon={Brain}
+          subtitle={
+            advisorStatus && advisorStatus.confidence > 0
+              ? `${(advisorStatus.confidence * 100).toFixed(0)}% confidence`
+              : 'No active recommendation'
+          }
+          tooltip="Current recommendation from the training advisor"
+        />
+        <MetricCard
+          label="Models Updated"
+          value={Number(kpis.models_updated ?? 0) > 0 ? String(kpis.models_updated) : '—'}
+          icon={Users}
+          tooltip="Number of models updated via auto-training"
+        />
+      </div>
+
+      {/* Charts Row: Training History + Signal Trends */}
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+        {/* Training History */}
+        {training.training_history.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Training History</CardTitle>
+              <CardDescription>Promoted vs rejected runs &middot; {selectedDays}d</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ChartContainer
+                config={{
+                  promoted: { label: 'Promoted', color: 'var(--chart-2)' },
+                  rejected: { label: 'Rejected', color: 'var(--chart-1)' },
+                }}
+                className="h-56 w-full"
+              >
+                <BarChart
+                  data={training.training_history.map((h, i) => ({
+                    ...h,
+                    idx: i + 1,
+                    value: 1,
+                  }))}
+                >
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
+                  <XAxis dataKey="idx" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
+                  <YAxis hide />
+                  <ChartTooltip
+                    content={
+                      <ChartTooltipContent
+                        formatter={(
+                          _v: number,
+                          _n: string,
+                          item: { payload: { promoted: boolean; reason: string; date: string } }
+                        ) => [
+                          `${item.payload.promoted ? 'Promoted' : 'Rejected'} — ${item.payload.reason}`,
+                          item.payload.date,
+                        ]}
+                      />
+                    }
+                  />
+                  <Bar dataKey="value" radius={[4, 4, 0, 0]}>
+                    {training.training_history.map((h, i) => (
+                      <Cell key={i} fill={h.promoted ? 'var(--chart-2)' : 'var(--chart-1)'} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ChartContainer>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Signal Trends */}
+        {signalChartData.length > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Signal Trends</CardTitle>
+              <CardDescription>Advisor monitoring signals &middot; {selectedDays}d</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ChartContainer config={SIGNAL_CHART_CONFIG} className="h-56 w-full">
+                <LineChart data={signalChartData}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} className="stroke-border" />
+                  <XAxis dataKey="date" tick={{ fontSize: 11 }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={36} />
+                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <ChartLegend content={<ChartLegendContent />} />
+                  <Line
+                    type="monotone"
+                    dataKey="error_rate_increase"
+                    stroke="var(--chart-1)"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="drift_ratio"
+                    stroke="var(--chart-3)"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="high_severity_issues"
+                    stroke="var(--chart-4)"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ChartContainer>
+            </CardContent>
+          </Card>
+        )}
+      </div>
+
+      {/* Advisor Decisions */}
+      {training.advisor_decisions.length > 0 && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <AlertTriangle className="size-4 text-muted-foreground" />
+              <CardTitle className="text-base">Recent Advisor Decisions</CardTitle>
+            </div>
+            <CardDescription>
+              Auto-training recommendations based on monitoring signals
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {training.advisor_decisions.slice(0, 10).map((d) => (
+              <div key={d.id} className="rounded-lg border p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={REC_COLORS[d.recommendation] ?? 'secondary'}>
+                    {d.recommendation}
+                  </Badge>
+                  {d.confidence > 0 && (
+                    <span className="text-sm tabular-nums text-muted-foreground">
+                      {(d.confidence * 100).toFixed(0)}%
+                    </span>
+                  )}
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    {d.source} &middot; {new Date(d.timestamp).toLocaleString()}
+                  </span>
+                </div>
+                <p className="mt-1 text-sm">{d.reason}</p>
+                {d.signals.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {d.signals.map((s, i) => (
+                      <Badge
+                        key={i}
+                        variant={s.triggered ? 'default' : 'outline'}
+                        className="text-xs"
+                      >
+                        {s.name}:{' '}
+                        {typeof s.value === 'number' ? s.value.toFixed(3) : String(s.value)}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Training Cycles Table */}
+      {training.training_cycles.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Training Cycle Results</CardTitle>
+            <CardDescription>
+              Before / After metric comparison for each training cycle
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Date</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">AUROC</TableHead>
+                  <TableHead className="text-right">Win Rate</TableHead>
+                  <TableHead className="text-right">APGR</TableHead>
+                  <TableHead>Reason</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {training.training_cycles.map((c) => (
+                  <TableRow key={c.id}>
+                    <TableCell className="text-sm">
+                      {new Date(c.timestamp).toLocaleDateString()}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={c.promoted ? 'default' : 'secondary'}>
+                        {c.promoted ? 'Promoted' : 'Rejected'}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm">
+                      {c.baseline.auroc?.toFixed(4) ?? '—'} &rarr;{' '}
+                      {c.new_metrics.auroc?.toFixed(4) ?? '—'}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm">
+                      {c.baseline.win_rate ? `${(c.baseline.win_rate * 100).toFixed(1)}%` : '—'}{' '}
+                      &rarr;{' '}
+                      {c.new_metrics.win_rate
+                        ? `${(c.new_metrics.win_rate * 100).toFixed(1)}%`
+                        : '—'}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-sm">
+                      {c.baseline.apgr ? `${(c.baseline.apgr * 100).toFixed(1)}%` : '—'} &rarr;{' '}
+                      {c.new_metrics.apgr ? `${(c.new_metrics.apgr * 100).toFixed(1)}%` : '—'}
+                    </TableCell>
+                    <TableCell className="max-w-[200px] truncate text-sm text-muted-foreground">
+                      {c.reason}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
+    </>
+  );
+}
 
 function ChartEmpty({ icon: Icon, message }: { icon: React.ElementType; message: string }) {
   return (
@@ -596,8 +949,6 @@ function ChartEmpty({ icon: Icon, message }: { icon: React.ElementType; message:
     </div>
   );
 }
-
-/* ── Pure data helpers ──────────────────────────────────────────────── */
 
 interface Stats {
   total: number;

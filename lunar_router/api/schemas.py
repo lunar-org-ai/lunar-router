@@ -246,11 +246,13 @@ class RoutingDecisionItem(BaseModel):
     """A single routing decision from llm_traces."""
 
     request_id: str
-    cluster: int
     model_chosen: str
+    provider: str = ""
     reason: str = ""
     cost: float = 0.0
     latency: float = 0.0
+    tokens_in: int = 0
+    tokens_out: int = 0
     outcome: str = "success"
     timestamp: str = ""
 
@@ -271,6 +273,46 @@ class EfficiencyTrendPoint(BaseModel):
     score: float = 0.0
 
 
+class ModelUsageItem(BaseModel):
+    """Aggregated model usage stats."""
+
+    model: str
+    provider: str = ""
+    count: int = 0
+    percentage: float = 0.0
+    avg_cost: float = 0.0
+    avg_latency: float = 0.0
+    error_rate: float = 0.0
+
+
+class DailyVolumePoint(BaseModel):
+    """Daily request volume with latency and cost aggregates."""
+
+    date: str
+    count: int = 0
+    avg_latency: float = 0.0
+    p95_latency: float = 0.0
+    error_count: int = 0
+    total_cost: float = 0.0
+
+
+class LatencyPercentilesItem(BaseModel):
+    """Latency percentiles per model."""
+
+    model: str
+    p50: float = 0.0
+    p75: float = 0.0
+    p95: float = 0.0
+    p99: float = 0.0
+
+
+class ErrorBreakdownItem(BaseModel):
+    """Error count by category."""
+
+    category: str
+    count: int = 0
+
+
 class RoutingIntelligenceResponse(BaseModel):
     """Real routing intelligence data derived from llm_traces."""
 
@@ -278,6 +320,14 @@ class RoutingIntelligenceResponse(BaseModel):
     win_rate: list[WinRatePoint] = Field(default_factory=list)
     confidence_distribution: list[ConfidenceBucket] = Field(default_factory=list)
     efficiency_trend: list[EfficiencyTrendPoint] = Field(default_factory=list)
+    model_usage: list[ModelUsageItem] = Field(default_factory=list)
+    daily_volume: list[DailyVolumePoint] = Field(default_factory=list)
+    latency_percentiles: list[LatencyPercentilesItem] = Field(default_factory=list)
+    error_breakdown: list[ErrorBreakdownItem] = Field(default_factory=list)
+    p95_latency: float = 0.0
+    cache_hit_rate: float = 0.0
+    total_tokens: int = 0
+    avg_tokens_per_s: float = 0.0
 
 
 class AdvisorConfigResponse(BaseModel):

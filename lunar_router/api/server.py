@@ -35,6 +35,10 @@ from .schemas import (
     WinRatePoint,
     ConfidenceBucket,
     EfficiencyTrendPoint,
+    ModelUsageItem,
+    DailyVolumePoint,
+    LatencyPercentilesItem,
+    ErrorBreakdownItem,
     AdvisorConfigResponse,
 )
 from ..router.uniroute import UniRouteRouter
@@ -2785,7 +2789,10 @@ async def intelligence_models():
                 cfg = _json.loads(r_dist.result_rows[0][0])
                 teacher = cfg.get("teacher_model", "")
                 student = cfg.get("student_model", "")
+                # Try exact match first, then strip provider prefix (e.g. openai/gpt-4o-mini → gpt-4o-mini)
                 teacher_profile = r.registry.get(teacher)
+                if not teacher_profile and "/" in teacher:
+                    teacher_profile = r.registry.get(teacher.split("/", 1)[1])
                 if teacher_profile:
                     teacher_student = {
                         "teacher": teacher,
@@ -2914,7 +2921,11 @@ def _build_model_perf_from_ch() -> "ModelPerformanceResponse":
                 teacher = cfg.get("teacher_model", "")
                 student = cfg.get("student_model", "")
                 if teacher:
+                    # Try exact match, then strip provider prefix (openai/gpt-4o-mini → gpt-4o-mini)
                     t_data = next((m for m in models_data if m["model"] == teacher), None)
+                    if not t_data and "/" in teacher:
+                        bare = teacher.split("/", 1)[1]
+                        t_data = next((m for m in models_data if m["model"] == bare), None)
                     teacher_student = {
                         "teacher": teacher,
                         "student": student,
@@ -3335,11 +3346,13 @@ async def intelligence_training(days: int = 30):
 
 @app.get("/v1/intelligence/routing", response_model=RoutingIntelligenceResponse, tags=["intelligence"])
 async def intelligence_routing(days: int = 30, limit: int = 50):
-    """Real routing intelligence: decisions, win rate, confidence distribution, efficiency trend.
+    """Real routing intelligence: decisions, win rate, confidence distribution, efficiency trend,
+    model usage, daily volume, latency percentiles, error breakdown.
 
     All data derived from llm_traces — no mock data.
     """
     from datetime import datetime, timedelta, timezone
+    import json as _j
 
     empty = RoutingIntelligenceResponse()
 
@@ -3354,13 +3367,33 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
 
     start = datetime.now(timezone.utc) - timedelta(days=days)
 
+    def _derive_provider(model: str) -> str:
+        m = model.lower()
+        if "gpt" in m or "o1" in m or "o3" in m or "o4" in m:
+            return "OpenAI"
+        if "claude" in m:
+            return "Anthropic"
+        if "llama" in m or "meta" in m:
+            return "Meta"
+        if "gemma" in m or "gemini" in m:
+            return "Google"
+        if "mixtral" in m or "mistral" in m:
+            return "Mistral"
+        if "deepseek" in m:
+            return "DeepSeek"
+        if "qwen" in m:
+            return "Qwen"
+        if model.startswith("lunar/"):
+            return "Lunar"
+        return "Other"
+
     # ── 1. Recent routing decisions from llm_traces ──────────────────────
     decisions: list[RoutingDecisionItem] = []
     try:
         r_decisions = ch.query(
-            "SELECT request_id, cluster_id, selected_model, total_cost_usd, "
+            "SELECT request_id, selected_model, provider, total_cost_usd, "
             "latency_ms, is_error, toString(timestamp) AS ts, "
-            "all_scores, error_category "
+            "all_scores, tokens_in, tokens_out "
             "FROM llm_traces "
             "WHERE timestamp >= {start:DateTime64(3)} "
             "ORDER BY timestamp DESC "
@@ -3369,19 +3402,19 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
         )
         for row in r_decisions.result_rows:
             req_id = str(row[0])
-            cluster = int(row[1])
-            model = str(row[2])
+            model = str(row[1])
+            provider = str(row[2]) if row[2] else _derive_provider(model)
             cost = float(row[3])
             latency = float(row[4])
             is_err = int(row[5])
             ts = str(row[6])
             scores_raw = str(row[7]) if row[7] else "{}"
-            err_cat = str(row[8]) if row[8] else ""
+            tok_in = int(row[8]) if row[8] else 0
+            tok_out = int(row[9]) if row[9] else 0
 
             # Derive reason from all_scores
             reason = "Router selection"
             try:
-                import json as _j
                 scores = _j.loads(scores_raw)
                 if scores:
                     sorted_scores = sorted(scores.items(), key=lambda x: x[1])
@@ -3395,11 +3428,13 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
 
             decisions.append(RoutingDecisionItem(
                 request_id=req_id,
-                cluster=cluster,
                 model_chosen=model,
+                provider=provider or _derive_provider(model),
                 reason=reason,
                 cost=round(cost, 6),
                 latency=round(latency, 1),
+                tokens_in=tok_in,
+                tokens_out=tok_out,
                 outcome="error" if is_err else "success",
                 timestamp=ts,
             ))
@@ -3407,7 +3442,6 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
         pass
 
     # ── 2. Win rate over time ────────────────────────────────────────────
-    # Router win = request succeeded. Baseline = daily success rate of the most expensive model.
     win_rate: list[WinRatePoint] = []
     try:
         r_wr = ch.query(
@@ -3422,8 +3456,6 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
             "ORDER BY day",
             parameters={"start": start},
         )
-
-        # Build per-day data
         day_data: dict[str, dict] = {}
         for row in r_wr.result_rows:
             day_str = str(row[0])
@@ -3438,19 +3470,15 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
             day_data[day_str]["models"][model] = {
                 "total": total, "successes": successes, "avg_cost": avg_cost
             }
-
         for day_str in sorted(day_data.keys()):
             d = day_data[day_str]
             router_rate = d["successes"] / d["total"] if d["total"] > 0 else 0
-
-            # Baseline: success rate of the most expensive model that day
             baseline_rate = 0.0
             max_cost = 0.0
             for _m, stats in d["models"].items():
                 if stats["avg_cost"] > max_cost:
                     max_cost = stats["avg_cost"]
                     baseline_rate = stats["successes"] / stats["total"] if stats["total"] > 0 else 0
-
             win_rate.append(WinRatePoint(
                 date=day_str,
                 router=round(router_rate, 4),
@@ -3485,7 +3513,6 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
     # ── 4. Efficiency trend (daily savings ratio) ────────────────────────
     efficiency_trend: list[EfficiencyTrendPoint] = []
     try:
-        # Get the max avg_cost model for baseline
         r_max = ch.query(
             "SELECT max(avg_cost) FROM ("
             "  SELECT avg(total_cost_usd) AS avg_cost "
@@ -3495,7 +3522,6 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
             parameters={"start": start},
         )
         max_model_cost = float(r_max.result_rows[0][0]) if r_max.result_rows else 0
-
         if max_model_cost > 0:
             r_eff = ch.query(
                 "SELECT toDate(timestamp) AS day, "
@@ -3517,11 +3543,151 @@ async def intelligence_routing(days: int = 30, limit: int = 50):
     except Exception:
         pass
 
+    # ── 5. Model usage distribution ──────────────────────────────────────
+    model_usage: list[ModelUsageItem] = []
+    try:
+        r_mu = ch.query(
+            "SELECT selected_model, provider, "
+            "  count() AS cnt, "
+            "  avg(total_cost_usd) AS avg_cost, "
+            "  avg(latency_ms) AS avg_lat, "
+            "  countIf(is_error = 1) AS err_cnt "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY selected_model, provider "
+            "ORDER BY cnt DESC",
+            parameters={"start": start},
+        )
+        total_requests = sum(int(r[2]) for r in r_mu.result_rows) if r_mu.result_rows else 0
+        for row in r_mu.result_rows:
+            model = str(row[0])
+            prov = str(row[1]) if row[1] else _derive_provider(model)
+            cnt = int(row[2])
+            avg_c = float(row[3])
+            avg_l = float(row[4])
+            err_c = int(row[5])
+            model_usage.append(ModelUsageItem(
+                model=model,
+                provider=prov or _derive_provider(model),
+                count=cnt,
+                percentage=round((cnt / total_requests * 100) if total_requests > 0 else 0, 2),
+                avg_cost=round(avg_c, 6),
+                avg_latency=round(avg_l, 1),
+                error_rate=round((err_c / cnt) if cnt > 0 else 0, 4),
+            ))
+    except Exception:
+        pass
+
+    # ── 6. Daily volume with latency + cost aggregates ───────────────────
+    daily_volume: list[DailyVolumePoint] = []
+    try:
+        r_dv = ch.query(
+            "SELECT toDate(timestamp) AS day, "
+            "  count() AS cnt, "
+            "  avg(latency_ms) AS avg_lat, "
+            "  quantile(0.95)(latency_ms) AS p95_lat, "
+            "  countIf(is_error = 1) AS err_cnt, "
+            "  sum(total_cost_usd) AS tot_cost "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY day ORDER BY day",
+            parameters={"start": start},
+        )
+        for row in r_dv.result_rows:
+            daily_volume.append(DailyVolumePoint(
+                date=str(row[0]),
+                count=int(row[1]),
+                avg_latency=round(float(row[2]), 1),
+                p95_latency=round(float(row[3]), 1),
+                error_count=int(row[4]),
+                total_cost=round(float(row[5]), 6),
+            ))
+    except Exception:
+        pass
+
+    # ── 7. Latency percentiles per model ─────────────────────────────────
+    latency_percentiles: list[LatencyPercentilesItem] = []
+    try:
+        r_lp = ch.query(
+            "SELECT selected_model, "
+            "  quantile(0.50)(latency_ms) AS p50, "
+            "  quantile(0.75)(latency_ms) AS p75, "
+            "  quantile(0.95)(latency_ms) AS p95, "
+            "  quantile(0.99)(latency_ms) AS p99 "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY selected_model "
+            "ORDER BY p50 ASC",
+            parameters={"start": start},
+        )
+        for row in r_lp.result_rows:
+            latency_percentiles.append(LatencyPercentilesItem(
+                model=str(row[0]),
+                p50=round(float(row[1]), 1),
+                p75=round(float(row[2]), 1),
+                p95=round(float(row[3]), 1),
+                p99=round(float(row[4]), 1),
+            ))
+    except Exception:
+        pass
+
+    # ── 8. Error breakdown by category ───────────────────────────────────
+    error_breakdown: list[ErrorBreakdownItem] = []
+    try:
+        r_eb = ch.query(
+            "SELECT if(error_category = '', 'Unknown', error_category) AS cat, "
+            "  count() AS cnt "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} AND is_error = 1 "
+            "GROUP BY cat ORDER BY cnt DESC",
+            parameters={"start": start},
+        )
+        for row in r_eb.result_rows:
+            error_breakdown.append(ErrorBreakdownItem(
+                category=str(row[0]),
+                count=int(row[1]),
+            ))
+    except Exception:
+        pass
+
+    # ── 9. Aggregate KPIs ────────────────────────────────────────────────
+    p95_latency = 0.0
+    cache_hit_rate = 0.0
+    total_tokens = 0
+    avg_tokens_per_s = 0.0
+    try:
+        r_agg = ch.query(
+            "SELECT "
+            "  quantile(0.95)(latency_ms) AS p95, "
+            "  countIf(cache_hit = 1) / count() AS cache_rate, "
+            "  sum(total_tokens) AS tot_tokens, "
+            "  avg(tokens_per_s) AS avg_tps "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)}",
+            parameters={"start": start},
+        )
+        if r_agg.result_rows:
+            row = r_agg.result_rows[0]
+            p95_latency = round(float(row[0]), 1) if row[0] else 0.0
+            cache_hit_rate = round(float(row[1]), 4) if row[1] else 0.0
+            total_tokens = int(row[2]) if row[2] else 0
+            avg_tokens_per_s = round(float(row[3]), 1) if row[3] else 0.0
+    except Exception:
+        pass
+
     return RoutingIntelligenceResponse(
         decisions=decisions,
         win_rate=win_rate,
         confidence_distribution=confidence_dist,
         efficiency_trend=efficiency_trend,
+        model_usage=model_usage,
+        daily_volume=daily_volume,
+        latency_percentiles=latency_percentiles,
+        error_breakdown=error_breakdown,
+        p95_latency=p95_latency,
+        cache_hit_rate=cache_hit_rate,
+        total_tokens=total_tokens,
+        avg_tokens_per_s=avg_tokens_per_s,
     )
 
 

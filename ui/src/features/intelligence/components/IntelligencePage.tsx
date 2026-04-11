@@ -1,7 +1,15 @@
 import { useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { createElement } from 'react';
-import { RefreshCw, BarChart3, DollarSign, GraduationCap, Layers, Route } from 'lucide-react';
+import {
+  RefreshCw,
+  BarChart3,
+  DollarSign,
+  GraduationCap,
+  Layers,
+  Route,
+  Activity,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { PageHeader } from '@/components/shared/PageHeader';
@@ -31,7 +39,14 @@ const TABS: PageTab<IntelligenceTabId>[] = [
   },
 ];
 
-const VALID_TABS = new Set<string>(['overview', 'costs', 'distillation', 'models', 'routing']);
+const VALID_TABS = new Set<string>([
+  'overview',
+  'costs',
+  'distillation',
+  'training',
+  'models',
+  'routing',
+]);
 const VALID_PERIODS = new Set<string>(['7d', '14d', '30d']);
 
 function parseTab(value: string | null): IntelligenceTabId {
@@ -104,6 +119,7 @@ export default function IntelligencePage() {
         {activeTab === 'overview' && <OverviewTab data={data} />}
         {activeTab === 'costs' && <CostAnalysisTab data={data} />}
         {activeTab === 'distillation' && <PerformanceTab data={data} />}
+        {activeTab === 'training' && <TrainingTab data={data} />}
         {activeTab === 'models' && <ModelsTab data={data} />}
         {activeTab === 'routing' && <RoutingIntelligenceTab data={data} />}
       </main>

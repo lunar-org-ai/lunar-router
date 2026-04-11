@@ -130,11 +130,13 @@ export interface TrainingActivityData {
 
 export interface RoutingDecisionAPI {
   request_id: string;
-  cluster: number;
   model_chosen: string;
+  provider: string;
   reason: string;
   cost: number;
   latency: number;
+  tokens_in: number;
+  tokens_out: number;
   outcome: 'success' | 'error';
   timestamp: string;
 }
@@ -155,11 +157,51 @@ export interface EfficiencyTrendPoint {
   score: number;
 }
 
+export interface ModelUsageItem {
+  model: string;
+  provider: string;
+  count: number;
+  percentage: number;
+  avg_cost: number;
+  avg_latency: number;
+  error_rate: number;
+}
+
+export interface DailyVolumePoint {
+  date: string;
+  count: number;
+  avg_latency: number;
+  p95_latency: number;
+  error_count: number;
+  total_cost: number;
+}
+
+export interface LatencyPercentilesItem {
+  model: string;
+  p50: number;
+  p75: number;
+  p95: number;
+  p99: number;
+}
+
+export interface ErrorBreakdownItem {
+  category: string;
+  count: number;
+}
+
 export interface RoutingIntelligenceData {
   decisions: RoutingDecisionAPI[];
   win_rate: WinRatePoint[];
   confidence_distribution: ConfidenceBucket[];
   efficiency_trend: EfficiencyTrendPoint[];
+  model_usage: ModelUsageItem[];
+  daily_volume: DailyVolumePoint[];
+  latency_percentiles: LatencyPercentilesItem[];
+  error_breakdown: ErrorBreakdownItem[];
+  p95_latency: number;
+  cache_hit_rate: number;
+  total_tokens: number;
+  avg_tokens_per_s: number;
 }
 
 // ── Advisor Config (real data) ──────────────────────────────────────────

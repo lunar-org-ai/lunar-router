@@ -1,4 +1,10 @@
-export type IntelligenceTabId = 'overview' | 'costs' | 'distillation' | 'models' | 'routing';
+export type IntelligenceTabId =
+  | 'overview'
+  | 'costs'
+  | 'distillation'
+  | 'training'
+  | 'models'
+  | 'routing';
 
 export type Period = '7d' | '14d' | '30d';
 
@@ -20,11 +26,13 @@ export interface UnifiedModelRow {
 
 export interface RoutingDecision {
   requestId: string;
-  cluster: number;
   modelChosen: string;
+  provider: string;
   reason: string;
   cost: number;
   latency: number;
+  tokensIn: number;
+  tokensOut: number;
   outcome: 'success' | 'error';
   timestamp: string;
 }

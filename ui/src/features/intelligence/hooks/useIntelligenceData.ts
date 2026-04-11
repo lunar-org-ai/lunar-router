@@ -163,11 +163,13 @@ function buildRoutingDecisions(ri: RoutingIntelligenceData | null): RoutingDecis
   if (!ri?.decisions?.length) return [];
   return ri.decisions.map((d) => ({
     requestId: d.request_id,
-    cluster: d.cluster,
     modelChosen: d.model_chosen,
+    provider: d.provider,
     reason: d.reason,
     cost: d.cost,
     latency: d.latency,
+    tokensIn: d.tokens_in,
+    tokensOut: d.tokens_out,
     outcome: d.outcome,
     timestamp: d.timestamp,
   }));

@@ -33,6 +33,7 @@ import { formatNumber, costTierLabel, exportTableToCsv } from '../utils/intellig
 import type { IntelligenceData } from '../hooks/useIntelligenceData';
 import { MetricCard } from './shared/MetricCard';
 import { ModelBreakdownTable } from './shared/ModelBreakdownTable';
+import { ModelPerformanceContent } from './ModelPerformanceSection';
 import { ModelsSkeleton, EmptyState, ErrorState } from './shared';
 
 const CHART_COLORS = ['var(--chart-1)', 'var(--chart-2)', 'var(--chart-3)'];
@@ -429,6 +430,9 @@ function ModelsContent({ data }: { data: IntelligenceData }) {
       </div>
 
       <ModelBreakdownTable rows={filteredRows} />
+
+      {/* Model Performance: Cluster Accuracy + Leaderboard */}
+      {data.models && <ModelPerformanceContent data={data.models} />}
     </div>
   );
 }
