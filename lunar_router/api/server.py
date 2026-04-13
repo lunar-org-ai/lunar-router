@@ -11,8 +11,9 @@ import json
 import logging
 import os
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import numpy as np
 
 from .schemas import (
@@ -204,35 +205,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount datasets sub-router
-from ..datasets.router import router as datasets_router  # noqa: E402
-app.include_router(datasets_router)
 
-# Mount evaluation module routers
-from ..evaluations.router import router as evaluations_router  # noqa: E402
-from ..metrics.router import router as metrics_router  # noqa: E402
-from ..experiments.router import router as experiments_router  # noqa: E402
-from ..annotations.router import router as annotations_router  # noqa: E402
-from ..auto_eval.router import router as auto_eval_router  # noqa: E402
-from ..trace_issues.router import router as trace_issues_router  # noqa: E402
-from ..proposals.router import router as proposals_router  # noqa: E402
-from ..eval_agent.router import router as eval_agent_router  # noqa: E402
-from ..settings.router import router as settings_router  # noqa: E402
-
-app.include_router(evaluations_router)
-app.include_router(metrics_router)
-app.include_router(experiments_router)
-app.include_router(annotations_router)
-app.include_router(auto_eval_router)
-app.include_router(trace_issues_router)
-app.include_router(proposals_router)
-app.include_router(eval_agent_router)
-app.include_router(settings_router)
-
-# Mount distillation module router
-from ..distillation.router import router as distillation_router  # noqa: E402
-app.include_router(distillation_router)
-
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler so that 500s still carry CORS headers."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+    )
 
 # --- Mount vLLM deployment router ---
 from ..deployment.routes import deployment_router
@@ -707,11 +688,27 @@ async def clustering_run(
     strategy: str = "auto",
 ):
     """Trigger a clustering pipeline run."""
+    import json as _json
+    import numpy as _np
     from ..clustering.pipeline import ClusteringPipeline
+
+    class _NumpyEncoder(_json.JSONEncoder):
+        """Safety-net encoder that converts any remaining numpy scalars."""
+        def default(self, obj):
+            if isinstance(obj, (_np.integer,)):
+                return int(obj)
+            if isinstance(obj, (_np.floating,)):
+                return float(obj)
+            if isinstance(obj, _np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
 
     pipeline = ClusteringPipeline(strategy=strategy)
     result = await pipeline.run(days=days, min_traces=min_traces)
-    return result.to_dict()
+    payload = result.to_dict()
+    # Re-serialize through NumpyEncoder to catch any stray numpy types
+    safe = _json.loads(_json.dumps(payload, cls=_NumpyEncoder))
+    return safe
 
 
 @app.get("/v1/clustering/runs", tags=["clustering"])
@@ -1290,7 +1287,7 @@ async def import_traces_to_clickhouse(body: dict):
 
 
 def _ensure_eval_tables() -> None:
-    """Create eval_datasets / eval_dataset_samples if they don't exist."""
+    """Create eval_datasets / eval_samples if they don't exist (matches migration 007)."""
     from ..storage.clickhouse_client import get_client
 
     client = get_client()
@@ -1298,25 +1295,27 @@ def _ensure_eval_tables() -> None:
         return
     client.command("""
         CREATE TABLE IF NOT EXISTS eval_datasets (
-            id              String,
+            dataset_id      String,
+            tenant_id       String       DEFAULT 'default',
             name            String,
-            description     String,
-            source          LowCardinality(String),
-            samples_count   UInt32,
-            created_at      DateTime64(3, 'UTC'),
-            updated_at      DateTime64(3, 'UTC')
-        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (id)
+            description     String       DEFAULT '',
+            source          LowCardinality(String)  DEFAULT 'manual',
+            samples_count   UInt32       DEFAULT 0,
+            created_at      DateTime64(3, 'UTC') DEFAULT now64(3),
+            updated_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (tenant_id, dataset_id)
     """)
     client.command("""
-        CREATE TABLE IF NOT EXISTS eval_dataset_samples (
-            id              String,
+        CREATE TABLE IF NOT EXISTS eval_samples (
+            sample_id       String,
             dataset_id      String,
-            input           String,
-            output          String,
-            expected_output String,
-            metadata        String,
-            created_at      DateTime64(3, 'UTC')
-        ) ENGINE = MergeTree ORDER BY (dataset_id, id)
+            tenant_id       String       DEFAULT 'default',
+            input           String       DEFAULT '',
+            expected_output String       DEFAULT '',
+            metadata        String       DEFAULT '{}',
+            trace_id        String       DEFAULT '',
+            created_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (tenant_id, dataset_id, sample_id)
     """)
 
 
@@ -1338,48 +1337,47 @@ def _ch_eval():
 
 
 @app.get("/v1/datasets", tags=["datasets"])
-async def list_datasets():
+async def list_datasets(request: Request):
     """List all datasets: evaluation datasets + clustering domain datasets."""
-    client = _ch_eval()
-    if client is None:
-        return {"datasets": [], "total": 0}
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     datasets = []
 
     # 1) Evaluation datasets
-    r = client.query(
-        "SELECT id, name, description, source, samples_count, created_at, updated_at "
-        "FROM eval_datasets FINAL ORDER BY created_at DESC"
-    )
-    for row in r.result_rows:
-        d = dict(zip(r.column_names, row))
-        for field in ("created_at", "updated_at"):
-            if hasattr(d.get(field), "isoformat"):
-                d[field] = d[field].isoformat()
-        datasets.append(d)
+    try:
+        rows = ds_repo.list_datasets(tenant)
+        for d in rows:
+            # Normalise id field for the frontend
+            d["id"] = d.get("dataset_id") or d.get("id", "")
+            datasets.append(d)
+    except Exception as e:
+        logger.warning("Failed to query eval_datasets: %s", e)
 
     # 2) Clustering domain datasets (from latest run)
     try:
-        rr = client.query("SELECT run_id FROM clustering_runs ORDER BY created_at DESC LIMIT 1")
-        if rr.result_rows:
-            run_id = rr.result_rows[0][0]
-            cr = client.query(
-                "SELECT cluster_id, domain_label, short_description, status, trace_count "
-                "FROM cluster_datasets WHERE run_id = {rid:String} ORDER BY trace_count DESC",
-                parameters={"rid": run_id},
-            )
-            for row in cr.result_rows:
-                cid, label, desc, status, count = row
-                name = label if label and label != "Unknown" else f"Cluster {cid}"
-                datasets.append({
-                    "id": f"cluster:{run_id}:{cid}",
-                    "name": f"[Domain] {name}",
-                    "description": desc or f"Domain cluster ({status}, {count} traces)",
-                    "source": "auto_collected",
-                    "samples_count": count,
-                    "created_at": "",
-                    "updated_at": "",
-                })
+        client = _ch_eval()
+        if client:
+            rr = client.query("SELECT run_id FROM clustering_runs ORDER BY created_at DESC LIMIT 1")
+            if rr.result_rows:
+                run_id = rr.result_rows[0][0]
+                cr = client.query(
+                    "SELECT cluster_id, domain_label, short_description, status, trace_count "
+                    "FROM cluster_datasets WHERE run_id = {rid:String} ORDER BY trace_count DESC",
+                    parameters={"rid": run_id},
+                )
+                for row in cr.result_rows:
+                    cid, label, desc, status, count = row
+                    name = label if label and label != "Unknown" else f"Cluster {cid}"
+                    datasets.append({
+                        "id": f"cluster:{run_id}:{cid}",
+                        "name": f"[Domain] {name}",
+                        "description": desc or f"Domain cluster ({status}, {count} traces)",
+                        "source": "auto_collected",
+                        "samples_count": count,
+                        "created_at": "",
+                        "updated_at": "",
+                    })
     except Exception:
         pass  # clustering tables may not exist
 
@@ -1387,149 +1385,75 @@ async def list_datasets():
 
 
 @app.post("/v1/datasets", tags=["datasets"])
-async def create_dataset(body: dict):
+async def create_dataset(body: dict, request: Request):
     """Create a new evaluation dataset."""
-    import uuid
-    from datetime import datetime, timezone
-
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     name = body.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="'name' is required")
 
-    now = datetime.now(timezone.utc)
-    dataset_id = str(uuid.uuid4())[:8]
-    client.insert("eval_datasets",
-        [[dataset_id, name, body.get("description", ""), body.get("source", "manual"), 0, now, now]],
-        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
+    ds = ds_repo.create_dataset(
+        tenant,
+        name=name,
+        description=body.get("description", ""),
+        source=body.get("source", "manual"),
     )
-    return {
-        "id": dataset_id,
-        "name": name,
-        "description": body.get("description", ""),
-        "source": body.get("source", "manual"),
-        "samples_count": 0,
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-    }
+    ds["id"] = ds["dataset_id"]
+    return ds
 
 
 @app.get("/v1/datasets/{dataset_id}", tags=["datasets"])
 async def get_dataset(
     dataset_id: str,
+    request: Request,
     include_samples: bool = False,
     samples_limit: int = 50,
     samples_offset: int = 0,
 ):
     """Get a single dataset by ID."""
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
-    r = client.query(
-        "SELECT id, name, description, source, samples_count, created_at, updated_at "
-        "FROM eval_datasets FINAL WHERE id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    if not r.result_rows:
+    ds = ds_repo.get_dataset(tenant, dataset_id)
+    if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    ds = dict(zip(r.column_names, r.result_rows[0]))
-    for field in ("created_at", "updated_at"):
-        if hasattr(ds.get(field), "isoformat"):
-            ds[field] = ds[field].isoformat()
+    ds["id"] = ds.get("dataset_id") or dataset_id
 
     samples = []
     samples_total = 0
     if include_samples:
-        sr = client.query(
-            "SELECT id, input, output, expected_output, metadata, created_at "
-            "FROM eval_dataset_samples WHERE dataset_id = {did:String} "
-            "ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}",
-            parameters={"did": dataset_id, "lim": samples_limit, "off": samples_offset},
-        )
-        for row in sr.result_rows:
-            s = dict(zip(sr.column_names, row))
-            if hasattr(s.get("created_at"), "isoformat"):
-                s["created_at"] = s["created_at"].isoformat()
-            if isinstance(s.get("metadata"), str) and s["metadata"]:
-                try:
-                    s["metadata"] = json.loads(s["metadata"])
-                except Exception:
-                    pass
+        sample_rows = ds_repo.get_samples(tenant, dataset_id, limit=samples_limit, offset=samples_offset)
+        for s in sample_rows:
+            s["id"] = s.get("sample_id") or s.get("id", "")
             samples.append(s)
-    cr = client.query(
-        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    samples_total = cr.result_rows[0][0] if cr.result_rows else 0
 
+    samples_total = ds_repo.get_samples_count(tenant, dataset_id)
     return {"dataset": ds, "samples": samples, "samples_total": samples_total}
 
 
 @app.delete("/v1/datasets/{dataset_id}", tags=["datasets"])
-async def delete_dataset(dataset_id: str):
+async def delete_dataset(dataset_id: str, request: Request):
     """Delete a dataset and its samples."""
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
-
-    client.command(
-        f"ALTER TABLE eval_datasets DELETE WHERE id = '{dataset_id}'"
-    )
-    client.command(
-        f"ALTER TABLE eval_dataset_samples DELETE WHERE dataset_id = '{dataset_id}'"
-    )
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
+    ds_repo.delete_dataset(tenant, dataset_id)
     return {"success": True}
 
 
 @app.post("/v1/datasets/{dataset_id}/samples", tags=["datasets"])
-async def add_samples(dataset_id: str, body: dict):
+async def add_samples(dataset_id: str, body: dict, request: Request):
     """Add samples to an existing dataset."""
-    import uuid
-    from datetime import datetime, timezone
-
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     samples_input = body.get("samples", [])
     if not samples_input:
         raise HTTPException(status_code=400, detail="'samples' is required")
 
-    now = datetime.now(timezone.utc)
-    rows = []
-    for s in samples_input:
-        meta = s.get("metadata", {})
-        rows.append([
-            str(uuid.uuid4())[:8],
-            dataset_id,
-            s.get("input", ""),
-            s.get("output", ""),
-            s.get("expected_output", ""),
-            json.dumps(meta) if isinstance(meta, dict) else str(meta),
-            now,
-        ])
-
-    client.insert("eval_dataset_samples", rows,
-        column_names=["id", "dataset_id", "input", "output", "expected_output", "metadata", "created_at"],
-    )
-
-    # Update samples_count on the dataset
-    cr = client.query(
-        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    new_count = cr.result_rows[0][0] if cr.result_rows else len(rows)
-    client.insert("eval_datasets",
-        [[dataset_id, "", "", "", new_count, now, now]],
-        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
-    )
-
-    return {"message": f"Added {len(rows)} samples", "count": len(rows)}
+    count = ds_repo.add_samples(tenant, dataset_id, samples_input)
+    return {"message": f"Added {count} samples", "count": count}
 
 
 # --- Available Models ---
@@ -2009,12 +1933,12 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                     samples.append({"id": f"s-{i}", "input": row[0], "expected": row[1] or ""})
         else:
             r = client.query(
-                "SELECT id, input, output, expected_output FROM eval_dataset_samples "
+                "SELECT sample_id, input, expected_output FROM eval_samples "
                 "WHERE dataset_id = {did:String} LIMIT 100",
                 parameters={"did": dataset_id},
             )
             for row in r.result_rows:
-                samples.append({"id": row[0], "input": row[1], "expected": row[3] or row[2] or ""})
+                samples.append({"id": row[0], "input": row[1], "expected": row[2] or ""})
     except Exception as e:
         _update_status("failed", error=str(e))
         return
@@ -3819,6 +3743,1391 @@ async def intelligence_advisor():
         data_accumulation_rate=round(data_rate, 1),
         traces_since_last_training=traces_since_last,
     )
+from fastapi import Query, Request as _Req
+
+
+def _get_tenant(request: _Req) -> str:
+    return request.headers.get("x-tenant-id", "default")
+
+
+def _get_auth(request: _Req) -> str | None:
+    return request.headers.get("authorization") or request.headers.get("x-api-key")
+
+
+@app.delete("/v1/datasets/{dataset_id}/samples/{sample_id}", tags=["datasets"])
+async def delete_sample(dataset_id: str, sample_id: str, request: _Req):
+    from ..datasets import repository as ds_repo
+    tenant = _get_tenant(request)
+    ds_repo.delete_sample(tenant, dataset_id, sample_id)
+    return {"success": True}
+
+
+@app.post("/v1/datasets/from-traces", tags=["datasets"])
+async def create_from_traces(request: _Req):
+    from ..datasets import repository as ds_repo
+    from ..datasets.schemas import CreateFromTracesRequest
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+    b = CreateFromTracesRequest(**body)
+
+    if b.trace_ids:
+        traces = []
+        for tid in b.trace_ids:
+            t = ds_repo.get_trace(tid)
+            if t:
+                traces.append(t)
+    else:
+        traces, _ = ds_repo.list_traces(model_id=b.model_id, limit=b.limit or 50)
+
+    if not traces:
+        raise HTTPException(status_code=400, detail="No traces found")
+
+    ds = ds_repo.create_dataset(tenant, name=b.name, description=b.description or "", source="traces")
+
+    samples = [
+        {
+            "input": t.get("input", ""),
+            "expected_output": t.get("output", ""),
+            "trace_id": t.get("trace_id", t.get("id", "")),
+            "metadata": {
+                "model_id": t.get("model_id", ""),
+                "provider": t.get("provider", ""),
+                "latency_ms": t.get("latency_ms", 0),
+                "cost_usd": t.get("cost_usd", 0),
+            },
+        }
+        for t in traces
+    ]
+    ds_repo.add_samples(tenant, ds["dataset_id"], samples)
+    ds = ds_repo.get_dataset(tenant, ds["dataset_id"]) or ds
+    return {"dataset": ds}
+
+
+@app.post("/v1/datasets/from-instruction", tags=["datasets"])
+async def create_from_instruction(request: _Req):
+    from ..datasets import repository as ds_repo
+    from ..datasets.schemas import CreateFromInstructionRequest
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+    b = CreateFromInstructionRequest(**body)
+
+    traces, _ = ds_repo.list_traces(model_id=b.model_id, limit=b.limit or 200)
+    if not traces:
+        raise HTTPException(status_code=400, detail="No traces found matching criteria")
+
+    ds = ds_repo.create_dataset(tenant, name=b.name, description=b.description or b.instruction, source="instruction")
+
+    samples = [
+        {
+            "input": t.get("input", ""),
+            "expected_output": t.get("output", ""),
+            "trace_id": t.get("trace_id", t.get("id", "")),
+            "metadata": {"model_id": t.get("model_id", "")},
+        }
+        for t in traces[: b.max_samples or 100]
+    ]
+    ds_repo.add_samples(tenant, ds["dataset_id"], samples)
+    ds = ds_repo.get_dataset(tenant, ds["dataset_id"]) or ds
+    return {"dataset": ds, "samples_added": len(samples), "traces_analyzed": len(traces)}
+
+
+@app.post("/v1/datasets/generate", tags=["datasets"])
+async def generate_dataset_endpoint():
+    raise HTTPException(status_code=410, detail="Synthetic generation has been removed")
+
+
+@app.get("/v1/datasets/{dataset_id}/auto-collect", tags=["datasets"])
+async def get_auto_collect(dataset_id: str, request: _Req):
+    from ..datasets import repository as ds_repo
+    tenant = _get_tenant(request)
+    config = ds_repo.get_auto_collect_config(tenant, dataset_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="No auto-collect config")
+    return config
+
+
+@app.put("/v1/datasets/{dataset_id}/auto-collect", tags=["datasets"])
+async def put_auto_collect(dataset_id: str, request: _Req):
+    from ..datasets import repository as ds_repo
+    from ..datasets.schemas import AutoCollectConfigIn
+
+    tenant = _get_tenant(request)
+    ds = ds_repo.get_dataset(tenant, dataset_id)
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    body = await request.json()
+    b = AutoCollectConfigIn(**body)
+    config = ds_repo.put_auto_collect_config(tenant, dataset_id, b.model_dump())
+    return config
+
+
+@app.delete("/v1/datasets/{dataset_id}/auto-collect", tags=["datasets"])
+async def delete_auto_collect(dataset_id: str, request: _Req):
+    from ..datasets import repository as ds_repo
+    tenant = _get_tenant(request)
+    ds_repo.delete_auto_collect_config(tenant, dataset_id)
+    return {"success": True}
+
+
+@app.get("/v1/datasets/{dataset_id}/auto-collect/history", tags=["datasets"])
+async def auto_collect_history(dataset_id: str, request: _Req, limit: int = Query(20)):
+    from ..datasets import repository as ds_repo
+    tenant = _get_tenant(request)
+    runs = ds_repo.list_collect_runs(tenant, dataset_id, limit=limit)
+    return {"runs": runs}
+
+
+@app.post("/v1/datasets/{dataset_id}/auto-collect/run", tags=["datasets"])
+async def trigger_auto_collect(dataset_id: str, request: _Req):
+    from ..datasets import repository as ds_repo
+    tenant = _get_tenant(request)
+    config = ds_repo.get_auto_collect_config(tenant, dataset_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="No auto-collect config for this dataset")
+
+    source_model = config.get("source_model", "")
+    max_samples = config.get("max_samples", 100)
+
+    collected_ids = ds_repo.get_collected_trace_ids(tenant, dataset_id)
+    traces, _ = ds_repo.list_traces(model_id=source_model or None, limit=max_samples * 2)
+    new_traces = [t for t in traces if t.get("trace_id") not in collected_ids]
+    to_add = new_traces[:max_samples]
+
+    samples = [
+        {
+            "input": t.get("input", ""),
+            "expected_output": t.get("output", ""),
+            "trace_id": t.get("trace_id", ""),
+            "metadata": {
+                "model_id": t.get("model_id", ""),
+                "provider": t.get("provider", ""),
+                "auto_collected": True,
+            },
+        }
+        for t in to_add
+    ]
+
+    added = 0
+    if samples:
+        added = ds_repo.add_samples(tenant, dataset_id, samples)
+
+    run = ds_repo.save_collect_run(tenant, dataset_id, {
+        "traces_scanned": len(traces),
+        "traces_new": len(new_traces),
+        "samples_added": added,
+        "status": "completed",
+    })
+
+    existing = ds_repo.get_auto_collect_config(tenant, dataset_id)
+    if existing:
+        from datetime import datetime, timezone
+        existing["last_collected_at"] = datetime.now(timezone.utc)
+        existing["total_collected"] = (existing.get("total_collected", 0) or 0) + added
+        ds_repo.put_auto_collect_config(tenant, dataset_id, existing)
+
+    return {"run_id": run.get("run_id", ""), "samples_added": added}
+
+
+@app.get("/v1/evaluations/settings", tags=["evaluations"])
+async def get_eval_settings(request: _Req):
+    from ..settings import repository as settings_repo
+    tenant = _get_tenant(request)
+    return settings_repo.get(tenant)
+
+
+@app.put("/v1/evaluations/settings", tags=["evaluations"])
+async def put_eval_settings(request: _Req):
+    from ..settings import repository as settings_repo
+    tenant = _get_tenant(request)
+    body = await request.json()
+
+    allowed_fields = ["default_judge_model", "default_temperature", "max_parallel_requests", "python_script_timeout", "config"]
+    updates = {}
+    for field in allowed_fields:
+        if field not in body:
+            continue
+        value = body[field]
+        if field == "default_temperature":
+            if not isinstance(value, (int, float)) or value < 0 or value > 2:
+                raise HTTPException(status_code=400, detail="default_temperature must be between 0 and 2")
+        if field == "max_parallel_requests":
+            if not isinstance(value, int) or value < 1 or value > 20:
+                raise HTTPException(status_code=400, detail="max_parallel_requests must be between 1 and 20")
+        if field == "python_script_timeout":
+            if not isinstance(value, int) or value < 1 or value > 300:
+                raise HTTPException(status_code=400, detail="python_script_timeout must be between 1 and 300 seconds")
+        updates[field] = value
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+    return settings_repo.update(tenant, updates)
+
+
+@app.get("/v1/evaluations/{evaluation_id}/export", tags=["evaluations"])
+async def export_eval_results(evaluation_id: str, request: _Req, format: str = Query("json")):
+    import csv as _csv
+    from io import StringIO
+    from typing import Any as _Any
+    from ..evaluations import repository as eval_repo
+
+    tenant = _get_tenant(request)
+    evaluation = eval_repo.get(tenant, evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    result = eval_repo.get_result(tenant, evaluation_id)
+    if not result:
+        raise HTTPException(status_code=400, detail="No results to export")
+
+    if format == "json":
+        return {"evaluation": evaluation, "results": result}
+
+    samples = result.get("samples", [])
+    if not samples:
+        return {"csv": "", "message": "No samples"}
+
+    models = evaluation.get("models", [])
+    metrics = evaluation.get("metrics", [])
+
+    columns = ["sample_id", "input"]
+    for model in models:
+        columns.extend([f"{model}_output", f"{model}_latency", f"{model}_cost"])
+    for metric in metrics:
+        mid = metric.get("metric_id", metric) if isinstance(metric, dict) else metric
+        for model in models:
+            columns.append(f"{model}_{mid}")
+
+    output = StringIO()
+    writer = _csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+
+    for sample in samples:
+        row: dict[str, _Any] = {
+            "sample_id": sample.get("sample_id", ""),
+            "input": sample.get("input", ""),
+        }
+        outputs = sample.get("outputs", {})
+        for model in models:
+            mo = outputs.get(model, {})
+            row[f"{model}_output"] = mo.get("output", "")
+            row[f"{model}_latency"] = mo.get("latency", "")
+            row[f"{model}_cost"] = mo.get("cost", "")
+        scores = sample.get("scores", {})
+        for metric in metrics:
+            mid = metric.get("metric_id", metric) if isinstance(metric, dict) else metric
+            ms = scores.get(mid, {})
+            for model in models:
+                val = ms.get(model, "")
+                if isinstance(val, dict):
+                    val = val.get("score", "")
+                row[f"{model}_{mid}"] = val
+        writer.writerow(row)
+
+    return {"csv": output.getvalue(), "filename": f"evaluation_{evaluation_id}.csv"}
+
+
+@app.post("/v1/evaluations/{evaluation_id}/rerun", tags=["evaluations"])
+async def rerun_evaluation(evaluation_id: str, request: _Req):
+    from ..evaluations import repository as eval_repo
+    from ..evaluations.runner import EvaluationRunner
+
+    tenant = _get_tenant(request)
+    evaluation = eval_repo.get(tenant, evaluation_id)
+    if not evaluation:
+        raise HTTPException(status_code=404, detail="Evaluation not found")
+    st = evaluation.get("status")
+    if st not in ("completed", "failed", "cancelled"):
+        raise HTTPException(status_code=400, detail=f"Cannot rerun evaluation with status: {st}")
+
+    new_data = {
+        "name": f"{evaluation.get('name')} (rerun)",
+        "description": evaluation.get("description", ""),
+        "dataset_id": evaluation.get("dataset_id"),
+        "models": evaluation.get("models"),
+        "metrics": evaluation.get("metrics"),
+        "config": evaluation.get("config", {}),
+        "total_samples": evaluation.get("total_samples", 0),
+        "original_evaluation_id": evaluation_id,
+    }
+    new_eval = eval_repo.create(tenant, new_data)
+
+    try:
+        authorization = _get_auth(request)
+        runner = EvaluationRunner()
+        result = runner.run(tenant, new_eval["evaluation_id"], authorization=authorization)
+        if result.get("success"):
+            new_eval = eval_repo.get(tenant, new_eval["evaluation_id"])
+    except Exception as e:
+        logger.exception("Error rerunning evaluation: %s", e)
+        eval_repo.update_status(tenant, new_eval["evaluation_id"], status="failed", error_message=str(e))
+        new_eval = eval_repo.get(tenant, new_eval["evaluation_id"])
+
+    return {"message": "Evaluation rerun started", "evaluation": new_eval}
+
+
+@app.post("/v1/evaluations/log", tags=["evaluations"])
+async def log_evaluation(request: _Req):
+    from ..evaluations import repository as eval_repo
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+
+    required = ["id", "name", "status"]
+    missing = [f for f in required if f not in body]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(missing)}")
+
+    metrics = body.get("metrics", body.get("scorer_names", []))
+
+    evaluation_data = {
+        "name": body["name"],
+        "description": body.get("description", "SDK local execution"),
+        "status": body["status"],
+        "execution_type": "local",
+        "metrics": metrics,
+        "models": body.get("models", []),
+        "config": body.get("config", {}),
+        "progress": body.get("progress", {}).get("completed", 0),
+        "total_samples": body.get("progress", {}).get("total", 0),
+        "created_at": body.get("created_at"),
+    }
+
+    sdk_eval_id = body["id"]
+    evaluation = eval_repo.create_with_id(tenant, sdk_eval_id, evaluation_data)
+
+    results = body.get("results", {})
+    if results:
+        eval_repo.save_result(tenant, evaluation["evaluation_id"], results)
+    else:
+        rows = body.get("rows", [])
+        if rows:
+            result_data = {
+                "samples": [
+                    {
+                        "sample_id": row.get("datapoint_id", ""),
+                        "input": row.get("input", ""),
+                        "output": row.get("output", ""),
+                        "expected": row.get("expected", ""),
+                        "scores": {
+                            score.get("name"): {
+                                "score": score.get("score", 0),
+                                "raw_value": score.get("raw_value"),
+                                "explanation": score.get("explanation"),
+                            }
+                            for score in row.get("scores", [])
+                        },
+                    }
+                    for row in rows
+                ],
+                "summary": body.get("summary", {}),
+            }
+            eval_repo.save_result(tenant, evaluation["evaluation_id"], result_data)
+
+    return {
+        "message": "Evaluation logged successfully",
+        "evaluation_id": evaluation["evaluation_id"],
+        "sdk_evaluation_id": sdk_eval_id,
+    }
+
+
+@app.post("/v1/evaluations/cleanup", tags=["evaluations"])
+async def cleanup_stale_evaluations(request: _Req):
+    from ..evaluations import repository as eval_repo
+
+    tenant = _get_tenant(request)
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    threshold = float(body.get("stale_threshold_hours", 1.0))
+
+    stale = eval_repo.find_stale_evaluations(tenant, threshold)
+    if not stale:
+        return {"message": "No stale evaluations found", "cleaned_up": 0, "evaluations": []}
+
+    marked = eval_repo.mark_stale_as_failed(tenant, threshold)
+    return {
+        "message": f"Cleaned up {len(marked)} stale evaluation(s)",
+        "cleaned_up": len(marked),
+        "evaluations": [
+            {
+                "evaluation_id": e.get("evaluation_id"),
+                "name": e.get("name"),
+                "error_message": e.get("error_message"),
+            }
+            for e in marked
+        ],
+    }
+
+
+@app.put("/v1/metrics/{metric_id}", tags=["metrics"])
+async def update_metric(metric_id: str, request: _Req):
+    from ..metrics import repository as metrics_repo
+
+    tenant = _get_tenant(request)
+    existing = metrics_repo.get(tenant, metric_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Metric not found")
+    if existing.get("is_builtin"):
+        raise HTTPException(status_code=403, detail="Cannot modify builtin metrics")
+
+    body = await request.json()
+    allowed = ["name", "description", "config", "python_script", "requirements"]
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    metric = metrics_repo.update(tenant, metric_id, updates)
+    return metric
+
+
+@app.post("/v1/metrics/validate-script", tags=["metrics"])
+async def validate_metric_script(request: _Req):
+    body = await request.json()
+    if "python_script" not in body:
+        raise HTTPException(status_code=400, detail="python_script is required")
+
+    script = body["python_script"]
+    errors = []
+    warnings = []
+
+    if "def evaluate(" not in script:
+        errors.append("Script must define an 'evaluate' function")
+
+    dangerous = ["os", "subprocess", "sys", "shutil", "socket"]
+    for imp in dangerous:
+        if f"import {imp}" in script or f"from {imp}" in script:
+            errors.append(f"Import of '{imp}' is not allowed")
+
+    try:
+        compile(script, "<string>", "exec")
+    except SyntaxError as e:
+        errors.append(f"Syntax error: {e}")
+
+    test_result = None
+    if not errors and all(k in body for k in ["test_input", "test_output"]):
+        try:
+            sandbox = {"__builtins__": {
+                "len": len, "str": str, "int": int, "float": float,
+                "bool": bool, "list": list, "dict": dict, "min": min,
+                "max": max, "sum": sum, "abs": abs, "round": round,
+                "range": range, "enumerate": enumerate, "zip": zip,
+                "True": True, "False": False, "None": None,
+            }}
+            exec(script, sandbox)
+            if "evaluate" in sandbox:
+                result = sandbox["evaluate"](
+                    output=body["test_output"],
+                    expected=body.get("test_expected", ""),
+                    input_text=body["test_input"],
+                )
+                test_result = {"success": True, "result": result}
+        except Exception as e:
+            test_result = {"success": False, "error": str(e)}
+
+    response = {"valid": len(errors) == 0, "errors": errors, "warnings": warnings}
+    if test_result:
+        response["test_result"] = test_result
+    return response
+
+@app.get("/v1/experiments", tags=["experiments"])
+async def list_experiments(request: _Req, status: str | None = Query(None)):
+    from ..experiments import repository as exp_repo
+    tenant = _get_tenant(request)
+    experiments = exp_repo.list_all(tenant, status=status)
+    return {"experiments": experiments, "count": len(experiments)}
+
+
+@app.post("/v1/experiments", tags=["experiments"], status_code=201)
+async def create_experiment(request: _Req):
+    from ..experiments import repository as exp_repo
+    from ..evaluations import repository as eval_repo
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+
+    required = ["name", "dataset_id", "evaluation_ids"]
+    missing = [f for f in required if f not in body]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(missing)}")
+
+    evaluation_ids = body["evaluation_ids"]
+    if not isinstance(evaluation_ids, list) or len(evaluation_ids) < 2:
+        raise HTTPException(status_code=400, detail="evaluation_ids must be a list with at least 2 evaluations")
+
+    for eid in evaluation_ids:
+        if not eval_repo.get(tenant, eid):
+            raise HTTPException(status_code=404, detail=f"Evaluation not found: {eid}")
+
+    experiment = exp_repo.create(tenant, {
+        "name": body["name"],
+        "description": body.get("description", ""),
+        "dataset_id": body["dataset_id"],
+        "evaluation_ids": evaluation_ids,
+        "tags": body.get("tags", []),
+    })
+    return experiment
+
+
+@app.get("/v1/experiments/{experiment_id}", tags=["experiments"])
+async def get_experiment(experiment_id: str, request: _Req):
+    from ..experiments import repository as exp_repo
+    tenant = _get_tenant(request)
+    experiment = exp_repo.get(tenant, experiment_id)
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return experiment
+
+
+@app.delete("/v1/experiments/{experiment_id}", tags=["experiments"])
+async def delete_experiment(experiment_id: str, request: _Req):
+    from ..experiments import repository as exp_repo
+    tenant = _get_tenant(request)
+    experiment = exp_repo.get(tenant, experiment_id)
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    if experiment.get("status") == "running":
+        raise HTTPException(status_code=400, detail="Cannot delete a running experiment")
+    exp_repo.delete(tenant, experiment_id)
+    return {"message": "Experiment deleted"}
+
+
+@app.get("/v1/experiments/{experiment_id}/comparison", tags=["experiments"])
+async def get_experiment_comparison(experiment_id: str, request: _Req, force: str | None = Query(None)):
+    from ..experiments import repository as exp_repo
+    from ..experiments.runner import ExperimentRunner
+
+    tenant = _get_tenant(request)
+    experiment = exp_repo.get(tenant, experiment_id)
+    if not experiment:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+
+    if force != "true":
+        comparison = exp_repo.get_comparison(tenant, experiment_id)
+        if comparison:
+            return comparison
+
+    if experiment.get("status") in ("draft", "completed"):
+        try:
+            runner = ExperimentRunner()
+            return runner.build_comparison(tenant, experiment_id)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception:
+            logger.exception("Failed to build comparison")
+            raise HTTPException(status_code=500, detail="Failed to build comparison")
+
+    if experiment.get("status") != "completed":
+        raise HTTPException(status_code=400, detail=f"Experiment is not completed. Status: {experiment.get('status')}")
+    raise HTTPException(status_code=404, detail="Comparison not found")
+
+
+@app.get("/v1/annotations/queues", tags=["annotations"])
+async def list_annotation_queues(request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    queues = ann_repo.list_queues(tenant)
+    return {"queues": queues, "count": len(queues)}
+
+
+@app.post("/v1/annotations/queues", tags=["annotations"], status_code=201)
+async def create_annotation_queue(request: _Req):
+    from ..annotations import repository as ann_repo
+    from ..datasets.repository import get_samples
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+    if "name" not in body:
+        raise HTTPException(status_code=400, detail="name is required")
+    if "dataset_id" not in body:
+        raise HTTPException(status_code=400, detail="dataset_id is required")
+
+    queue = ann_repo.create_queue(tenant, {
+        "name": body["name"],
+        "dataset_id": body["dataset_id"],
+        "rubric": body.get("rubric", []),
+    })
+
+    samples = get_samples(tenant, body["dataset_id"])
+    if samples:
+        ann_repo.create_items_from_samples(tenant, queue["queue_id"], samples)
+        queue["total_items"] = len(samples)
+
+    return queue
+
+
+@app.delete("/v1/annotations/queues/{queue_id}", tags=["annotations"])
+async def delete_annotation_queue(queue_id: str, request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    if not ann_repo.get_queue(tenant, queue_id):
+        raise HTTPException(status_code=404, detail="Queue not found")
+    ann_repo.delete_queue(tenant, queue_id)
+    return {"message": "Queue deleted"}
+
+
+@app.get("/v1/annotations/queues/{queue_id}/items", tags=["annotations"])
+async def list_annotation_items(queue_id: str, request: _Req, status: str | None = Query(None)):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    items = ann_repo.list_items(tenant, queue_id, status=status)
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/v1/annotations/queues/{queue_id}/next", tags=["annotations"])
+async def get_next_annotation_item(queue_id: str, request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    item = ann_repo.get_next_pending(tenant, queue_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="No pending items")
+    return item
+
+
+@app.post("/v1/annotations/queues/{queue_id}/items/{item_id}/submit", tags=["annotations"])
+async def submit_annotation_item(queue_id: str, item_id: str, request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    body = await request.json()
+    if "scores" not in body:
+        raise HTTPException(status_code=400, detail="scores is required")
+    result = ann_repo.submit_item(tenant, queue_id, item_id, scores=body["scores"], notes=body.get("notes", ""))
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    return result
+
+
+@app.post("/v1/annotations/queues/{queue_id}/items/{item_id}/skip", tags=["annotations"])
+async def skip_annotation_item(queue_id: str, item_id: str, request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    result = ann_repo.skip_item(tenant, queue_id, item_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending item not found")
+    return result
+
+
+@app.get("/v1/annotations/queues/{queue_id}/stats", tags=["annotations"])
+async def get_annotation_stats(queue_id: str, request: _Req):
+    from ..annotations import repository as ann_repo
+    tenant = _get_tenant(request)
+    stats = ann_repo.get_stats(tenant, queue_id)
+    if not stats:
+        raise HTTPException(status_code=404, detail="Queue not found")
+    return stats
+
+
+@app.get("/v1/annotations/queues/{queue_id}/export", tags=["annotations"])
+async def export_annotations(queue_id: str, request: _Req, format: str = Query("json")):
+    import csv as _csv
+    from io import StringIO
+    from typing import Any as _Any
+    from ..annotations import repository as ann_repo
+
+    tenant = _get_tenant(request)
+    if format not in ("json", "csv"):
+        raise HTTPException(status_code=400, detail="format must be 'json' or 'csv'")
+
+    queue = ann_repo.get_queue(tenant, queue_id)
+    if not queue:
+        raise HTTPException(status_code=404, detail="Queue not found")
+
+    items = ann_repo.get_completed_items(tenant, queue_id)
+
+    if format == "json":
+        return {"queue": queue, "annotations": items, "count": len(items)}
+
+    rubric = queue.get("rubric", [])
+    criteria_names = [c["name"] for c in rubric]
+
+    if not items:
+        return {"csv": "", "filename": f"annotations_{queue_id}.csv"}
+
+    output = StringIO()
+    columns = ["sample_id", "input", "expected_output"] + criteria_names + ["notes", "annotated_at"]
+    writer = _csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+
+    for item in items:
+        scores = item.get("scores", {})
+        row: dict[str, _Any] = {
+            "sample_id": item.get("sample_id", ""),
+            "input": item.get("input", ""),
+            "expected_output": item.get("expected_output", ""),
+            "notes": item.get("notes", ""),
+            "annotated_at": item.get("annotated_at", ""),
+        }
+        for crit in criteria_names:
+            row[crit] = scores.get(crit, "")
+        writer.writerow(row)
+
+    return {"csv": output.getvalue(), "filename": f"annotations_{queue_id}.csv"}
+
+
+@app.get("/v1/annotations/queues/{queue_id}/analytics", tags=["annotations"])
+async def get_annotation_analytics(queue_id: str, request: _Req):
+    import math
+    from collections import Counter
+    from typing import Any as _Any
+    from ..annotations import repository as ann_repo
+
+    tenant = _get_tenant(request)
+    queue = ann_repo.get_queue(tenant, queue_id)
+    if not queue:
+        raise HTTPException(status_code=404, detail="Queue not found")
+
+    items = ann_repo.get_completed_items(tenant, queue_id)
+    rubric = queue.get("rubric", [])
+
+    criteria_stats: dict[str, _Any] = {}
+    for criterion in rubric:
+        crit_name = criterion["name"]
+        scale_min = criterion.get("scale_min", 1)
+        scale_max = criterion.get("scale_max", 5)
+
+        values = [item["scores"][crit_name] for item in items if crit_name in item.get("scores", {})]
+        if not values:
+            criteria_stats[crit_name] = {"mean": None, "median": None, "std_dev": None, "min": None, "max": None, "distribution": {}}
+            continue
+
+        n = len(values)
+        mean = sum(values) / n
+        sorted_vals = sorted(values)
+        median = sorted_vals[n // 2] if n % 2 == 1 else (sorted_vals[n // 2 - 1] + sorted_vals[n // 2]) / 2
+        variance = sum((v - mean) ** 2 for v in values) / n
+        std_dev = math.sqrt(variance)
+        distribution = {str(s): values.count(s) for s in range(scale_min, scale_max + 1)}
+
+        criteria_stats[crit_name] = {
+            "mean": round(mean, 2),
+            "median": round(median, 2),
+            "std_dev": round(std_dev, 2),
+            "min": min(values),
+            "max": max(values),
+            "distribution": distribution,
+        }
+
+    agreement = None
+    dataset_id = queue.get("dataset_id")
+    if dataset_id:
+        all_queue_items = ann_repo.get_completed_items_by_dataset(tenant, dataset_id)
+        other_queue_ids = [qid for qid in all_queue_items if qid != queue_id]
+
+        if other_queue_ids:
+            current_by_sample = {item["sample_id"]: item.get("scores", {}) for item in items if item.get("sample_id")}
+            other_by_sample: dict[str, dict[str, _Any]] = {}
+            for qid in other_queue_ids:
+                for item in all_queue_items[qid]:
+                    sid = item.get("sample_id")
+                    if sid and sid not in other_by_sample:
+                        other_by_sample[sid] = item.get("scores", {})
+
+            overlapping = set(current_by_sample.keys()) & set(other_by_sample.keys())
+            if overlapping:
+                cohens_kappa: dict[str, float] = {}
+                percent_agreement: dict[str, float] = {}
+
+                for criterion in rubric:
+                    crit_name = criterion["name"]
+                    scale_min = criterion.get("scale_min", 1)
+                    scale_max = criterion.get("scale_max", 5)
+                    ratings_a, ratings_b = [], []
+
+                    for sid in overlapping:
+                        a = current_by_sample[sid].get(crit_name)
+                        b = other_by_sample[sid].get(crit_name)
+                        if a is not None and b is not None:
+                            ratings_a.append(a)
+                            ratings_b.append(b)
+
+                    if ratings_a:
+                        # Cohen's kappa
+                        n_items = len(ratings_a)
+                        categories = list(range(scale_min, scale_max + 1))
+                        agree = sum(1 for a, b in zip(ratings_a, ratings_b) if a == b)
+                        p_observed = agree / n_items
+                        count_a = Counter(ratings_a)
+                        count_b = Counter(ratings_b)
+                        p_expected = sum((count_a[c] / n_items) * (count_b[c] / n_items) for c in categories)
+                        if p_expected == 1.0:
+                            kappa = 1.0
+                        else:
+                            kappa = (p_observed - p_expected) / (1 - p_expected)
+                        cohens_kappa[crit_name] = round(kappa, 2)
+                        pct = sum(1 for a, b in zip(ratings_a, ratings_b) if a == b) / len(ratings_a)
+                        percent_agreement[crit_name] = round(pct, 2)
+
+                agreement = {
+                    "compared_queues": other_queue_ids,
+                    "overlapping_samples": len(overlapping),
+                    "cohens_kappa": cohens_kappa,
+                    "percent_agreement": percent_agreement,
+                }
+
+    return {
+        "queue_id": queue_id,
+        "total_annotated": len(items),
+        "criteria": criteria_stats,
+        "agreement": agreement,
+    }
+
+
+# ===================================================================
+# Auto-eval — config/run endpoints (from auto_eval router)
+# ===================================================================
+
+@app.get("/v1/auto-eval/configs", tags=["auto-eval"])
+async def list_auto_eval_configs(request: _Req):
+    from ..auto_eval import repository as ae_repo
+    tenant = _get_tenant(request)
+    configs = ae_repo.list_configs(tenant)
+    return {"configs": configs, "count": len(configs)}
+
+
+@app.post("/v1/auto-eval/configs", tags=["auto-eval"], status_code=201)
+async def create_auto_eval_config(request: _Req):
+    from ..auto_eval import repository as ae_repo
+    tenant = _get_tenant(request)
+    body = await request.json()
+
+    required = ["name", "dataset_id", "models", "metrics"]
+    missing = [f for f in required if f not in body]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Missing required fields: {', '.join(missing)}")
+
+    if not isinstance(body["models"], list) or len(body["models"]) == 0:
+        raise HTTPException(status_code=400, detail="models must be a non-empty array")
+    if not isinstance(body["metrics"], list) or len(body["metrics"]) == 0:
+        raise HTTPException(status_code=400, detail="metrics must be a non-empty array")
+
+    config = ae_repo.create_config(tenant, {
+        "name": body["name"],
+        "dataset_id": body["dataset_id"],
+        "dataset_name": body.get("dataset_name", ""),
+        "models": body["models"],
+        "metrics": body["metrics"],
+        "schedule": body.get("schedule", "daily"),
+        "alert_on_regression": body.get("alert_on_regression", True),
+        "regression_threshold": body.get("regression_threshold", 0.05),
+        "topic_filter": body.get("topic_filter"),
+    })
+    return config
+
+
+@app.put("/v1/auto-eval/configs/{config_id}", tags=["auto-eval"])
+async def update_auto_eval_config(config_id: str, request: _Req):
+    from ..auto_eval import repository as ae_repo
+    tenant = _get_tenant(request)
+    if not ae_repo.get_config(tenant, config_id):
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    body = await request.json()
+    allowed = {"name", "dataset_id", "dataset_name", "models", "metrics",
+               "schedule", "alert_on_regression", "regression_threshold",
+               "topic_filter", "enabled"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
+
+    updated = ae_repo.update_config(tenant, config_id, updates)
+    return updated
+
+
+@app.delete("/v1/auto-eval/configs/{config_id}", tags=["auto-eval"])
+async def delete_auto_eval_config(config_id: str, request: _Req):
+    from ..auto_eval import repository as ae_repo
+    tenant = _get_tenant(request)
+    if not ae_repo.get_config(tenant, config_id):
+        raise HTTPException(status_code=404, detail="Config not found")
+    ae_repo.delete_config(tenant, config_id)
+    return {"message": "Config deleted"}
+
+
+@app.post("/v1/auto-eval/configs/{config_id}/trigger", tags=["auto-eval"], status_code=202)
+async def trigger_auto_eval_run(config_id: str, request: _Req):
+    from datetime import datetime
+    from ..auto_eval import repository as ae_repo
+    from ..datasets.repository import get_samples
+    from ..evaluations import repository as eval_repo
+    from ..evaluations.runner import EvaluationRunner
+
+    tenant = _get_tenant(request)
+    config = ae_repo.get_config(tenant, config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    samples = get_samples(tenant, config["dataset_id"])
+
+    now = datetime.utcnow().isoformat()
+    evaluation_data = {
+        "name": f"[Auto] {config['name']} - {now[:16]}",
+        "description": f"Auto-eval run for config {config_id}",
+        "dataset_id": config["dataset_id"],
+        "models": config["models"],
+        "metrics": config["metrics"],
+        "config": {},
+        "total_samples": len(samples),
+        "auto_eval_config_id": config_id,
+    }
+
+    evaluation = eval_repo.create(tenant, evaluation_data)
+    eid = evaluation["evaluation_id"]
+
+    auth = _get_auth(request)
+    try:
+        runner = EvaluationRunner()
+        runner.run(tenant, eid, authorization=auth)
+    except Exception as e:
+        logger.exception("Error running auto-eval evaluation: %s", e)
+        eval_repo.update_status(tenant, eid, status="failed", error_message=str(e))
+
+    run = ae_repo.create_run(tenant, config_id, {"evaluation_id": eid})
+    return run
+
+
+@app.get("/v1/auto-eval/configs/{config_id}/runs", tags=["auto-eval"])
+async def list_auto_eval_runs(config_id: str, request: _Req):
+    from datetime import datetime
+    from ..auto_eval import repository as ae_repo
+    from ..evaluations import repository as eval_repo
+
+    tenant = _get_tenant(request)
+    config = ae_repo.get_config(tenant, config_id)
+    if not config:
+        raise HTTPException(status_code=404, detail="Config not found")
+
+    runs = ae_repo.list_runs(tenant, config_id)
+
+    for run in runs:
+        if run.get("status") != "running":
+            continue
+        eid = run.get("evaluation_id")
+        if not eid:
+            continue
+        try:
+            evaluation = eval_repo.get(tenant, eid)
+            if not evaluation:
+                continue
+            es = evaluation.get("status")
+            if es not in ("completed", "failed"):
+                continue
+
+            run_updates: dict = {"status": es}
+
+            if es == "completed":
+                run_updates["completed_at"] = evaluation.get("completed_at", datetime.utcnow().isoformat())
+                result = eval_repo.get_result(tenant, eid)
+                if result:
+                    summary = result.get("summary", {})
+                    scores = {}
+                    for metric_id, metric_data in summary.items():
+                        if isinstance(metric_data, dict) and "average" in metric_data:
+                            scores[metric_id] = metric_data["average"]
+                        elif isinstance(metric_data, (int, float)):
+                            scores[metric_id] = metric_data
+                    run_updates["scores"] = scores
+
+                    threshold = config.get("regression_threshold", 0.05)
+                    last_score = config.get("last_run_score")
+                    regression = False
+                    if scores and config.get("alert_on_regression"):
+                        avg_score = sum(scores.values()) / len(scores)
+                        if last_score is not None and last_score > 0:
+                            regression = (last_score - avg_score) > threshold
+                    run_updates["regression_detected"] = regression
+
+                    avg_score = sum(scores.values()) / len(scores) if scores else 0
+                    ae_repo.update_config_last_run(tenant, config_id, avg_score, run_updates["completed_at"])
+            elif es == "failed":
+                run_updates["completed_at"] = evaluation.get("completed_at", datetime.utcnow().isoformat())
+                run_updates["error_message"] = evaluation.get("error_message", "Evaluation failed")
+
+            ae_repo.update_run(tenant, config_id, run["run_id"], run_updates)
+            run.update(run_updates)
+        except Exception as e:
+            logger.warning("Failed to hydrate run %s: %s", run.get("run_id"), e)
+
+    return {"runs": runs, "count": len(runs)}
+
+
+# ===================================================================
+# Proposals — all endpoints (from proposals router)
+# ===================================================================
+
+@app.get("/v1/proposals", tags=["proposals"])
+async def list_proposals(request: _Req, status: str | None = Query(None)):
+    from ..proposals import repository as prop_repo
+    tenant = _get_tenant(request)
+    proposals = prop_repo.list_all(tenant, status=status)
+    return {"proposals": proposals, "count": len(proposals)}
+
+
+@app.get("/v1/proposals/{proposal_id}", tags=["proposals"])
+async def get_proposal(proposal_id: str, request: _Req):
+    from ..proposals import repository as prop_repo
+    tenant = _get_tenant(request)
+    proposal = prop_repo.get(tenant, proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return proposal
+
+
+@app.post("/v1/proposals/{proposal_id}/approve", tags=["proposals"])
+async def approve_proposal(proposal_id: str, request: _Req):
+    from ..proposals import repository as prop_repo
+    from ..proposals.decision_engine import DecisionEngine
+
+    tenant = _get_tenant(request)
+    proposal = prop_repo.get(tenant, proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal.get("status") != "pending":
+        raise HTTPException(status_code=400, detail=f"Cannot approve proposal with status: {proposal.get('status')}")
+
+    prop_repo.update_status(tenant, proposal_id, "approved")
+    auth = _get_auth(request)
+
+    try:
+        engine = DecisionEngine()
+        result = engine.execute_proposal(tenant, proposal, authorization=auth)
+        if result.get("success"):
+            prop_repo.update_status(tenant, proposal_id, "executed", execution_result=result)
+            return {"message": "Proposal approved and executed", "proposal_id": proposal_id, "execution_result": result}
+        else:
+            prop_repo.update_status(tenant, proposal_id, "failed", execution_result=result)
+            raise HTTPException(status_code=500, detail={"error": "Proposal execution failed", "execution_result": result})
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Proposal execution error")
+        error_result = {"success": False, "error": str(e)}
+        prop_repo.update_status(tenant, proposal_id, "failed", execution_result=error_result)
+        raise HTTPException(status_code=500, detail=f"Proposal execution failed: {e}")
+
+
+@app.post("/v1/proposals/{proposal_id}/reject", tags=["proposals"])
+async def reject_proposal(proposal_id: str, request: _Req):
+    from ..proposals import repository as prop_repo
+
+    tenant = _get_tenant(request)
+    proposal = prop_repo.get(tenant, proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal.get("status") != "pending":
+        raise HTTPException(status_code=400, detail=f"Cannot reject proposal with status: {proposal.get('status')}")
+
+    body = await request.json() if request.headers.get("content-length", "0") != "0" else {}
+    reason = body.get("reason")
+    execution_result = {"reject_reason": reason} if reason else None
+
+    prop_repo.update_status(tenant, proposal_id, "rejected", execution_result=execution_result)
+    return {"message": "Proposal rejected", "proposal_id": proposal_id}
+
+
+# ===================================================================
+# Eval Agent — all endpoints (from eval_agent router)
+# ===================================================================
+
+@app.post("/v1/eval-agent/analyze", tags=["eval-agent"])
+async def eval_agent_analyze(request: _Req):
+    from ..eval_agent.agent import EvalAgent
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+    dataset_id = body.get("dataset_id")
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="dataset_id is required")
+
+    auth = _get_auth(request)
+    try:
+        agent = EvalAgent()
+        result = agent.analyze(tenant, dataset_id, authorization=auth)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Eval agent analyze failed")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {e}")
+
+
+@app.post("/v1/eval-agent/setup", tags=["eval-agent"], status_code=201)
+async def eval_agent_setup(request: _Req):
+    from ..eval_agent.agent import EvalAgent
+
+    tenant = _get_tenant(request)
+    body = await request.json()
+    dataset_id = body.get("dataset_id")
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="dataset_id is required")
+
+    auto_trigger = body.get("auto_trigger", True)
+    auth = _get_auth(request)
+
+    try:
+        agent = EvalAgent()
+        result = agent.setup(tenant, dataset_id, authorization=auth, auto_trigger=auto_trigger)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("Eval agent setup failed")
+        raise HTTPException(status_code=500, detail=f"Setup failed: {e}")
+
+
+@app.post("/v1/eval-agent/scan", tags=["eval-agent"])
+async def eval_agent_scan(request: _Req):
+    from ..eval_agent.agent import EvalAgent
+
+    tenant = _get_tenant(request)
+    auth = _get_auth(request)
+    try:
+        agent = EvalAgent()
+        result = agent.scan_all(tenant, authorization=auth)
+        return result
+    except Exception as e:
+        logger.exception("Eval agent scan failed")
+        raise HTTPException(status_code=500, detail=f"Scan failed: {e}")
+
+
+# ===================================================================
+# Distillation — all endpoints (from distillation router)
+# ===================================================================
+
+@app.get("/v1/distillation", tags=["distillation"])
+async def list_distillation_jobs(
+    tenant_id: str = Query("default"),
+    status: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    from ..distillation import repository as dist_repo
+    from ..distillation.router import _serialize_job
+
+    tid = tenant_id or "default"
+    jobs, total = dist_repo.list_jobs(tid, status=status, limit=limit, offset=offset)
+    return [_serialize_job(j) for j in jobs if j.get("status") != "deleted"]
+
+
+@app.post("/v1/distillation", tags=["distillation"])
+async def create_distillation_job(body: dict):
+    from ..distillation import repository as dist_repo
+    from ..distillation.schemas import DistillationConfig
+    from ..distillation.router import _serialize_job
+
+    tid = body.get("tenant_id") or "default"
+    name = body.get("name", "Untitled")
+    description = body.get("description", "")
+    config_data = body.get("config", {})
+
+    try:
+        config = DistillationConfig(**config_data)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid config: {e}")
+
+    job = dist_repo.create_job(tid, {
+        "name": name,
+        "description": description,
+        "config": config.model_dump(),
+    })
+
+    job_id = job["job_id"]
+    logger.info("Created distillation job %s for tenant %s", job_id, tid)
+
+    from ..distillation.pipeline import launch_pipeline
+    launch_pipeline(job_id, tid, config)
+
+    return _serialize_job(job)
+
+
+@app.post("/v1/distillation/estimate", tags=["distillation"])
+async def estimate_distillation_job(request: _Req):
+    from ..distillation.schemas import EstimateRequest, MODEL_PARAM_SIZES
+
+    body = await request.json()
+    b = EstimateRequest(**body)
+
+    param_size = MODEL_PARAM_SIZES.get(b.student_model, 1.0)
+    gen_cost = b.num_prompts * b.n_samples * 0.001
+    train_cost = param_size * 0.01
+    estimated_cost = gen_cost + train_cost
+
+    return {
+        "estimated_cost": round(estimated_cost, 2),
+        "is_sandbox": False,
+        "tier": "local",
+        "balance": 999999,
+        "sufficient": True,
+    }
+
+
+@app.get("/v1/distillation/teacher-models", tags=["distillation"])
+async def list_teacher_models():
+    from ..distillation.schemas import TEACHER_MODEL_MAP
+
+    models = []
+    for m in TEACHER_MODEL_MAP:
+        models.append({
+            "id": m["id"],
+            "name": m["name"],
+            "provider": m["provider"],
+            "type": "external",
+            "available": True,
+        })
+    return {"models": models}
+
+
+@app.get("/v1/distillation/student-models", tags=["distillation"])
+async def list_student_models():
+    from ..distillation.schemas import STUDENT_MODEL_MAP, MODEL_PARAM_SIZES
+
+    models = []
+    for key in STUDENT_MODEL_MAP:
+        family = key.split("-")[0]
+        params = MODEL_PARAM_SIZES.get(key, 0)
+        models.append({
+            "id": key,
+            "name": key,
+            "family": family,
+            "params": f"{params}B",
+            "available": True,
+        })
+    return {"models": models}
+
+
+@app.get("/v1/distillation/{job_id}", tags=["distillation"])
+async def get_distillation_job(job_id: str, tenant_id: str = Query("default")):
+    from ..distillation import repository as dist_repo
+    from ..distillation.router import _serialize_job
+
+    tid = tenant_id or "default"
+    job = dist_repo.get_job(tid, job_id)
+    if not job or job.get("status") == "deleted":
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _serialize_job(job)
+
+
+@app.delete("/v1/distillation/{job_id}", tags=["distillation"])
+async def delete_distillation_job(job_id: str, tenant_id: str = Query("default")):
+    from ..distillation import repository as dist_repo
+    from ..distillation.pipeline import cancel_pipeline
+
+    tid = tenant_id or "default"
+    cancel_pipeline(job_id)
+
+    ok = dist_repo.delete_job(tid, job_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"deleted": True}
+
+
+@app.post("/v1/distillation/{job_id}/cancel", tags=["distillation"])
+async def cancel_distillation_job(job_id: str, tenant_id: str = Query("default")):
+    from ..distillation import repository as dist_repo
+    from ..distillation.pipeline import cancel_pipeline
+    from ..distillation.router import _serialize_job
+
+    tid = tenant_id or "default"
+    job = dist_repo.get_job(tid, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    active_statuses = {"pending", "queued", "running"}
+    if job.get("status") in active_statuses:
+        cancel_pipeline(job_id)
+        dist_repo.update_job_status(tid, job_id, status="cancelled", error="Cancelled by user")
+        job = dist_repo.get_job(tid, job_id) or job
+
+    return _serialize_job(job)
+
+
+@app.get("/v1/distillation/{job_id}/logs", tags=["distillation"])
+async def get_distillation_logs(job_id: str, tenant_id: str = Query("default")):
+    from ..distillation import repository as dist_repo
+
+    tid = tenant_id or "default"
+    job = dist_repo.get_job(tid, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    logs = job.get("pipeline_logs", [])
+    if not isinstance(logs, list):
+        logs = []
+    return {"logs": logs}
+
+
+@app.get("/v1/distillation/{job_id}/candidates", tags=["distillation"])
+async def get_distillation_candidates(
+    job_id: str,
+    tenant_id: str = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    from typing import Any as _Any
+    from ..distillation import repository as dist_repo
+
+    candidates = dist_repo.get_candidates(job_id, limit=limit * 10)
+
+    grouped: dict[str, list[dict[str, _Any]]] = {}
+    for c in candidates:
+        pid = c.get("prompt_id", "")
+        grouped.setdefault(pid, []).append(c)
+
+    samples = []
+    for prompt_id, prompt_candidates in list(grouped.items())[:limit]:
+        prompt_text = prompt_candidates[0].get("prompt", "") if prompt_candidates else ""
+        cands = []
+        for c in prompt_candidates:
+            cands.append({
+                "text": c.get("response", ""),
+                "scores": {"quality": float(c.get("score", 0))},
+                "isWinner": bool(c.get("selected", 0)),
+                "candidate_idx": int(c.get("candidate_idx", 0)),
+            })
+        samples.append({
+            "prompt": prompt_text,
+            "trace_id": prompt_id,
+            "candidates": cands,
+        })
+
+    return {"samples": samples, "total": len(grouped)}
+
+
+@app.get("/v1/distillation/{job_id}/artifacts", tags=["distillation"])
+async def get_distillation_artifacts(job_id: str, tenant_id: str = Query("default")):
+    from pathlib import Path
+    from ..distillation import repository as dist_repo
+
+    tid = tenant_id or "default"
+    job = dist_repo.get_job(tid, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    artifacts_data = job.get("artifacts", {})
+    gguf_map = artifacts_data.get("gguf", {}) if isinstance(artifacts_data, dict) else {}
+
+    result = []
+    for quant_type, file_path in gguf_map.items():
+        path = Path(file_path) if file_path else None
+        size = path.stat().st_size if path and path.exists() else 0
+        result.append({
+            "key": quant_type,
+            "size": size,
+            "url": f"/v1/distillation/{job_id}/download/{quant_type}",
+            "expires_in": 0,
+        })
+
+    return result
+
+
+@app.get("/v1/distillation/{job_id}/metrics", tags=["distillation"])
+async def get_distillation_metrics(
+    job_id: str,
+    tenant_id: str = Query("default"),
+    limit: int = Query(5000, ge=1, le=50000),
+):
+    from ..distillation import repository as dist_repo
+
+    metrics = dist_repo.get_metrics(job_id, limit=limit)
+    return {"metrics": metrics, "total": len(metrics)}
+
+
+# --- Initialization (for programmatic setup) ---
 
 
 def init_router(

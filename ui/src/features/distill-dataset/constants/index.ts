@@ -52,6 +52,8 @@ export const DATE_RANGES = [
   { label: 'All', value: 'all' },
 ] as const;
 
+export const TRACES_PAGE_SIZE = 15;
+export const TRACES_PAGE_SIZE_OPTIONS = [10, 15, 25, 50, 100];
 export const GENERATE_COUNT = { min: 10, max: 500, default: 50 };
 
 export const SOURCE_OPTIONS = [

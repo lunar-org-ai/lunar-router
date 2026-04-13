@@ -19,9 +19,10 @@ import { ModeSelector } from './ModeSelector';
 import { DatasetNameFields } from './DatasetNameFields';
 import { ManualMode } from './ManualMode';
 import { ImportMode } from './ImportMode';
+import { SmartImportMode } from './SmartImportMode';
 import { TopicMode } from './TopicMode';
-import { GenerateMode } from './GenerateMode';
 import { TracesMode } from './TracesMode';
+import { ClusterMode } from './ClusterMode';
 import { SuccessOverlay } from './SuccessOverlay';
 import type {
   Dataset,
@@ -30,9 +31,10 @@ import type {
   CreateDatasetRequest,
   CreateFromInstructionRequest,
   CreateFromInstructionResponse,
-  GenerateDatasetRequest,
-  GenerateDatasetResponse,
+  AnalyzeTracesResponse,
+  ImportTracesResponse,
 } from '../../types';
+import type { ClusterDataset } from '@/services/clusteringService';
 
 interface FooterState {
   secondary: string;
@@ -44,8 +46,8 @@ interface FooterState {
 
 const SUBMIT_LABEL: Partial<Record<CreateMode, string>> = {
   import: 'Import Dataset',
+  'smart-import': 'Import Traces',
   topic: 'Find & Create',
-  generate: 'Generate',
   manual: 'Create Dataset',
 };
 
@@ -55,6 +57,8 @@ const MODE_DESCRIPTIONS: Record<CreateMode, string> = {
   traces: 'Select traces from your API and Playground usage.',
   manual: 'Add input/output samples by hand, one at a time.',
   import: 'Upload a CSV or JSON file to populate the dataset.',
+  'smart-import': 'Upload any JSON traces — AI auto-detects the schema.',
+  cluster: 'Select a cluster of traces to create a dataset from.',
 };
 
 interface CreateDatasetModalProps {
@@ -70,14 +74,20 @@ interface CreateDatasetModalProps {
   onCreateFromTopic?: (
     request: CreateFromInstructionRequest
   ) => Promise<CreateFromInstructionResponse | null | undefined>;
-  onGenerate?: (
-    request: GenerateDatasetRequest
-  ) => Promise<GenerateDatasetResponse | null | undefined>;
-  onPollGenerate?: (datasetId: string) => Promise<number>;
-  onGenerateBackground?: (datasetId: string, name: string, requested: number) => void;
   traces?: Trace[];
   tracesLoading?: boolean;
   onCreateFromTraces?: (name: string, traceIds: string[]) => Promise<void>;
+  onAnalyzeTraces?: (data: any[]) => Promise<AnalyzeTracesResponse>;
+  onImportTraces?: (
+    name: string,
+    data: any[],
+    mapping: any,
+    description?: string
+  ) => Promise<ImportTracesResponse>;
+  clusters?: ClusterDataset[];
+  clustersLoading?: boolean;
+  onCreateFromCluster?: (name: string, runId: string, clusterId: number) => Promise<void>;
+  onTriggerClustering?: (days?: number) => Promise<void>;
 }
 
 export function CreateDatasetModal({
@@ -87,12 +97,15 @@ export function CreateDatasetModal({
   onCreate,
   onImport,
   onCreateFromTopic,
-  onGenerate,
-  onPollGenerate,
-  onGenerateBackground,
   traces,
   tracesLoading,
   onCreateFromTraces,
+  onAnalyzeTraces,
+  onImportTraces,
+  clusters,
+  clustersLoading,
+  onCreateFromCluster,
+  onTriggerClustering,
 }: CreateDatasetModalProps) {
   const modal = useCreateDatasetModal({
     open,
@@ -100,28 +113,23 @@ export function CreateDatasetModal({
     onCreate,
     onImport,
     onCreateFromTopic,
-    onGenerate,
-    onPollGenerate,
-    onGenerateBackground,
+    onAnalyzeTraces,
+    onImportTraces,
   });
 
   const isDisabled = modal.isDisabled || !!loading;
 
   const showAutoCollect =
     modal.mode !== 'traces' &&
-    !(modal.mode === 'topic' && modal.topicPhase !== 'idle') &&
-    !(modal.mode === 'generate' && modal.generatePhase !== 'idle');
+    modal.mode !== 'cluster' &&
+    !(modal.mode === 'topic' && modal.topicPhase !== 'idle');
 
   const showAutoCollectTextarea = modal.mode === 'manual' || modal.mode === 'import';
 
   const footerState = ((): FooterState => {
     const isTopicFinished =
       modal.mode === 'topic' && ['done', 'no-match', 'error'].includes(modal.topicPhase);
-    const isGenerateFinished =
-      modal.mode === 'generate' && ['done', 'error'].includes(modal.generatePhase);
     const isTopicRetry = modal.mode === 'topic' && ['no-match', 'error'].includes(modal.topicPhase);
-    const isGenerateRetry = modal.mode === 'generate' && modal.generatePhase === 'error';
-    const isGenerateRunning = modal.mode === 'generate' && modal.isGenerateProcessing;
 
     if (isTopicRetry)
       return {
@@ -131,15 +139,7 @@ export function CreateDatasetModal({
         onPrimary: modal.handleClose,
         isSubmit: false,
       };
-    if (isGenerateRetry)
-      return {
-        secondary: 'Try Again',
-        primary: 'Close',
-        onSecondary: modal.handleGenerateRetry,
-        onPrimary: modal.handleClose,
-        isSubmit: false,
-      };
-    if (isTopicFinished || isGenerateFinished)
+    if (isTopicFinished)
       return {
         secondary: 'Close',
         primary: 'Done',
@@ -147,24 +147,8 @@ export function CreateDatasetModal({
         onPrimary: modal.handleClose,
         isSubmit: false,
       };
-    if (isGenerateRunning)
-      return {
-        secondary: 'Cancel',
-        primary: 'Continue in background',
-        onSecondary: modal.handleClose,
-        onPrimary: () => {
-          // handleClose already calls onGenerateBackground when isGenerateProcessing
-          modal.handleClose();
-        },
-        isSubmit: false,
-      };
 
-    const loadingLabel =
-      modal.mode === 'topic'
-        ? 'Scanning traces…'
-        : modal.mode === 'generate'
-          ? 'Generating…'
-          : 'Creating…';
+    const loadingLabel = modal.mode === 'topic' ? 'Scanning traces…' : 'Creating…';
 
     return {
       secondary: 'Cancel',
@@ -195,27 +179,6 @@ export function CreateDatasetModal({
           />
         );
 
-      case 'generate':
-        return (
-          <GenerateMode
-            name={modal.name}
-            description={modal.description}
-            instruction={modal.generateInstruction}
-            count={modal.generateCount}
-            generatePhase={modal.generatePhase}
-            isProcessing={modal.isGenerateProcessing}
-            generateLog={modal.generateLog}
-            generateResult={modal.generateResult}
-            error={modal.error}
-            disabled={isDisabled}
-            onNameChange={modal.setName}
-            onDescriptionChange={modal.setDescription}
-            onInstructionChange={modal.setGenerateInstruction}
-            onCountChange={modal.setGenerateCount}
-            inputRef={modal.inputRef}
-          />
-        );
-
       case 'traces':
         return (
           <TracesMode
@@ -224,6 +187,35 @@ export function CreateDatasetModal({
             disabled={isDisabled}
             onCreateFromTraces={onCreateFromTraces!}
             onSuccess={modal.showSuccess}
+          />
+        );
+
+      case 'cluster':
+        return (
+          <ClusterMode
+            clusters={clusters ?? []}
+            clustersLoading={!!clustersLoading}
+            disabled={isDisabled}
+            onCreateFromCluster={onCreateFromCluster!}
+            onSuccess={modal.showSuccess}
+            onTriggerClustering={onTriggerClustering}
+          />
+        );
+
+      case 'smart-import':
+        return (
+          <SmartImportMode
+            name={modal.name}
+            description={modal.description}
+            disabled={isDisabled}
+            file={modal.smartImportFile}
+            phase={modal.smartImportPhase}
+            analysis={modal.smartImportAnalysis}
+            recordCount={modal.smartImportRecordCount}
+            onNameChange={modal.setName}
+            onDescriptionChange={modal.setDescription}
+            onFileSelect={modal.handleSmartImportFileSelect}
+            inputRef={modal.inputRef}
           />
         );
 
@@ -259,7 +251,8 @@ export function CreateDatasetModal({
     }
   };
 
-  const dialogWidth = modal.mode === 'traces' ? 'max-w-5xl' : 'max-w-2xl';
+  const dialogWidth =
+    modal.mode === 'traces' || modal.mode === 'cluster' ? 'max-w-5xl' : 'max-w-2xl';
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && modal.handleClose()}>
@@ -281,12 +274,12 @@ export function CreateDatasetModal({
               onModeChange={modal.setMode}
               disabled={isDisabled}
               showTopic={!!onCreateFromTopic}
-              showGenerate={!!onGenerate}
               showTraces={!!onCreateFromTraces && !!traces}
+              showCluster={!!onCreateFromCluster && !!clusters}
             />
           </div>
 
-          {modal.mode === 'traces' ? (
+          {modal.mode === 'traces' || modal.mode === 'cluster' ? (
             <div className="flex min-h-0 flex-1 flex-col">{renderModeContent()}</div>
           ) : (
             <>
@@ -328,7 +321,7 @@ export function CreateDatasetModal({
                   </div>
                 )}
 
-                {modal.error && modal.mode !== 'topic' && modal.mode !== 'generate' && (
+                {modal.error && modal.mode !== 'topic' && (
                   <Alert variant="destructive">
                     <AlertCircle className="size-4" />
                     <AlertDescription>{modal.error}</AlertDescription>
@@ -338,7 +331,7 @@ export function CreateDatasetModal({
             </>
           )}
 
-          {modal.mode !== 'traces' && (
+          {modal.mode !== 'traces' && modal.mode !== 'cluster' && (
             <DialogFooter className="px-6 py-4 border-t">
               <Button
                 type="button"

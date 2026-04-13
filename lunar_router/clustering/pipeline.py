@@ -177,10 +177,14 @@ class ClusteringPipeline:
         merge_suggestions = await self._find_merge_suggestions(datasets, embeddings, cluster_assignments)
 
         # Step 6: Build version info
+        # Convert numpy scalars to native Python types for JSON serialization
+        silhouette_py = float(silhouette)
+        num_clusters_py = int(num_clusters)
+
         config = {
             "strategy": self.strategy,
-            "k": num_clusters,
-            "silhouette": round(silhouette, 4),
+            "k": num_clusters_py,
+            "silhouette": round(silhouette_py, 4),
             "min_traces": min_traces,
             "days": days,
         }
@@ -193,8 +197,8 @@ class ClusteringPipeline:
             clustering_config=config,
             labeler_model=self.llm_model,
             trace_count=len(traces),
-            num_clusters=num_clusters,
-            silhouette_score=silhouette,
+            num_clusters=num_clusters_py,
+            silhouette_score=silhouette_py,
         )
 
         result = ClusteringResult(
@@ -431,17 +435,17 @@ class ClusteringPipeline:
         if rows:
             client.insert("cluster_datasets", rows, column_names=ds_columns)
 
-        # Batch insert trace → cluster mapping (JOIN on input_text)
+        # Batch insert trace → cluster mapping
         map_rows = []
         for i, trace in enumerate(traces):
             cid = int(assignments[i])
-            map_rows.append([v.run_id, trace.input_text, cid, trace.output_text])
+            map_rows.append([v.run_id, trace.request_id, cid, trace.output_text])
 
         if map_rows:
             client.insert(
                 "trace_cluster_map",
                 map_rows,
-                column_names=["run_id", "input_text", "cluster_id", "output_text"],
+                column_names=["run_id", "request_id", "cluster_id", "output_text"],
             )
 
         logger.info(f"[clustering:{v.run_id}] Stored {len(result.datasets)} clusters, {len(map_rows)} mappings")

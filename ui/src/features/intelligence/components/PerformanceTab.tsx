@@ -75,8 +75,6 @@ import type { TrainingRunDetail } from '../types';
 import { MetricCard } from './shared/MetricCard';
 import { PerformanceSkeleton, EmptyState, ErrorState } from './shared';
 
-/* ── Constants ──────────────────────────────────────────────────────── */
-
 const CHART_COLORS = [
   'var(--chart-1)',
   'var(--chart-2)',
@@ -144,7 +142,6 @@ function PerformanceContent({ data }: { data: IntelligenceData }) {
 
   return (
     <div className="space-y-8">
-      {/* KPI cards */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-3 xl:grid-cols-6">
         <MetricCard
           label="Total Jobs"
@@ -184,10 +181,8 @@ function PerformanceContent({ data }: { data: IntelligenceData }) {
         />
       </div>
 
-      {/* Distillation Pipeline */}
       {distSummary && <PipelineCard summary={distSummary} />}
 
-      {/* Model charts */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <ModelDonutCard
           title="Teacher Models"
@@ -205,13 +200,11 @@ function PerformanceContent({ data }: { data: IntelligenceData }) {
         />
       </div>
 
-      {/* Teacher vs Student comparison */}
       {data.models?.teacher_student && <TeacherVsStudentCard ts={data.models.teacher_student} />}
 
-      {/* Training Activity section */}
       {training && <TrainingActivitySection training={training} selectedDays={selectedDays} />}
 
-      {/* Distillation Runs table */}
+      {trainingRuns.length > 0 && <RunsTable runs={trainingRuns} days={selectedDays} />}
       {trainingRuns.length > 0 && <RunsTable runs={trainingRuns} days={selectedDays} />}
     </div>
   );
@@ -260,7 +253,6 @@ function PipelineCard({ summary }: { summary: DistillationSummary }) {
           />
         </div>
 
-        {/* Latest completed job */}
         {summary.latest_completed_job && (
           <div className="flex flex-col gap-3 rounded-lg border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="space-y-1">
@@ -693,7 +685,6 @@ function TrainingActivitySection({
 
   return (
     <>
-      {/* Training Activity KPIs */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <MetricCard
           label="Training Runs"
@@ -734,9 +725,7 @@ function TrainingActivitySection({
         />
       </div>
 
-      {/* Charts Row: Training History + Signal Trends */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* Training History */}
         {training.training_history.length > 0 && (
           <Card>
             <CardHeader>
@@ -786,7 +775,6 @@ function TrainingActivitySection({
           </Card>
         )}
 
-        {/* Signal Trends */}
         {signalChartData.length > 0 && (
           <Card>
             <CardHeader>
@@ -829,7 +817,6 @@ function TrainingActivitySection({
         )}
       </div>
 
-      {/* Advisor Decisions */}
       {training.advisor_decisions.length > 0 && (
         <Card>
           <CardHeader>
@@ -878,7 +865,6 @@ function TrainingActivitySection({
         </Card>
       )}
 
-      {/* Training Cycles Table */}
       {training.training_cycles.length > 0 && (
         <Card>
           <CardHeader>

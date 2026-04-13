@@ -2,21 +2,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { formatCost } from '@/utils/formatUtils';
 import type { CostBreakdown } from '@/features/router-intelligence/types';
 
-/* ------------------------------------------------------------------ */
-/*  Shared baseline-vs-router cost comparison card                     */
-/* ------------------------------------------------------------------ */
-
 interface BaselineComparisonProps {
-  /** CostBreakdown from the efficiency endpoint */
   cb: CostBreakdown;
-  /**
-   * "full"  → 4-column card (Baseline, Actual, Savings, Projection)  — Overview & CostAnalysis
-   * "compact" → 3-column card (Router, Baseline, Savings)           — RoutingIntelligence
-   */
   variant?: 'full' | 'compact';
-  /** Optional override for the card title (defaults vary by variant) */
   title?: string;
-  /** Optional override for the card description */
   description?: string;
 }
 
@@ -63,7 +52,6 @@ export function BaselineComparison({
     );
   }
 
-  /* ---------- variant === "full" ---------- */
   return (
     <Card>
       <CardHeader>
@@ -103,10 +91,6 @@ export function BaselineComparison({
     </Card>
   );
 }
-
-/* ------------------------------------------------------------------ */
-/*  Internal stat cell                                                 */
-/* ------------------------------------------------------------------ */
 
 function StatCell({
   label,

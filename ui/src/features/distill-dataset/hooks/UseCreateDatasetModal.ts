@@ -10,6 +10,8 @@ import type {
   CreateFromInstructionResponse,
   GenerateDatasetRequest,
   GenerateDatasetResponse,
+  AnalyzeTracesResponse,
+  ImportTracesResponse,
 } from '../types';
 import { GENERATE_COUNT } from '../constants';
 
@@ -30,6 +32,13 @@ interface UseCreateDatasetModalOptions {
   ) => Promise<GenerateDatasetResponse | null | undefined>;
   onPollGenerate?: (datasetId: string) => Promise<number>;
   onGenerateBackground?: (datasetId: string, name: string, requested: number) => void;
+  onAnalyzeTraces?: (data: any[]) => Promise<AnalyzeTracesResponse>;
+  onImportTraces?: (
+    name: string,
+    data: any[],
+    mapping: any,
+    description?: string
+  ) => Promise<ImportTracesResponse>;
 }
 
 export function useCreateDatasetModal({
@@ -41,6 +50,8 @@ export function useCreateDatasetModal({
   onGenerate,
   onPollGenerate,
   onGenerateBackground,
+  onAnalyzeTraces,
+  onImportTraces,
 }: UseCreateDatasetModalOptions) {
   const [mode, setMode] = useState<CreateMode>('manual');
   const [name, setName] = useState('');
@@ -71,6 +82,16 @@ export function useCreateDatasetModal({
     requested: number;
   } | null>(null);
 
+  // Smart import state
+  const [smartImportFile, setSmartImportFile] = useState<File | null>(null);
+  const [smartImportRecords, setSmartImportRecords] = useState<any[]>([]);
+  const [smartImportPhase, setSmartImportPhase] = useState<
+    'upload' | 'analyzing' | 'preview' | 'importing'
+  >('upload');
+  const [smartImportAnalysis, setSmartImportAnalysis] = useState<AnalyzeTracesResponse | null>(
+    null
+  );
+
   const inputRef = useRef<HTMLInputElement | null>(null);
   const phaseTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -99,6 +120,10 @@ export function useCreateDatasetModal({
       setGenerateLog([]);
       setGenerateResult(null);
       generatingRef.current = null;
+      setSmartImportFile(null);
+      setSmartImportRecords([]);
+      setSmartImportPhase('upload');
+      setSmartImportAnalysis(null);
     }
     return () => {
       phaseTimers.current.forEach(clearTimeout);
@@ -222,6 +247,61 @@ export function useCreateDatasetModal({
     );
     showSuccess((result as Dataset | null)?.name || name.trim());
   }, [file, name, keepBuilding, autoCollectInstruction, onImport, showSuccess]);
+
+  const handleSmartImportFileSelect = useCallback(
+    async (selectedFile: File, records: any[]) => {
+      setSmartImportFile(selectedFile);
+      setSmartImportRecords(records);
+      setError(null);
+      if (!name) setName(selectedFile.name.replace(/\.json$/i, ''));
+
+      if (onAnalyzeTraces) {
+        setSmartImportPhase('analyzing');
+        try {
+          const analysis = await onAnalyzeTraces(records);
+          setSmartImportAnalysis(analysis);
+          setSmartImportPhase('preview');
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : 'Schema analysis failed';
+          setError(msg);
+          setSmartImportPhase('upload');
+          setSmartImportFile(null);
+          setSmartImportRecords([]);
+        }
+      } else {
+        setSmartImportPhase('preview');
+      }
+    },
+    [name, onAnalyzeTraces]
+  );
+
+  const submitSmartImport = useCallback(async () => {
+    if (!smartImportRecords.length || !smartImportAnalysis) {
+      setError('Please upload a JSON file first');
+      setCreating(false);
+      return;
+    }
+    if (!onImportTraces) {
+      setError('Smart import is not available');
+      setCreating(false);
+      return;
+    }
+
+    setSmartImportPhase('importing');
+    try {
+      const result = await onImportTraces(
+        name.trim(),
+        smartImportRecords,
+        smartImportAnalysis.mapping,
+        description.trim() || undefined
+      );
+      showSuccess(result.name || name.trim());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Import failed');
+      setSmartImportPhase('preview');
+      setCreating(false);
+    }
+  }, [smartImportRecords, smartImportAnalysis, name, description, onImportTraces, showSuccess]);
 
   const submitTopic = useCallback(async () => {
     if (!topic.trim()) {
@@ -478,6 +558,9 @@ export function useCreateDatasetModal({
           case 'import':
             await submitImport();
             break;
+          case 'smart-import':
+            await submitSmartImport();
+            break;
           case 'manual':
             await submitManual();
             break;
@@ -489,7 +572,16 @@ export function useCreateDatasetModal({
         setCreating(false);
       }
     },
-    [mode, name, creating, submitTopic, submitGenerate, submitImport, submitManual]
+    [
+      mode,
+      name,
+      creating,
+      submitTopic,
+      submitGenerate,
+      submitImport,
+      submitSmartImport,
+      submitManual,
+    ]
   );
 
   const handleTopicRetry = useCallback(() => {
@@ -552,5 +644,11 @@ export function useCreateDatasetModal({
     generateResult,
     handleGenerateRetry,
     generatingRef,
+
+    smartImportFile,
+    smartImportPhase,
+    smartImportAnalysis,
+    smartImportRecordCount: smartImportRecords.length,
+    handleSmartImportFileSelect,
   };
 }

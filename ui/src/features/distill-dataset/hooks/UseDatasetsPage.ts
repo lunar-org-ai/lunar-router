@@ -4,6 +4,7 @@ import { toast } from 'sonner';
 import { useDatasets } from '@/hooks/useDatasets';
 import { useMetrics } from '@/contexts/MetricsContext';
 import { useEvaluationsService } from '@/features/evaluations/api/evaluationsService';
+import { useClusteringService, type ClusterDataset } from '@/services/clusteringService';
 import { DEFAULT_AUTO_COLLECT } from '../constants';
 import type {
   Dataset,
@@ -23,9 +24,14 @@ export function useDatasetsPage() {
   const [deletingDatasetId, setDeletingDatasetId] = useState<string | null>(null);
 
   const service = useEvaluationsService();
+  const clusteringService = useClusteringService();
   const { allTraces, isLoading: metricsLoading, isInitialized: metricsInitialized } = useMetrics();
   const datasetsHook = useDatasets();
   const bgPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Cluster datasets
+  const [clusters, setClusters] = useState<ClusterDataset[]>([]);
+  const [clustersLoading, setClustersLoading] = useState(false);
 
   const {
     datasets,
@@ -46,6 +52,27 @@ export function useDatasetsPage() {
     },
     []
   );
+
+  // Load cluster datasets on mount
+  useEffect(() => {
+    let cancelled = false;
+    setClustersLoading(true);
+    clusteringService
+      .listDatasets()
+      .then((result) => {
+        if (!cancelled) setClusters(result.datasets);
+      })
+      .catch(() => {
+        // silently fail — clusters are optional
+      })
+      .finally(() => {
+        if (!cancelled) setClustersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const traces: Trace[] = useMemo(
     () =>
@@ -185,6 +212,58 @@ export function useDatasetsPage() {
     [createDatasetFromTraces]
   );
 
+  const refreshClusters = useCallback(async () => {
+    setClustersLoading(true);
+    try {
+      const result = await clusteringService.listDatasets();
+      setClusters(result.datasets);
+    } catch {
+      // silently fail
+    } finally {
+      setClustersLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clusteringService]);
+
+  const handleTriggerClustering = useCallback(
+    async (days = 30) => {
+      setClustersLoading(true);
+      toast.info('Clustering pipeline started...');
+      try {
+        const result = await clusteringService.triggerRun(days);
+        toast.success(
+          `Clustering complete: ${result.summary.qualified} qualified, ` +
+            `${result.summary.candidate} candidate, ${result.summary.rejected} rejected`
+        );
+        await refreshClusters();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Clustering failed';
+        toast.error(msg);
+      } finally {
+        setClustersLoading(false);
+      }
+    },
+    [clusteringService, refreshClusters]
+  );
+
+  const handleCreateFromCluster = useCallback(
+    async (name: string, runId: string, clusterId: number) => {
+      // Export the cluster traces then create a dataset via the evaluations pipeline
+      const blob = await clusteringService.exportDataset(runId, clusterId);
+      const file = new File([blob], `cluster_${clusterId}.jsonl`, {
+        type: 'application/jsonl',
+      });
+      const dataset = await importDataset(file, name);
+      if (!dataset) {
+        throw new Error('Failed to create dataset from cluster');
+      }
+      toast.success(`Created "${dataset.name}" from cluster`);
+      refreshDatasets();
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clusteringService, importDataset, refreshDatasets]
+  );
+
   const handleCreateFromTopic = useCallback(
     async (request: CreateFromInstructionRequest) => {
       const result = await createDatasetFromInstruction(request);
@@ -228,6 +307,23 @@ export function useDatasetsPage() {
     [importDataset, setupAutoCollect]
   );
 
+  const handleAnalyzeTraces = useCallback(
+    async (data: any[]) => {
+      return await service.analyzeTraces(accessToken, data);
+    },
+    [accessToken, service]
+  );
+
+  const handleImportTraces = useCallback(
+    async (name: string, data: any[], mapping: any, description?: string) => {
+      const result = await service.importTraces(accessToken, name, data, mapping, description);
+      toast.success(`Imported "${result.name}" with ${result.samples_count} samples`);
+      refreshDatasets();
+      return result;
+    },
+    [accessToken, service, refreshDatasets]
+  );
+
   const handlePollGenerate = useCallback(
     async (datasetId: string) => {
       const result = await getDataset(datasetId, { include_samples: false });
@@ -260,14 +356,20 @@ export function useDatasetsPage() {
     filteredDatasets,
     traces,
     tracesLoading: metricsLoading && !metricsInitialized,
+    clusters,
+    clustersLoading,
     isEmpty: datasets.length === 0,
 
     handleDelete,
     handleCreate,
     handleCreateFromTraces,
+    handleCreateFromCluster,
+    handleTriggerClustering,
     handleCreateFromTopic,
     handleGenerate,
     handleImport,
+    handleAnalyzeTraces,
+    handleImportTraces,
     handlePollGenerate,
     handleGenerateBackground,
     handleCloseCreateModal,
