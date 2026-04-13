@@ -2,9 +2,9 @@
 # Lunar Router — Full Stack
 # ============================================================================
 #
-# Start everything:   docker compose up
-# Start background:   docker compose up -d
-# Just ClickHouse:    docker compose up clickhouse
+# Start everything:   docker compose up -d
+# Update & restart:   docker compose up -d --build
+# View logs:          docker compose logs -f
 # View traces:        docker compose exec clickhouse clickhouse-client \
 #                       --database lunar_router --password lunar \
 #                       -q "SELECT * FROM llm_traces ORDER BY timestamp DESC LIMIT 10"
@@ -17,6 +17,7 @@ services:
   # --------------------------------------------------------------------------
   clickhouse:
     image: clickhouse/clickhouse-server:latest
+    restart: unless-stopped
     ports:
       - "8123:8123"   # HTTP
       - "9000:9000"   # Native
@@ -44,6 +45,7 @@ services:
     build:
       context: ./go
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "8080:8080"
     environment:
@@ -74,6 +76,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
       - "8000:8000"
     environment:
@@ -94,6 +97,33 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  # --------------------------------------------------------------------------
+  # UI — React dashboard (nginx + static build)
+  # --------------------------------------------------------------------------
+  lunar-ui:
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: "/api"
+        VITE_ROUTER_URL: "/engine"
+        VITE_STATS_URL: "/api"
+        VITE_ENVIRONMENT: "prod"
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      lunar-api:
+        condition: service_healthy
+      lunar-engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
 volumes:
   clickhouse-data:
