@@ -1,13 +1,4 @@
-import {
-  Activity,
-  BarChart3,
-  Brain,
-  Database,
-  Layers,
-  Route,
-  BookOpen,
-  Sparkles,
-} from 'lucide-react';
+import { Activity, Brain, Database, Layers, Route, BookOpen, Sparkles } from 'lucide-react';
 import type { TabKey } from '../../types/tabs';
 
 export interface MenuItem {
@@ -75,11 +66,11 @@ export const MENU_SECTIONS: MenuSection[] = [
     label: 'INTELLIGENCE',
     items: [
       {
-        label: 'Router Intelligence',
-        value: 'router-intelligence',
-        path: '/router-intelligence',
+        label: 'Intelligence',
+        value: 'intelligence',
+        path: '/intelligence',
         icon: <Brain size={20} />,
-        description: 'Router efficiency, model performance & training',
+        description: 'Router intelligence, costs & observability',
       },
     ],
   },
@@ -93,13 +84,6 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/traces',
         icon: <Route size={20} />,
         description: 'View routing & inference traces',
-      },
-      {
-        label: 'Observability',
-        value: 'observability',
-        path: '/observability',
-        icon: <BarChart3 size={20} />,
-        description: 'Metrics, costs & performance',
       },
     ],
   },

@@ -31,6 +31,16 @@ from .schemas import (
     EfficiencyResponse,
     ModelPerformanceResponse,
     TrainingActivityResponse,
+    RoutingIntelligenceResponse,
+    RoutingDecisionItem,
+    WinRatePoint,
+    ConfidenceBucket,
+    EfficiencyTrendPoint,
+    ModelUsageItem,
+    DailyVolumePoint,
+    LatencyPercentilesItem,
+    ErrorBreakdownItem,
+    AdvisorConfigResponse,
 )
 from ..router.uniroute import UniRouteRouter
 from ..models.llm_profile import LLMProfile
@@ -2548,11 +2558,91 @@ async def intelligence_efficiency(days: int = 30):
         except Exception:
             pass
 
+    from .schemas import CostBreakdown, DistillationJobSummary
+    import json as _json
+
+    cost_breakdown = None
+    distillation_job_summaries: list[DistillationJobSummary] = []
+
+    # Compute accumulated provider baseline and router actual from the data we already have
+    provider_baseline = 0.0
+    routing_actual = 0.0
+    if cost_savings_trend:
+        provider_baseline = sum(d.get("baseline", 0) for d in cost_savings_trend)
+        routing_actual = sum(d.get("actual", 0) for d in cost_savings_trend)
+    elif kpis:
+        provider_baseline = kpis["cost_saved"].value + (kpis["avg_cost_per_request"].value * kpis["requests_routed"].value)
+        routing_actual = kpis["avg_cost_per_request"].value * kpis["requests_routed"].value
+
+    routing_savings = provider_baseline - routing_actual
+
+    # Fetch distillation jobs for training cost
+    training_investment = 0.0
+    if ch is not None:
+        try:
+            r_jobs = ch.query(
+                "SELECT job_id, name, status, config, cost_accrued, "
+                "toString(created_at) AS created_at, "
+                "toString(completed_at) AS completed_at "
+                "FROM distillation_jobs FINAL "
+                "ORDER BY created_at DESC LIMIT 20"
+            )
+            for row in r_jobs.result_rows:
+                job_id_val = str(row[0])
+                job_name = str(row[1])
+                job_status = str(row[2])
+                job_config_raw = row[3]
+                job_cost = float(row[4])
+                job_created = str(row[5])
+                job_completed = str(row[6]) if row[6] else None
+
+                training_investment += job_cost
+
+                # Parse config to get teacher/student models
+                teacher_m = ""
+                student_m = ""
+                try:
+                    cfg = _json.loads(job_config_raw) if isinstance(job_config_raw, str) else job_config_raw
+                    teacher_m = cfg.get("teacher_model", "")
+                    student_m = cfg.get("student_model", "")
+                except Exception:
+                    pass
+
+                distillation_job_summaries.append(DistillationJobSummary(
+                    job_id=job_id_val,
+                    name=job_name,
+                    status=job_status,
+                    teacher_model=teacher_m,
+                    student_model=student_m,
+                    cost_accrued=job_cost,
+                    created_at=job_created,
+                    completed_at=job_completed,
+                ))
+        except Exception:
+            pass
+
+    net_savings = routing_savings - training_investment
+    roi_pct = (net_savings / training_investment * 100) if training_investment > 0 else 0.0
+    # Monthly projection: extrapolate from the period
+    monthly_projection = (routing_savings / days * 30) if days > 0 else 0.0
+
+    cost_breakdown = CostBreakdown(
+        provider_baseline=round(provider_baseline, 6),
+        routing_actual=round(routing_actual, 6),
+        routing_savings=round(routing_savings, 6),
+        training_investment=round(training_investment, 6),
+        net_savings=round(net_savings, 6),
+        roi_pct=round(roi_pct, 1),
+        monthly_projection=round(monthly_projection, 6),
+    )
+
     return EfficiencyResponse(
         kpis=kpis,
         model_distribution=model_distribution,
         cost_savings_trend=cost_savings_trend,
         model_breakdown=sorted(model_breakdown, key=lambda x: -x["requests"]),
+        cost_breakdown=cost_breakdown,
+        distillation_jobs=distillation_job_summaries,
     )
 
 
@@ -2562,11 +2652,11 @@ async def intelligence_models():
     try:
         r = get_router()
     except Exception:
-        return ModelPerformanceResponse()
+        r = None
 
-    profiles = r.registry.get_all()
+    profiles = r.registry.get_all() if r else []
     if not profiles:
-        return ModelPerformanceResponse()
+        return _build_model_perf_from_ch()
 
     # KPIs
     best = min(profiles, key=lambda p: p.overall_error_rate)
@@ -2623,7 +2713,10 @@ async def intelligence_models():
                 cfg = _json.loads(r_dist.result_rows[0][0])
                 teacher = cfg.get("teacher_model", "")
                 student = cfg.get("student_model", "")
+                # Try exact match first, then strip provider prefix (e.g. openai/gpt-4o-mini → gpt-4o-mini)
                 teacher_profile = r.registry.get(teacher)
+                if not teacher_profile and "/" in teacher:
+                    teacher_profile = r.registry.get(teacher.split("/", 1)[1])
                 if teacher_profile:
                     teacher_student = {
                         "teacher": teacher,
@@ -2640,6 +2733,308 @@ async def intelligence_models():
         leaderboard=leaderboard,
         teacher_student=teacher_student,
     )
+
+
+def _build_model_perf_from_ch() -> "ModelPerformanceResponse":
+    """Fallback: build model performance data from ClickHouse when router registry is empty."""
+    from ..storage.clickhouse_client import get_client as _get_ch
+    ch = _get_ch()
+    if ch is None:
+        return ModelPerformanceResponse()
+
+    try:
+        # Per-model stats from llm_traces
+        r_models = ch.query(
+            "SELECT selected_model, "
+            "count() AS reqs, "
+            "countIf(is_error = 1) AS errs, "
+            "avg(total_cost_usd) AS avg_cost, "
+            "sum(total_cost_usd) AS total_cost "
+            "FROM llm_traces "
+            "GROUP BY selected_model ORDER BY reqs DESC"
+        )
+        if not r_models.result_rows:
+            return ModelPerformanceResponse()
+
+        models_data = []
+        for row in r_models.result_rows:
+            model = str(row[0])
+            reqs = int(row[1])
+            errs = int(row[2])
+            avg_cost = float(row[3])
+            total_cost = float(row[4])
+            accuracy = round(1.0 - (errs / max(reqs, 1)), 4)
+            models_data.append({
+                "model": model, "reqs": reqs, "errs": errs,
+                "avg_cost": avg_cost, "total_cost": total_cost,
+                "accuracy": accuracy,
+            })
+
+        best = max(models_data, key=lambda m: m["accuracy"])
+        cheapest = min(models_data, key=lambda m: m["avg_cost"])
+        best_value = max(
+            models_data,
+            key=lambda m: m["accuracy"] / max(m["avg_cost"], 1e-10),
+        )
+
+        kpis = {
+            "models_profiled": len(models_data),
+            "best_model": {"model": best["model"], "accuracy": best["accuracy"]},
+            "cheapest_model": {"model": cheapest["model"], "cost": round(cheapest["avg_cost"], 6)},
+            "best_value": {
+                "model": best_value["model"],
+                "ratio": round(best_value["accuracy"] / max(best_value["avg_cost"], 1e-10), 1),
+            },
+        }
+
+        # Per-model per-cluster accuracy from llm_traces
+        cluster_accuracy = []
+        try:
+            r_clust = ch.query(
+                "SELECT selected_model, cluster_id, "
+                "count() AS reqs, countIf(is_error = 1) AS errs "
+                "FROM llm_traces GROUP BY selected_model, cluster_id "
+                "ORDER BY selected_model, cluster_id"
+            )
+            model_clusters: dict[str, dict[str, float]] = {}
+            for row in r_clust.result_rows:
+                m = str(row[0])
+                c = str(int(row[1]))
+                reqs = int(row[2])
+                errs = int(row[3])
+                acc = round(1.0 - (errs / max(reqs, 1)), 4)
+                if m not in model_clusters:
+                    model_clusters[m] = {}
+                model_clusters[m][c] = acc
+            for m, clusters in model_clusters.items():
+                cluster_accuracy.append({"model": m, "clusters": clusters})
+        except Exception:
+            pass
+
+        # Leaderboard
+        leaderboard = []
+        for m in models_data:
+            model_name = m["model"]
+            # Find best/worst clusters for this model
+            ca = next((c for c in cluster_accuracy if c["model"] == model_name), None)
+            strong: list[int] = []
+            weak: list[int] = []
+            if ca and ca["clusters"]:
+                sorted_c = sorted(ca["clusters"].items(), key=lambda x: -x[1])
+                strong = [int(c) for c, _ in sorted_c[:3]]
+                weak = [int(c) for c, _ in sorted_c[-3:]]
+            leaderboard.append({
+                "model": model_name,
+                "accuracy": m["accuracy"],
+                "cost": round(m["avg_cost"], 6),
+                "strongest_clusters": strong,
+                "weakest_clusters": weak,
+            })
+        leaderboard.sort(key=lambda x: -x["accuracy"])
+
+        # Teacher-student from latest distillation
+        teacher_student = None
+        try:
+            import json as _json
+            r_dist = ch.query(
+                "SELECT config FROM distillation_jobs "
+                "WHERE status = 'completed' ORDER BY created_at DESC LIMIT 1"
+            )
+            if r_dist.result_rows:
+                cfg = _json.loads(r_dist.result_rows[0][0]) if isinstance(r_dist.result_rows[0][0], str) else {}
+                teacher = cfg.get("teacher_model", "")
+                student = cfg.get("student_model", "")
+                if teacher:
+                    # Try exact match, then strip provider prefix (openai/gpt-4o-mini → gpt-4o-mini)
+                    t_data = next((m for m in models_data if m["model"] == teacher), None)
+                    if not t_data and "/" in teacher:
+                        bare = teacher.split("/", 1)[1]
+                        t_data = next((m for m in models_data if m["model"] == bare), None)
+                    teacher_student = {
+                        "teacher": teacher,
+                        "student": student,
+                        "teacher_accuracy": t_data["accuracy"] if t_data else 0,
+                        "teacher_cost": round(t_data["avg_cost"], 6) if t_data else 0,
+                    }
+        except Exception:
+            pass
+
+        return ModelPerformanceResponse(
+            kpis=kpis,
+            cluster_accuracy=cluster_accuracy,
+            leaderboard=leaderboard,
+            teacher_student=teacher_student,
+        )
+    except Exception:
+        return ModelPerformanceResponse()
+
+
+def _build_training_runs_detail(ch, training_history: list[dict]) -> list[dict]:
+    """Build detailed training runs from distillation_jobs with real duration/confidence."""
+    runs: list[dict] = []
+    if ch is None:
+        for i, h in enumerate(training_history):
+            runs.append({
+                "run_id": f"run_{i+1:03d}",
+                "name": "Training run",
+                "date": h.get("date", ""),
+                "outcome": "promoted" if h.get("promoted") else "rejected",
+                "confidence": 0,
+                "cost": 0,
+                "duration": "—",
+                "reason": h.get("reason", ""),
+                "teacher_model": "",
+                "student_model": "",
+                "quality_score": 0,
+                "status": "completed" if h.get("promoted") else "failed",
+            })
+        return runs
+
+    try:
+        import json as _json
+        from datetime import datetime
+
+        r_jobs = ch.query(
+            "SELECT job_id, name, status, config, cost_accrued, results, "
+            "toString(created_at) AS created_at, "
+            "toString(completed_at) AS completed_at "
+            "FROM distillation_jobs FINAL "
+            "ORDER BY created_at DESC LIMIT 30"
+        )
+
+        # Batch-fetch metrics for all jobs at once
+        all_job_ids = [str(row[0]) for row in r_jobs.result_rows]
+        metrics_map: dict[str, float] = {}
+        if all_job_ids:
+            try:
+                r_met = ch.query(
+                    "SELECT job_id, argMax(reward_improvement, step) AS best_reward "
+                    "FROM distillation_metrics "
+                    "WHERE job_id IN ({jids:Array(String)}) "
+                    "GROUP BY job_id",
+                    parameters={"jids": all_job_ids},
+                )
+                for mrow in r_met.result_rows:
+                    metrics_map[str(mrow[0])] = float(mrow[1])
+            except Exception:
+                pass
+
+        for row in r_jobs.result_rows:
+            job_id = str(row[0])
+            name = str(row[1]) or "Distillation run"
+            status = str(row[2])
+            config_raw = row[3]
+            cost = float(row[4])
+            results_raw = row[5]
+            created_at = str(row[6])
+            completed_at = str(row[7]) if row[7] else None
+
+            # Compute real duration with second-level precision
+            duration = "—"
+            if completed_at and created_at and completed_at != "" and created_at != "":
+                try:
+                    dt_start = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    dt_end = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+                    total_secs = round((dt_end - dt_start).total_seconds())
+                    if total_secs <= 0:
+                        duration = "—"
+                    elif total_secs < 60:
+                        duration = f"{total_secs}s"
+                    elif total_secs < 3600:
+                        mins = total_secs // 60
+                        secs = total_secs % 60
+                        duration = f"{mins}m {secs}s" if secs > 0 else f"{mins}m"
+                    else:
+                        hrs = total_secs // 3600
+                        mins = (total_secs % 3600) // 60
+                        duration = f"{hrs}h {mins}m" if mins > 0 else f"{hrs}h"
+                except Exception:
+                    pass
+
+            # Get confidence: results → metrics → config eval_score
+            confidence = 0.0
+            try:
+                results = _json.loads(results_raw) if isinstance(results_raw, str) and results_raw else {}
+                confidence = results.get("final_accuracy", results.get("eval_score", 0))
+            except Exception:
+                pass
+
+            if confidence == 0:
+                confidence = min(1.0, max(0, metrics_map.get(job_id, 0)))
+
+            if confidence == 0:
+                try:
+                    config = _json.loads(config_raw) if isinstance(config_raw, str) and config_raw else {}
+                    confidence = config.get("eval_score", config.get("quality_score", 0))
+                except Exception:
+                    pass
+
+            outcome = "promoted" if status == "completed" else "rejected"
+
+            # Extract teacher/student from config + quality_score from results
+            teacher = ""
+            student = ""
+            quality_score = 0.0
+            try:
+                config = _json.loads(config_raw) if isinstance(config_raw, str) and config_raw else {}
+                teacher = config.get("teacher_model", "")
+                student = config.get("student_model", "")
+            except Exception:
+                pass
+            try:
+                results = _json.loads(results_raw) if isinstance(results_raw, str) and results_raw else {}
+                quality_score = results.get("quality_score", 0) or 0
+            except Exception:
+                pass
+
+            # Build reason string
+            reason = ""
+            if teacher and student:
+                reason = f"{teacher} → {student}"
+            elif teacher:
+                reason = f"Teacher: {teacher}"
+            if not reason:
+                reason = "Distillation run" if status == "completed" else f"Status: {status}"
+
+            runs.append({
+                "run_id": job_id,
+                "name": name,
+                "date": created_at,
+                "outcome": outcome,
+                "confidence": round(confidence, 4),
+                "cost": round(cost, 4),
+                "duration": duration,
+                "reason": reason,
+                "teacher_model": teacher,
+                "student_model": student,
+                "quality_score": round(quality_score, 4),
+                "status": status,
+            })
+    except Exception:
+        pass
+
+    # Also merge training_history entries not already covered by distillation jobs
+    job_dates = {r["date"][:10] for r in runs if r.get("date")}
+    for i, h in enumerate(training_history):
+        h_date = str(h.get("date", ""))[:10]
+        if h_date and h_date not in job_dates:
+            runs.append({
+                "run_id": f"run_{i+1:03d}",
+                "name": "Training run",
+                "date": h.get("date", ""),
+                "outcome": "promoted" if h.get("promoted") else "rejected",
+                "confidence": 0,
+                "cost": 0,
+                "duration": "—",
+                "reason": h.get("reason", ""),
+                "teacher_model": "",
+                "student_model": "",
+                "quality_score": 0,
+                "status": "completed" if h.get("promoted") else "failed",
+            })
+
+    runs.sort(key=lambda x: x.get("date", ""), reverse=True)
+    return runs
 
 
 @app.get("/v1/intelligence/training", response_model=TrainingActivityResponse, tags=["intelligence"])
@@ -2725,19 +3120,629 @@ async def intelligence_training(days: int = 30):
         "models_updated": models_updated,
     }
 
+    # Fetch distillation summary for training cost visibility
+    distillation_summary = None
+    from ..storage.clickhouse_client import get_client as _get_ch
+    try:
+        _ch = _get_ch()
+    except Exception:
+        _ch = None
+
+    if _ch is not None:
+        try:
+            import json as _json
+            r_dist_summary = _ch.query(
+                "SELECT count() AS total_jobs, "
+                "sum(cost_accrued) AS total_cost, "
+                "countIf(status = 'completed') AS completed_jobs, "
+                "countIf(status = 'running') AS running_jobs, "
+                "countIf(status = 'failed') AS failed_jobs "
+                "FROM distillation_jobs FINAL"
+            )
+            if r_dist_summary.result_rows:
+                row = r_dist_summary.result_rows[0]
+                total_jobs = int(row[0])
+                total_cost = float(row[1])
+                completed = int(row[2])
+                running = int(row[3])
+                failed = int(row[4])
+
+                # Get latest completed job details
+                latest_job = None
+                r_latest = _ch.query(
+                    "SELECT job_id, name, config, cost_accrued, "
+                    "toString(completed_at) AS completed_at "
+                    "FROM distillation_jobs FINAL "
+                    "WHERE status = 'completed' "
+                    "ORDER BY completed_at DESC LIMIT 1"
+                )
+                if r_latest.result_rows:
+                    lr = r_latest.result_rows[0]
+                    cfg = {}
+                    try:
+                        cfg = _json.loads(lr[2]) if isinstance(lr[2], str) else lr[2]
+                    except Exception:
+                        pass
+                    latest_job = {
+                        "job_id": str(lr[0]),
+                        "name": str(lr[1]),
+                        "teacher_model": cfg.get("teacher_model", ""),
+                        "student_model": cfg.get("student_model", ""),
+                        "cost": float(lr[3]),
+                        "completed_at": str(lr[4]),
+                    }
+
+                distillation_summary = {
+                    "total_jobs": total_jobs,
+                    "completed_jobs": completed,
+                    "running_jobs": running,
+                    "failed_jobs": failed,
+                    "total_training_cost": round(total_cost, 4),
+                    "latest_completed_job": latest_job,
+                }
+        except Exception:
+            pass
+
+    # If training_history from memory store is empty, build from distillation_jobs
+    if not training_history and _ch is not None:
+        try:
+            import json as _json2
+            r_hist = _ch.query(
+                "SELECT job_id, name, status, config, "
+                "toString(created_at) AS created_at "
+                "FROM distillation_jobs FINAL "
+                "ORDER BY created_at DESC LIMIT 30"
+            )
+            for row in r_hist.result_rows:
+                status = str(row[2])
+                promoted = status == "completed"
+                name = str(row[1]) or "Distillation run"
+                reason = name
+                try:
+                    cfg = _json2.loads(row[3]) if isinstance(row[3], str) and row[3] else {}
+                    teacher = cfg.get("teacher_model", "")
+                    student = cfg.get("student_model", "")
+                    if teacher and student:
+                        reason = f"{teacher} → {student}"
+                except Exception:
+                    pass
+                training_history.append({
+                    "date": str(row[4]),
+                    "promoted": promoted,
+                    "reason": reason,
+                })
+            kpis["training_runs"] = len(training_history)
+            if training_history:
+                kpis["last_training"] = training_history[0]["date"]
+        except Exception:
+            pass
+
+    # If signal_trends is empty, build from llm_traces error/latency data
+    if not signal_trends and _ch is not None:
+        try:
+            r_signals = _ch.query(
+                "SELECT toDate(timestamp) AS dt, "
+                "count() AS total, "
+                "countIf(is_error = 1) AS errors, "
+                "avg(latency_ms) AS avg_lat "
+                "FROM llm_traces "
+                "GROUP BY dt ORDER BY dt"
+            )
+            for row in r_signals.result_rows:
+                dt_str = str(row[0])
+                total = int(row[1])
+                errors = int(row[2])
+                avg_lat = float(row[3])
+                error_rate = round(errors / max(total, 1) * 100, 2)
+                # Drift ratio: normalized latency deviation from 500ms baseline
+                drift = round(min(abs(avg_lat - 500) / 500, 5.0), 2)
+                signal_trends.append({
+                    "date": dt_str,
+                    "signal": "error_rate_increase",
+                    "value": error_rate,
+                    "triggered": error_rate > 10,
+                })
+                signal_trends.append({
+                    "date": dt_str,
+                    "signal": "drift_ratio",
+                    "value": drift,
+                    "triggered": drift > 2.0,
+                })
+                signal_trends.append({
+                    "date": dt_str,
+                    "signal": "high_severity_issues",
+                    "value": errors,
+                    "triggered": errors > 5,
+                })
+        except Exception:
+            pass
+
     return TrainingActivityResponse(
         kpis=kpis,
         training_history=training_history,
         signal_trends=signal_trends,
         advisor_decisions=advisor_decisions,
         training_cycles=training_cycles,
+        distillation_summary=distillation_summary,
+        training_runs_detail=_build_training_runs_detail(_ch, training_history),
     )
 
 
-# ---------------------------------------------------------------------------
-# Helper: extract tenant from X-Tenant-Id header (shared by new endpoints)
-# ---------------------------------------------------------------------------
+@app.get("/v1/intelligence/routing", response_model=RoutingIntelligenceResponse, tags=["intelligence"])
+async def intelligence_routing(days: int = 30, limit: int = 50):
+    """Real routing intelligence: decisions, win rate, confidence distribution, efficiency trend,
+    model usage, daily volume, latency percentiles, error breakdown.
 
+    All data derived from llm_traces — no mock data.
+    """
+    from datetime import datetime, timedelta, timezone
+    import json as _j
+
+    empty = RoutingIntelligenceResponse()
+
+    from ..storage.clickhouse_client import get_client
+    try:
+        ch = get_client()
+    except Exception:
+        ch = None
+
+    if ch is None:
+        return empty
+
+    start = datetime.now(timezone.utc) - timedelta(days=days)
+
+    def _derive_provider(model: str) -> str:
+        m = model.lower()
+        if "gpt" in m or "o1" in m or "o3" in m or "o4" in m:
+            return "OpenAI"
+        if "claude" in m:
+            return "Anthropic"
+        if "llama" in m or "meta" in m:
+            return "Meta"
+        if "gemma" in m or "gemini" in m:
+            return "Google"
+        if "mixtral" in m or "mistral" in m:
+            return "Mistral"
+        if "deepseek" in m:
+            return "DeepSeek"
+        if "qwen" in m:
+            return "Qwen"
+        if model.startswith("lunar/"):
+            return "Lunar"
+        return "Other"
+
+    # ── 1. Recent routing decisions from llm_traces ──────────────────────
+    decisions: list[RoutingDecisionItem] = []
+    try:
+        r_decisions = ch.query(
+            "SELECT request_id, selected_model, provider, total_cost_usd, "
+            "latency_ms, is_error, toString(timestamp) AS ts, "
+            "all_scores, tokens_in, tokens_out "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "ORDER BY timestamp DESC "
+            "LIMIT {limit:UInt32}",
+            parameters={"start": start, "limit": limit},
+        )
+        for row in r_decisions.result_rows:
+            req_id = str(row[0])
+            model = str(row[1])
+            provider = str(row[2]) if row[2] else _derive_provider(model)
+            cost = float(row[3])
+            latency = float(row[4])
+            is_err = int(row[5])
+            ts = str(row[6])
+            scores_raw = str(row[7]) if row[7] else "{}"
+            tok_in = int(row[8]) if row[8] else 0
+            tok_out = int(row[9]) if row[9] else 0
+
+            # Derive reason from all_scores
+            reason = "Router selection"
+            try:
+                scores = _j.loads(scores_raw)
+                if scores:
+                    sorted_scores = sorted(scores.items(), key=lambda x: x[1])
+                    best_model = sorted_scores[0][0] if sorted_scores else ""
+                    if best_model == model:
+                        reason = "Lowest expected error"
+                    elif len(sorted_scores) > 1:
+                        reason = f"Cost-optimized (vs {sorted_scores[0][0]})"
+            except Exception:
+                pass
+
+            decisions.append(RoutingDecisionItem(
+                request_id=req_id,
+                model_chosen=model,
+                provider=provider or _derive_provider(model),
+                reason=reason,
+                cost=round(cost, 6),
+                latency=round(latency, 1),
+                tokens_in=tok_in,
+                tokens_out=tok_out,
+                outcome="error" if is_err else "success",
+                timestamp=ts,
+            ))
+    except Exception:
+        pass
+
+    # ── 2. Win rate over time ────────────────────────────────────────────
+    win_rate: list[WinRatePoint] = []
+    try:
+        r_wr = ch.query(
+            "SELECT toDate(timestamp) AS day, "
+            "  selected_model, "
+            "  count() AS total, "
+            "  countIf(is_error = 0) AS successes, "
+            "  avg(total_cost_usd) AS avg_cost "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY day, selected_model "
+            "ORDER BY day",
+            parameters={"start": start},
+        )
+        day_data: dict[str, dict] = {}
+        for row in r_wr.result_rows:
+            day_str = str(row[0])
+            model = str(row[1])
+            total = int(row[2])
+            successes = int(row[3])
+            avg_cost = float(row[4])
+            if day_str not in day_data:
+                day_data[day_str] = {"total": 0, "successes": 0, "models": {}}
+            day_data[day_str]["total"] += total
+            day_data[day_str]["successes"] += successes
+            day_data[day_str]["models"][model] = {
+                "total": total, "successes": successes, "avg_cost": avg_cost
+            }
+        for day_str in sorted(day_data.keys()):
+            d = day_data[day_str]
+            router_rate = d["successes"] / d["total"] if d["total"] > 0 else 0
+            baseline_rate = 0.0
+            max_cost = 0.0
+            for _m, stats in d["models"].items():
+                if stats["avg_cost"] > max_cost:
+                    max_cost = stats["avg_cost"]
+                    baseline_rate = stats["successes"] / stats["total"] if stats["total"] > 0 else 0
+            win_rate.append(WinRatePoint(
+                date=day_str,
+                router=round(router_rate, 4),
+                baseline=round(baseline_rate, 4),
+            ))
+    except Exception:
+        pass
+
+    # ── 3. Confidence distribution (from cost_adjusted_score) ────────────
+    confidence_dist: list[ConfidenceBucket] = []
+    try:
+        r_conf = ch.query(
+            "SELECT "
+            "  countIf(cost_adjusted_score >= 0 AND cost_adjusted_score < 0.2) AS b0, "
+            "  countIf(cost_adjusted_score >= 0.2 AND cost_adjusted_score < 0.4) AS b1, "
+            "  countIf(cost_adjusted_score >= 0.4 AND cost_adjusted_score < 0.6) AS b2, "
+            "  countIf(cost_adjusted_score >= 0.6 AND cost_adjusted_score < 0.8) AS b3, "
+            "  countIf(cost_adjusted_score >= 0.8 AND cost_adjusted_score <= 1.0) AS b4 "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "AND cost_adjusted_score >= 0",
+            parameters={"start": start},
+        )
+        if r_conf.result_rows:
+            row = r_conf.result_rows[0]
+            buckets = ["0-20%", "20-40%", "40-60%", "60-80%", "80-100%"]
+            for i, label in enumerate(buckets):
+                confidence_dist.append(ConfidenceBucket(bucket=label, count=int(row[i])))
+    except Exception:
+        pass
+
+    # ── 4. Efficiency trend (daily savings ratio) ────────────────────────
+    efficiency_trend: list[EfficiencyTrendPoint] = []
+    try:
+        r_max = ch.query(
+            "SELECT max(avg_cost) FROM ("
+            "  SELECT avg(total_cost_usd) AS avg_cost "
+            "  FROM llm_traces WHERE timestamp >= {start:DateTime64(3)} "
+            "  GROUP BY selected_model"
+            ")",
+            parameters={"start": start},
+        )
+        max_model_cost = float(r_max.result_rows[0][0]) if r_max.result_rows else 0
+        if max_model_cost > 0:
+            r_eff = ch.query(
+                "SELECT toDate(timestamp) AS day, "
+                "  avg(total_cost_usd) AS actual_avg, "
+                "  count() AS cnt "
+                "FROM llm_traces "
+                "WHERE timestamp >= {start:DateTime64(3)} "
+                "GROUP BY day ORDER BY day",
+                parameters={"start": start},
+            )
+            for row in r_eff.result_rows:
+                day_str = str(row[0])
+                actual_avg = float(row[1])
+                score = 1.0 - (actual_avg / max_model_cost) if max_model_cost > 0 else 0
+                efficiency_trend.append(EfficiencyTrendPoint(
+                    date=day_str,
+                    score=round(max(0, min(1, score)), 4),
+                ))
+    except Exception:
+        pass
+
+    # ── 5. Model usage distribution ──────────────────────────────────────
+    model_usage: list[ModelUsageItem] = []
+    try:
+        r_mu = ch.query(
+            "SELECT selected_model, provider, "
+            "  count() AS cnt, "
+            "  avg(total_cost_usd) AS avg_cost, "
+            "  avg(latency_ms) AS avg_lat, "
+            "  countIf(is_error = 1) AS err_cnt "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY selected_model, provider "
+            "ORDER BY cnt DESC",
+            parameters={"start": start},
+        )
+        total_requests = sum(int(r[2]) for r in r_mu.result_rows) if r_mu.result_rows else 0
+        for row in r_mu.result_rows:
+            model = str(row[0])
+            prov = str(row[1]) if row[1] else _derive_provider(model)
+            cnt = int(row[2])
+            avg_c = float(row[3])
+            avg_l = float(row[4])
+            err_c = int(row[5])
+            model_usage.append(ModelUsageItem(
+                model=model,
+                provider=prov or _derive_provider(model),
+                count=cnt,
+                percentage=round((cnt / total_requests * 100) if total_requests > 0 else 0, 2),
+                avg_cost=round(avg_c, 6),
+                avg_latency=round(avg_l, 1),
+                error_rate=round((err_c / cnt) if cnt > 0 else 0, 4),
+            ))
+    except Exception:
+        pass
+
+    # ── 6. Daily volume with latency + cost aggregates ───────────────────
+    daily_volume: list[DailyVolumePoint] = []
+    try:
+        r_dv = ch.query(
+            "SELECT toDate(timestamp) AS day, "
+            "  count() AS cnt, "
+            "  avg(latency_ms) AS avg_lat, "
+            "  quantile(0.95)(latency_ms) AS p95_lat, "
+            "  countIf(is_error = 1) AS err_cnt, "
+            "  sum(total_cost_usd) AS tot_cost "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY day ORDER BY day",
+            parameters={"start": start},
+        )
+        for row in r_dv.result_rows:
+            daily_volume.append(DailyVolumePoint(
+                date=str(row[0]),
+                count=int(row[1]),
+                avg_latency=round(float(row[2]), 1),
+                p95_latency=round(float(row[3]), 1),
+                error_count=int(row[4]),
+                total_cost=round(float(row[5]), 6),
+            ))
+    except Exception:
+        pass
+
+    # ── 7. Latency percentiles per model ─────────────────────────────────
+    latency_percentiles: list[LatencyPercentilesItem] = []
+    try:
+        r_lp = ch.query(
+            "SELECT selected_model, "
+            "  quantile(0.50)(latency_ms) AS p50, "
+            "  quantile(0.75)(latency_ms) AS p75, "
+            "  quantile(0.95)(latency_ms) AS p95, "
+            "  quantile(0.99)(latency_ms) AS p99 "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} "
+            "GROUP BY selected_model "
+            "ORDER BY p50 ASC",
+            parameters={"start": start},
+        )
+        for row in r_lp.result_rows:
+            latency_percentiles.append(LatencyPercentilesItem(
+                model=str(row[0]),
+                p50=round(float(row[1]), 1),
+                p75=round(float(row[2]), 1),
+                p95=round(float(row[3]), 1),
+                p99=round(float(row[4]), 1),
+            ))
+    except Exception:
+        pass
+
+    # ── 8. Error breakdown by category ───────────────────────────────────
+    error_breakdown: list[ErrorBreakdownItem] = []
+    try:
+        r_eb = ch.query(
+            "SELECT if(error_category = '', 'Unknown', error_category) AS cat, "
+            "  count() AS cnt "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)} AND is_error = 1 "
+            "GROUP BY cat ORDER BY cnt DESC",
+            parameters={"start": start},
+        )
+        for row in r_eb.result_rows:
+            error_breakdown.append(ErrorBreakdownItem(
+                category=str(row[0]),
+                count=int(row[1]),
+            ))
+    except Exception:
+        pass
+
+    # ── 9. Aggregate KPIs ────────────────────────────────────────────────
+    p95_latency = 0.0
+    cache_hit_rate = 0.0
+    total_tokens = 0
+    avg_tokens_per_s = 0.0
+    try:
+        r_agg = ch.query(
+            "SELECT "
+            "  quantile(0.95)(latency_ms) AS p95, "
+            "  countIf(cache_hit = 1) / count() AS cache_rate, "
+            "  sum(total_tokens) AS tot_tokens, "
+            "  avg(tokens_per_s) AS avg_tps "
+            "FROM llm_traces "
+            "WHERE timestamp >= {start:DateTime64(3)}",
+            parameters={"start": start},
+        )
+        if r_agg.result_rows:
+            row = r_agg.result_rows[0]
+            p95_latency = round(float(row[0]), 1) if row[0] else 0.0
+            cache_hit_rate = round(float(row[1]), 4) if row[1] else 0.0
+            total_tokens = int(row[2]) if row[2] else 0
+            avg_tokens_per_s = round(float(row[3]), 1) if row[3] else 0.0
+    except Exception:
+        pass
+
+    return RoutingIntelligenceResponse(
+        decisions=decisions,
+        win_rate=win_rate,
+        confidence_distribution=confidence_dist,
+        efficiency_trend=efficiency_trend,
+        model_usage=model_usage,
+        daily_volume=daily_volume,
+        latency_percentiles=latency_percentiles,
+        error_breakdown=error_breakdown,
+        p95_latency=p95_latency,
+        cache_hit_rate=cache_hit_rate,
+        total_tokens=total_tokens,
+        avg_tokens_per_s=avg_tokens_per_s,
+    )
+
+
+@app.get("/v1/intelligence/advisor", response_model=AdvisorConfigResponse, tags=["intelligence"])
+async def intelligence_advisor():
+    """Training advisor configuration and next training trigger estimate.
+
+    Reads advisor state from memory store and computes next trigger estimate
+    based on data accumulation rate.
+    """
+    from ..harness.memory_store import get_memory_store
+    from ..storage.clickhouse_client import get_client
+    from datetime import datetime, timedelta, timezone
+
+    store = get_memory_store()
+
+    # Get advisor config from settings or defaults
+    threshold = 0.75
+    strategy = "Quality-first with cost optimization"
+    model_targets: list[str] = []
+
+    try:
+        r = get_router()
+        profiles = r.registry.get_all()
+        model_targets = [p.model_id for p in profiles[:5]]
+
+        # Read threshold from settings if available
+        _settings = get_settings()
+        if hasattr(_settings, "training_threshold"):
+            threshold = _settings.training_threshold
+    except Exception:
+        pass
+
+    # Read latest advisor decision for strategy info
+    try:
+        decisions_raw = store.query(
+            agent="training_advisor",
+            category="training_decision",
+            limit=1,
+        )
+        if decisions_raw:
+            ev = getattr(decisions_raw[0], "evaluation", {}) or {}
+            if ev.get("source"):
+                strategy = f"{ev.get('source', 'heuristic').replace('_', ' ').title()} strategy"
+            # Extract threshold from signals if available
+            for sig in ev.get("signals", []):
+                if sig.get("threshold"):
+                    threshold = sig["threshold"]
+                    break
+    except Exception:
+        pass
+
+    # Compute next trigger estimate based on data accumulation
+    traces_since_last = 0
+    data_rate = 0.0
+    next_trigger: str | None = None
+
+    try:
+        ch = get_client()
+    except Exception:
+        ch = None
+
+    if ch is not None:
+        try:
+            # Find last training date
+            last_training_date = None
+            training_cycles_raw = store.query(
+                agent="auto_trainer",
+                category="run_result",
+                limit=1,
+            )
+            if training_cycles_raw:
+                last_dt = getattr(training_cycles_raw[0], "created_at", "")
+                if last_dt:
+                    try:
+                        last_training_date = datetime.fromisoformat(
+                            str(last_dt).replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        pass
+
+            # Also check distillation jobs
+            if last_training_date is None:
+                r_last = ch.query(
+                    "SELECT max(completed_at) FROM distillation_jobs FINAL "
+                    "WHERE status = 'completed'"
+                )
+                if r_last.result_rows and r_last.result_rows[0][0]:
+                    try:
+                        last_training_date = datetime.fromisoformat(
+                            str(r_last.result_rows[0][0]).replace("Z", "+00:00")
+                        )
+                    except Exception:
+                        pass
+
+            # Count traces since last training
+            since = last_training_date or (datetime.now(timezone.utc) - timedelta(days=30))
+            r_count = ch.query(
+                "SELECT count() FROM llm_traces WHERE timestamp >= {since:DateTime64(3)}",
+                parameters={"since": since},
+            )
+            traces_since_last = int(r_count.result_rows[0][0]) if r_count.result_rows else 0
+
+            # Compute data accumulation rate (traces per day)
+            r_rate = ch.query(
+                "SELECT count() / greatest(dateDiff('day', min(timestamp), max(timestamp)), 1) "
+                "FROM llm_traces WHERE timestamp >= {since:DateTime64(3)}",
+                parameters={"since": since},
+            )
+            data_rate = float(r_rate.result_rows[0][0]) if r_rate.result_rows else 0
+
+            # Estimate: next trigger when we accumulate ~500 more traces (configurable)
+            target_traces = 500
+            remaining = max(0, target_traces - traces_since_last)
+            if data_rate > 0 and remaining > 0:
+                days_until = remaining / data_rate
+                trigger_date = datetime.now(timezone.utc) + timedelta(days=days_until)
+                next_trigger = trigger_date.strftime("%Y-%m-%d")
+            elif traces_since_last >= target_traces:
+                next_trigger = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return AdvisorConfigResponse(
+        threshold=threshold,
+        strategy=strategy,
+        model_targets=model_targets,
+        next_trigger_estimate=next_trigger,
+        data_accumulation_rate=round(data_rate, 1),
+        traces_since_last_training=traces_since_last,
+    )
 from fastapi import Query, Request as _Req
 
 
@@ -2748,10 +3753,6 @@ def _get_tenant(request: _Req) -> str:
 def _get_auth(request: _Req) -> str | None:
     return request.headers.get("authorization") or request.headers.get("x-api-key")
 
-
-# ===================================================================
-# Datasets — additional endpoints (from datasets router)
-# ===================================================================
 
 @app.delete("/v1/datasets/{dataset_id}/samples/{sample_id}", tags=["datasets"])
 async def delete_sample(dataset_id: str, sample_id: str, request: _Req):
@@ -2928,10 +3929,6 @@ async def trigger_auto_collect(dataset_id: str, request: _Req):
 
     return {"run_id": run.get("run_id", ""), "samples_added": added}
 
-
-# ===================================================================
-# Evaluations — additional endpoints (from evaluations router)
-# ===================================================================
 
 @app.get("/v1/evaluations/settings", tags=["evaluations"])
 async def get_eval_settings(request: _Req):
@@ -3161,10 +4158,6 @@ async def cleanup_stale_evaluations(request: _Req):
     }
 
 
-# ===================================================================
-# Metrics — additional endpoints (from metrics router)
-# ===================================================================
-
 @app.put("/v1/metrics/{metric_id}", tags=["metrics"])
 async def update_metric(metric_id: str, request: _Req):
     from ..metrics import repository as metrics_repo
@@ -3234,11 +4227,6 @@ async def validate_metric_script(request: _Req):
     if test_result:
         response["test_result"] = test_result
     return response
-
-
-# ===================================================================
-# Experiments — all endpoints (from experiments router)
-# ===================================================================
 
 @app.get("/v1/experiments", tags=["experiments"])
 async def list_experiments(request: _Req, status: str | None = Query(None)):
@@ -3331,10 +4319,6 @@ async def get_experiment_comparison(experiment_id: str, request: _Req, force: st
         raise HTTPException(status_code=400, detail=f"Experiment is not completed. Status: {experiment.get('status')}")
     raise HTTPException(status_code=404, detail="Comparison not found")
 
-
-# ===================================================================
-# Annotations — all endpoints (from annotations router)
-# ===================================================================
 
 @app.get("/v1/annotations/queues", tags=["annotations"])
 async def list_annotation_queues(request: _Req):

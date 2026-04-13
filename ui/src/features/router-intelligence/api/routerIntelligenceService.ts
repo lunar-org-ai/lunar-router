@@ -1,5 +1,11 @@
 import { API_BASE_URL } from '@/config/api';
-import type { EfficiencyData, ModelPerformanceData, TrainingActivityData } from '../types';
+import type {
+  EfficiencyData,
+  ModelPerformanceData,
+  TrainingActivityData,
+  RoutingIntelligenceData,
+  AdvisorConfigData,
+} from '../types';
 
 const API_BASE = API_BASE_URL;
 
@@ -24,4 +30,12 @@ export async function fetchModelPerformanceData(): Promise<ModelPerformanceData>
 
 export async function fetchTrainingActivityData(days: number): Promise<TrainingActivityData> {
   return apiCall(`/v1/intelligence/training?days=${days}`);
+}
+
+export async function fetchRoutingIntelligenceData(days: number): Promise<RoutingIntelligenceData> {
+  return apiCall(`/v1/intelligence/routing?days=${days}`);
+}
+
+export async function fetchAdvisorConfig(): Promise<AdvisorConfigData> {
+  return apiCall('/v1/intelligence/advisor');
 }

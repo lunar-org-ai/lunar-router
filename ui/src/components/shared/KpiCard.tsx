@@ -32,7 +32,7 @@ export function KpiCard({
   const TrendIcon = isPositive ? TrendingUp : TrendingDown;
 
   return (
-    <Card className="@container/card">
+    <Card className="@container/card h-full">
       <CardHeader>
         <div className="flex items-center gap-1">
           {Icon && <Icon className="size-4 text-muted-foreground" />}
