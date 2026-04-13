@@ -12,7 +12,14 @@ export type {
 
 export type ViewTab = 'general' | 'data-pipeline' | 'models' | 'evaluate' | 'settings';
 
-export type CreateMode = 'manual' | 'import' | 'smart-import' | 'topic' | 'generate' | 'traces';
+export type CreateMode =
+  | 'manual'
+  | 'import'
+  | 'smart-import'
+  | 'topic'
+  | 'generate'
+  | 'traces'
+  | 'cluster';
 
 export interface TraceMapping {
   input: { path: string; transform: string };

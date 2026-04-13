@@ -7,6 +7,11 @@ from datetime import datetime
 from typing import Any, Optional
 
 
+def _f(v: Any) -> float:
+    """Coerce numpy/other numeric types to plain Python float."""
+    return float(v) if v is not None else 0.0
+
+
 @dataclass
 class ClusterLabel:
     """Rich structured label produced by LLM for a cluster."""
@@ -23,7 +28,7 @@ class ClusterLabel:
             "short_description": self.short_description,
             "inclusion_rule": self.inclusion_rule,
             "exclusion_rule": self.exclusion_rule,
-            "confidence": self.confidence,
+            "confidence": _f(self.confidence),
         }
 
     @classmethod
@@ -97,19 +102,19 @@ class CandidateDataset:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "cluster_id": self.cluster_id,
+            "cluster_id": int(self.cluster_id),
             "label": self.label.to_dict(),
-            "trace_count": self.trace_count,
+            "trace_count": int(self.trace_count),
             "status": self.status,
-            "coherence_score": self.coherence_score,
-            "diversity_score": self.diversity_score,
-            "noise_rate": self.noise_rate,
-            "avg_success_rate": self.avg_success_rate,
-            "avg_latency_ms": self.avg_latency_ms,
-            "avg_cost_usd": self.avg_cost_usd,
+            "coherence_score": _f(self.coherence_score),
+            "diversity_score": _f(self.diversity_score),
+            "noise_rate": _f(self.noise_rate),
+            "avg_success_rate": _f(self.avg_success_rate),
+            "avg_latency_ms": _f(self.avg_latency_ms),
+            "avg_cost_usd": _f(self.avg_cost_usd),
             "top_models": self.top_models,
             "top_providers": self.top_providers,
-            "has_tool_usage": self.has_tool_usage,
+            "has_tool_usage": bool(self.has_tool_usage),
             "sample_prompts": self.sample_prompts,
         }
 
@@ -139,12 +144,12 @@ class DatasetVersion:
             "source_window_start": self.source_window_start.isoformat() if self.source_window_start else None,
             "source_window_end": self.source_window_end.isoformat() if self.source_window_end else None,
             "embedding_model": self.embedding_model,
-            "embedding_dim": self.embedding_dim,
+            "embedding_dim": int(self.embedding_dim),
             "clustering_config": self.clustering_config,
             "labeler_model": self.labeler_model,
-            "trace_count": self.trace_count,
-            "num_clusters": self.num_clusters,
-            "silhouette_score": self.silhouette_score,
+            "trace_count": int(self.trace_count),
+            "num_clusters": int(self.num_clusters),
+            "silhouette_score": _f(self.silhouette_score),
         }
 
 
@@ -160,10 +165,10 @@ class MergeSuggestion:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "cluster_a": self.cluster_a,
-            "cluster_b": self.cluster_b,
-            "similarity_score": self.similarity_score,
-            "llm_agrees": self.llm_agrees,
+            "cluster_a": int(self.cluster_a),
+            "cluster_b": int(self.cluster_b),
+            "similarity_score": _f(self.similarity_score),
+            "llm_agrees": bool(self.llm_agrees),
             "reason": self.reason,
         }
 

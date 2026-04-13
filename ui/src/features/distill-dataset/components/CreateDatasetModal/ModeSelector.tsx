@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { FileText, GitBranch, Search, Sparkles, Upload, Wand2 } from 'lucide-react';
+import { FileText, GitBranch, Search, Upload, Wand2, Boxes } from 'lucide-react';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { CreateMode } from '../../types';
 
@@ -8,8 +8,8 @@ interface ModeSelectorProps {
   onModeChange: (mode: CreateMode) => void;
   disabled: boolean;
   showTopic: boolean;
-  showGenerate: boolean;
   showTraces: boolean;
+  showCluster: boolean;
 }
 
 const MODE_CONFIG = [
@@ -17,8 +17,8 @@ const MODE_CONFIG = [
   { value: 'import', label: 'Import', icon: Upload },
   { value: 'smart-import', label: 'Smart Import', icon: Wand2 },
   { value: 'topic', label: 'From Topic', icon: Search },
-  { value: 'generate', label: 'Generate', icon: Sparkles },
   { value: 'traces', label: 'From Traces', icon: GitBranch },
+  { value: 'cluster', label: 'From Cluster', icon: Boxes },
 ] as const satisfies readonly {
   value: CreateMode;
   label: string;
@@ -30,18 +30,18 @@ export function ModeSelector({
   onModeChange,
   disabled,
   showTopic,
-  showGenerate,
   showTraces,
+  showCluster,
 }: ModeSelectorProps) {
   const visibleModes = useMemo(
     () =>
       MODE_CONFIG.filter((m) => {
         if (m.value === 'topic') return showTopic;
-        if (m.value === 'generate') return showGenerate;
         if (m.value === 'traces') return showTraces;
+        if (m.value === 'cluster') return showCluster;
         return true;
       }),
-    [showTopic, showGenerate, showTraces]
+    [showTopic, showTraces, showCluster]
   );
 
   return (

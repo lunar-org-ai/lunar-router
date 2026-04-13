@@ -11,8 +11,9 @@ import json
 import logging
 import os
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import numpy as np
 
 from .schemas import (
@@ -193,6 +194,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all handler so that 500s still carry CORS headers."""
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc)},
+    )
 
 # --- Mount vLLM deployment router ---
 from ..deployment.routes import deployment_router
@@ -667,11 +678,27 @@ async def clustering_run(
     strategy: str = "auto",
 ):
     """Trigger a clustering pipeline run."""
+    import json as _json
+    import numpy as _np
     from ..clustering.pipeline import ClusteringPipeline
+
+    class _NumpyEncoder(_json.JSONEncoder):
+        """Safety-net encoder that converts any remaining numpy scalars."""
+        def default(self, obj):
+            if isinstance(obj, (_np.integer,)):
+                return int(obj)
+            if isinstance(obj, (_np.floating,)):
+                return float(obj)
+            if isinstance(obj, _np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
 
     pipeline = ClusteringPipeline(strategy=strategy)
     result = await pipeline.run(days=days, min_traces=min_traces)
-    return result.to_dict()
+    payload = result.to_dict()
+    # Re-serialize through NumpyEncoder to catch any stray numpy types
+    safe = _json.loads(_json.dumps(payload, cls=_NumpyEncoder))
+    return safe
 
 
 @app.get("/v1/clustering/runs", tags=["clustering"])
@@ -1250,7 +1277,7 @@ async def import_traces_to_clickhouse(body: dict):
 
 
 def _ensure_eval_tables() -> None:
-    """Create eval_datasets / eval_dataset_samples if they don't exist."""
+    """Create eval_datasets / eval_samples if they don't exist (matches migration 007)."""
     from ..storage.clickhouse_client import get_client
 
     client = get_client()
@@ -1258,25 +1285,27 @@ def _ensure_eval_tables() -> None:
         return
     client.command("""
         CREATE TABLE IF NOT EXISTS eval_datasets (
-            id              String,
+            dataset_id      String,
+            tenant_id       String       DEFAULT 'default',
             name            String,
-            description     String,
-            source          LowCardinality(String),
-            samples_count   UInt32,
-            created_at      DateTime64(3, 'UTC'),
-            updated_at      DateTime64(3, 'UTC')
-        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (id)
+            description     String       DEFAULT '',
+            source          LowCardinality(String)  DEFAULT 'manual',
+            samples_count   UInt32       DEFAULT 0,
+            created_at      DateTime64(3, 'UTC') DEFAULT now64(3),
+            updated_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(updated_at) ORDER BY (tenant_id, dataset_id)
     """)
     client.command("""
-        CREATE TABLE IF NOT EXISTS eval_dataset_samples (
-            id              String,
+        CREATE TABLE IF NOT EXISTS eval_samples (
+            sample_id       String,
             dataset_id      String,
-            input           String,
-            output          String,
-            expected_output String,
-            metadata        String,
-            created_at      DateTime64(3, 'UTC')
-        ) ENGINE = MergeTree ORDER BY (dataset_id, id)
+            tenant_id       String       DEFAULT 'default',
+            input           String       DEFAULT '',
+            expected_output String       DEFAULT '',
+            metadata        String       DEFAULT '{}',
+            trace_id        String       DEFAULT '',
+            created_at      DateTime64(3, 'UTC') DEFAULT now64(3)
+        ) ENGINE = ReplacingMergeTree(created_at) ORDER BY (tenant_id, dataset_id, sample_id)
     """)
 
 
@@ -1298,48 +1327,47 @@ def _ch_eval():
 
 
 @app.get("/v1/datasets", tags=["datasets"])
-async def list_datasets():
+async def list_datasets(request: Request):
     """List all datasets: evaluation datasets + clustering domain datasets."""
-    client = _ch_eval()
-    if client is None:
-        return {"datasets": [], "total": 0}
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     datasets = []
 
     # 1) Evaluation datasets
-    r = client.query(
-        "SELECT id, name, description, source, samples_count, created_at, updated_at "
-        "FROM eval_datasets FINAL ORDER BY created_at DESC"
-    )
-    for row in r.result_rows:
-        d = dict(zip(r.column_names, row))
-        for field in ("created_at", "updated_at"):
-            if hasattr(d.get(field), "isoformat"):
-                d[field] = d[field].isoformat()
-        datasets.append(d)
+    try:
+        rows = ds_repo.list_datasets(tenant)
+        for d in rows:
+            # Normalise id field for the frontend
+            d["id"] = d.get("dataset_id") or d.get("id", "")
+            datasets.append(d)
+    except Exception as e:
+        logger.warning("Failed to query eval_datasets: %s", e)
 
     # 2) Clustering domain datasets (from latest run)
     try:
-        rr = client.query("SELECT run_id FROM clustering_runs ORDER BY created_at DESC LIMIT 1")
-        if rr.result_rows:
-            run_id = rr.result_rows[0][0]
-            cr = client.query(
-                "SELECT cluster_id, domain_label, short_description, status, trace_count "
-                "FROM cluster_datasets WHERE run_id = {rid:String} ORDER BY trace_count DESC",
-                parameters={"rid": run_id},
-            )
-            for row in cr.result_rows:
-                cid, label, desc, status, count = row
-                name = label if label and label != "Unknown" else f"Cluster {cid}"
-                datasets.append({
-                    "id": f"cluster:{run_id}:{cid}",
-                    "name": f"[Domain] {name}",
-                    "description": desc or f"Domain cluster ({status}, {count} traces)",
-                    "source": "auto_collected",
-                    "samples_count": count,
-                    "created_at": "",
-                    "updated_at": "",
-                })
+        client = _ch_eval()
+        if client:
+            rr = client.query("SELECT run_id FROM clustering_runs ORDER BY created_at DESC LIMIT 1")
+            if rr.result_rows:
+                run_id = rr.result_rows[0][0]
+                cr = client.query(
+                    "SELECT cluster_id, domain_label, short_description, status, trace_count "
+                    "FROM cluster_datasets WHERE run_id = {rid:String} ORDER BY trace_count DESC",
+                    parameters={"rid": run_id},
+                )
+                for row in cr.result_rows:
+                    cid, label, desc, status, count = row
+                    name = label if label and label != "Unknown" else f"Cluster {cid}"
+                    datasets.append({
+                        "id": f"cluster:{run_id}:{cid}",
+                        "name": f"[Domain] {name}",
+                        "description": desc or f"Domain cluster ({status}, {count} traces)",
+                        "source": "auto_collected",
+                        "samples_count": count,
+                        "created_at": "",
+                        "updated_at": "",
+                    })
     except Exception:
         pass  # clustering tables may not exist
 
@@ -1347,149 +1375,75 @@ async def list_datasets():
 
 
 @app.post("/v1/datasets", tags=["datasets"])
-async def create_dataset(body: dict):
+async def create_dataset(body: dict, request: Request):
     """Create a new evaluation dataset."""
-    import uuid
-    from datetime import datetime, timezone
-
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     name = body.get("name")
     if not name:
         raise HTTPException(status_code=400, detail="'name' is required")
 
-    now = datetime.now(timezone.utc)
-    dataset_id = str(uuid.uuid4())[:8]
-    client.insert("eval_datasets",
-        [[dataset_id, name, body.get("description", ""), body.get("source", "manual"), 0, now, now]],
-        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
+    ds = ds_repo.create_dataset(
+        tenant,
+        name=name,
+        description=body.get("description", ""),
+        source=body.get("source", "manual"),
     )
-    return {
-        "id": dataset_id,
-        "name": name,
-        "description": body.get("description", ""),
-        "source": body.get("source", "manual"),
-        "samples_count": 0,
-        "created_at": now.isoformat(),
-        "updated_at": now.isoformat(),
-    }
+    ds["id"] = ds["dataset_id"]
+    return ds
 
 
 @app.get("/v1/datasets/{dataset_id}", tags=["datasets"])
 async def get_dataset(
     dataset_id: str,
+    request: Request,
     include_samples: bool = False,
     samples_limit: int = 50,
     samples_offset: int = 0,
 ):
     """Get a single dataset by ID."""
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
-    r = client.query(
-        "SELECT id, name, description, source, samples_count, created_at, updated_at "
-        "FROM eval_datasets FINAL WHERE id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    if not r.result_rows:
+    ds = ds_repo.get_dataset(tenant, dataset_id)
+    if not ds:
         raise HTTPException(status_code=404, detail="Dataset not found")
-
-    ds = dict(zip(r.column_names, r.result_rows[0]))
-    for field in ("created_at", "updated_at"):
-        if hasattr(ds.get(field), "isoformat"):
-            ds[field] = ds[field].isoformat()
+    ds["id"] = ds.get("dataset_id") or dataset_id
 
     samples = []
     samples_total = 0
     if include_samples:
-        sr = client.query(
-            "SELECT id, input, output, expected_output, metadata, created_at "
-            "FROM eval_dataset_samples WHERE dataset_id = {did:String} "
-            "ORDER BY created_at DESC LIMIT {lim:UInt32} OFFSET {off:UInt32}",
-            parameters={"did": dataset_id, "lim": samples_limit, "off": samples_offset},
-        )
-        for row in sr.result_rows:
-            s = dict(zip(sr.column_names, row))
-            if hasattr(s.get("created_at"), "isoformat"):
-                s["created_at"] = s["created_at"].isoformat()
-            if isinstance(s.get("metadata"), str) and s["metadata"]:
-                try:
-                    s["metadata"] = json.loads(s["metadata"])
-                except Exception:
-                    pass
+        sample_rows = ds_repo.get_samples(tenant, dataset_id, limit=samples_limit, offset=samples_offset)
+        for s in sample_rows:
+            s["id"] = s.get("sample_id") or s.get("id", "")
             samples.append(s)
-    cr = client.query(
-        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    samples_total = cr.result_rows[0][0] if cr.result_rows else 0
 
+    samples_total = ds_repo.get_samples_count(tenant, dataset_id)
     return {"dataset": ds, "samples": samples, "samples_total": samples_total}
 
 
 @app.delete("/v1/datasets/{dataset_id}", tags=["datasets"])
-async def delete_dataset(dataset_id: str):
+async def delete_dataset(dataset_id: str, request: Request):
     """Delete a dataset and its samples."""
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
-
-    client.command(
-        f"ALTER TABLE eval_datasets DELETE WHERE id = '{dataset_id}'"
-    )
-    client.command(
-        f"ALTER TABLE eval_dataset_samples DELETE WHERE dataset_id = '{dataset_id}'"
-    )
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
+    ds_repo.delete_dataset(tenant, dataset_id)
     return {"success": True}
 
 
 @app.post("/v1/datasets/{dataset_id}/samples", tags=["datasets"])
-async def add_samples(dataset_id: str, body: dict):
+async def add_samples(dataset_id: str, body: dict, request: Request):
     """Add samples to an existing dataset."""
-    import uuid
-    from datetime import datetime, timezone
-
-    client = _ch_eval()
-    if client is None:
-        raise HTTPException(status_code=503, detail="ClickHouse not available")
+    from ..datasets import repository as ds_repo
+    tenant = request.headers.get("x-tenant-id", "default")
 
     samples_input = body.get("samples", [])
     if not samples_input:
         raise HTTPException(status_code=400, detail="'samples' is required")
 
-    now = datetime.now(timezone.utc)
-    rows = []
-    for s in samples_input:
-        meta = s.get("metadata", {})
-        rows.append([
-            str(uuid.uuid4())[:8],
-            dataset_id,
-            s.get("input", ""),
-            s.get("output", ""),
-            s.get("expected_output", ""),
-            json.dumps(meta) if isinstance(meta, dict) else str(meta),
-            now,
-        ])
-
-    client.insert("eval_dataset_samples", rows,
-        column_names=["id", "dataset_id", "input", "output", "expected_output", "metadata", "created_at"],
-    )
-
-    # Update samples_count on the dataset
-    cr = client.query(
-        "SELECT count() FROM eval_dataset_samples WHERE dataset_id = {did:String}",
-        parameters={"did": dataset_id},
-    )
-    new_count = cr.result_rows[0][0] if cr.result_rows else len(rows)
-    client.insert("eval_datasets",
-        [[dataset_id, "", "", "", new_count, now, now]],
-        column_names=["id", "name", "description", "source", "samples_count", "created_at", "updated_at"],
-    )
-
-    return {"message": f"Added {len(rows)} samples", "count": len(rows)}
+    count = ds_repo.add_samples(tenant, dataset_id, samples_input)
+    return {"message": f"Added {count} samples", "count": count}
 
 
 # --- Available Models ---
@@ -1969,12 +1923,12 @@ async def _run_evaluation(eval_id: str, dataset_id: str, models: list, metrics: 
                     samples.append({"id": f"s-{i}", "input": row[0], "expected": row[1] or ""})
         else:
             r = client.query(
-                "SELECT id, input, output, expected_output FROM eval_dataset_samples "
+                "SELECT sample_id, input, expected_output FROM eval_samples "
                 "WHERE dataset_id = {did:String} LIMIT 100",
                 parameters={"did": dataset_id},
             )
             for row in r.result_rows:
-                samples.append({"id": row[0], "input": row[1], "expected": row[3] or row[2] or ""})
+                samples.append({"id": row[0], "input": row[1], "expected": row[2] or ""})
     except Exception as e:
         _update_status("failed", error=str(e))
         return

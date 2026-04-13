@@ -96,15 +96,16 @@ export default function DatasetsPage() {
         onClose={page.handleCloseCreateModal}
         onCreate={page.handleCreate}
         onCreateFromTopic={page.handleCreateFromTopic}
-        onGenerate={page.handleGenerate}
-        onPollGenerate={page.handlePollGenerate}
-        onGenerateBackground={page.handleGenerateBackground}
         onImport={page.handleImport}
         onAnalyzeTraces={page.handleAnalyzeTraces}
         onImportTraces={page.handleImportTraces}
         traces={page.traces}
         tracesLoading={page.tracesLoading}
         onCreateFromTraces={page.handleCreateFromTraces}
+        clusters={page.clusters}
+        clustersLoading={page.clustersLoading}
+        onCreateFromCluster={page.handleCreateFromCluster}
+        onTriggerClustering={page.handleTriggerClustering}
       />
     </div>
   );
