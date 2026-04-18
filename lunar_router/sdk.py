@@ -1,34 +1,43 @@
-"""
-Lunar Router SDK - Unified LLM interface (like LiteLLM / OpenRouter).
+"""Lunar Router SDK — OpenAI-compatible client across 13 providers.
+
+This module is the plumbing behind ``lunar_router.completion`` and
+``lunar_router.Router``. It parses ``provider/model`` strings, resolves a
+target (direct-to-provider HTTP, Lunar engine, or explicit ``api_base``),
+builds an OpenAI-schema request body, and wraps the response with Lunar
+metadata (``_cost``, ``_latency_ms``, ``_provider``, ``_routing``).
+
+The SDK is the entry point for the broader Lunar loop: every request can be
+captured as a trace, traces become datasets, datasets become distilled
+student models, and those models get swapped in under your app via routing
+aliases — without your code changing. See ``lunar_router`` package docs.
 
 Quick start:
-    import lunar_router as lr
-
-    response = lr.completion(
-        model="openai/gpt-4o-mini",
-        messages=[{"role": "user", "content": "Hello!"}],
-    )
-    print(response.choices[0].message.content)
-    print(f"Cost: ${response._cost:.6f}")
+    >>> import lunar_router as lr
+    >>> resp = lr.completion(
+    ...     model="openai/gpt-4o-mini",
+    ...     messages=[{"role": "user", "content": "Hello"}],
+    ... )
+    >>> print(resp.choices[0].message.content, f"${resp._cost:.6f}")
 
 Streaming:
-    for chunk in lr.completion(model="openai/gpt-4o-mini", messages=[...], stream=True):
-        print(chunk.choices[0].delta.content or "", end="")
+    >>> for chunk in lr.completion(model="openai/gpt-4o-mini",
+    ...                            messages=[...], stream=True):
+    ...     print(chunk.choices[0].delta.content or "", end="")
 
 Router with fallbacks:
-    router = lr.Router(
-        model_list=[
-            {"model_name": "smart", "model": "openai/gpt-4o"},
-            {"model_name": "smart", "model": "anthropic/claude-3-5-sonnet-20241022"},
-        ],
-        fallbacks=["deepseek/deepseek-chat"],
-    )
-    response = router.completion(model="smart", messages=[...])
+    >>> router = lr.Router(
+    ...     model_list=[
+    ...         {"model_name": "smart", "model": "openai/gpt-4o"},
+    ...         {"model_name": "smart", "model": "anthropic/claude-sonnet-4-6"},
+    ...     ],
+    ...     fallbacks=[{"smart": ["deepseek/deepseek-chat"]}],
+    ... )
+    >>> resp = router.completion(model="smart", messages=[...])
 
-Drop-in OpenAI replacement:
+Engine mode (drop-in OpenAI SDK, zero code changes):
     from openai import OpenAI
     client = OpenAI(base_url="http://localhost:8080/v1", api_key="any")
-    # All 13 providers available through unified endpoint
+    # All providers routed through the Lunar engine; each request is a trace.
 """
 
 from __future__ import annotations
@@ -84,8 +93,10 @@ _MODEL_PREFIX_MAP: dict[str, str] = {
     "sonar": "perplexity",
 }
 
-# Engine URL (Go engine)
+# Engine URL (Go engine). Engine routing is opt-in: traffic goes direct to the
+# provider unless LUNAR_ENGINE_URL is explicitly set or force_engine=True.
 ENGINE_URL: str = os.environ.get("LUNAR_ENGINE_URL", "http://localhost:8080")
+_ENGINE_EXPLICITLY_SET: bool = "LUNAR_ENGINE_URL" in os.environ
 
 # ---------------------------------------------------------------------------
 # Response types (OpenAI-compatible with attribute access)
@@ -150,7 +161,13 @@ _engine_available: Optional[bool] = None
 
 
 def _check_engine() -> bool:
-    """Check if Go engine is reachable (cached). On first connect, reloads API keys."""
+    """Probe the engine (cached). On first successful connect, triggers key reload.
+
+    Only called when engine routing has been explicitly opted into (via
+    LUNAR_ENGINE_URL or force_engine=True). We no longer silently probe
+    localhost — that made behavior depend on whether an unrelated server
+    happened to be running on :8080.
+    """
     global _engine_available
     if _engine_available is not None:
         return _engine_available
@@ -282,11 +299,16 @@ async def acompletion(
     timeout: float = 120.0,
     num_retries: int = 0,
     fallbacks: Optional[list[str]] = None,
+    force_engine: bool = False,
+    force_direct: bool = False,
     **kwargs: Any,
 ) -> Union[ModelResponse, Any]:
     """Async version of completion(). Requires openai SDK installed.
 
-    Same parameters as completion(). Uses openai.AsyncOpenAI internally.
+    Same parameters as completion(). Uses openai.AsyncOpenAI internally and
+    shares request preparation (target resolution, body build) with the sync
+    path via _prepare_request — so force_engine / force_direct / engine
+    pass-through behave identically.
     """
     try:
         from openai import AsyncOpenAI
@@ -299,11 +321,14 @@ async def acompletion(
     for m in models_to_try:
         for attempt in range(1 + num_retries):
             try:
-                provider_name, model_name = parse_model(m)
-                base_url, key = _resolve_target(provider_name, model_name, api_key, api_base)
-
-                body = _build_body(model_name, messages, temperature, max_tokens,
-                                   top_p, stop, tools, tool_choice, stream, kwargs)
+                base_url, key, body, provider_name, effective_model = _prepare_request(
+                    m, messages,
+                    api_key=api_key, api_base=api_base,
+                    temperature=temperature, max_tokens=max_tokens, top_p=top_p,
+                    stop=stop, tools=tools, tool_choice=tool_choice,
+                    stream=stream, force_engine=force_engine, force_direct=force_direct,
+                    extra=kwargs,
+                )
 
                 client = AsyncOpenAI(api_key=key, base_url=base_url, timeout=timeout)
                 start = time.time()
@@ -313,7 +338,7 @@ async def acompletion(
                 if stream:
                     return resp  # AsyncStream
 
-                return _wrap_response(resp, provider_name, model_name, latency_ms)
+                return _wrap_response(resp, provider_name, effective_model, latency_ms)
 
             except Exception as e:
                 last_error = e
@@ -335,18 +360,29 @@ def _resolve_target(
     api_key: Optional[str],
     api_base: Optional[str],
 ) -> tuple[str, str]:
-    """Determine base_url and api_key for the request."""
-    # Explicit override
+    """Determine base_url and api_key for the request.
+
+    Resolution order:
+      1. Explicit ``api_base`` override — always wins.
+      2. Engine routing — only if ``LUNAR_ENGINE_URL`` is explicitly set.
+         (Previously we silently probed localhost:8080 and used it if up,
+         which made behavior non-deterministic across machines.)
+      3. Direct provider call — requires a known provider and API key.
+    """
     if api_base:
-        key = api_key or "none"
-        return api_base, key
+        return api_base, api_key or "none"
 
-    # Try Go engine first
-    if not provider_name or _check_engine():
-        key = api_key or os.environ.get("LUNAR_API_KEY", "none")
-        return f"{ENGINE_URL}/v1", key
+    if _ENGINE_EXPLICITLY_SET:
+        _check_engine()  # side effect: reload keys on first use
+        return f"{ENGINE_URL}/v1", api_key or os.environ.get("LUNAR_API_KEY", "none")
 
-    # Direct provider call
+    if not provider_name:
+        raise ValueError(
+            f"Cannot resolve provider for model '{model_name}'. "
+            "Use 'provider/model' format (e.g. 'openai/gpt-4o'), "
+            "set LUNAR_ENGINE_URL to route via the Lunar engine, "
+            "or pass force_engine=True."
+        )
     cfg = PROVIDERS.get(provider_name, {})
     base = cfg.get("base_url", "")
     if not base:
@@ -390,6 +426,56 @@ def _build_body(
     return body
 
 
+def _prepare_request(
+    model: str,
+    messages: list[dict],
+    *,
+    api_key: Optional[str],
+    api_base: Optional[str],
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    top_p: Optional[float],
+    stop: Optional[Union[str, list[str]]],
+    tools: Optional[list[dict]],
+    tool_choice: Optional[Union[str, dict]],
+    stream: bool,
+    force_engine: bool,
+    force_direct: bool,
+    extra: dict,
+) -> tuple[str, str, dict[str, Any], str, str]:
+    """Resolve target, pick effective model name, and build request body.
+
+    Single source of truth shared by sync, stream, and async paths so the
+    force_engine / force_direct / engine-pass-through semantics can't drift.
+
+    Returns:
+        (base_url, api_key, body, provider_name, effective_model_name)
+    """
+    provider_name, model_name = parse_model(model)
+
+    if force_engine:
+        base_url = f"{ENGINE_URL}/v1"
+        key = api_key or os.environ.get("LUNAR_API_KEY", "none")
+        effective_model = model  # pass full "provider/model" to engine
+    elif force_direct:
+        cfg = PROVIDERS.get(provider_name, {})
+        base_url = api_base or cfg.get("base_url", "")
+        if not base_url:
+            raise ValueError(f"Unknown provider: {provider_name}")
+        key = api_key or os.environ.get(cfg.get("api_key_env", ""), "")
+        effective_model = model_name
+    else:
+        base_url, key = _resolve_target(provider_name, model_name, api_key, api_base)
+        # When routing through the engine, it expects the full "provider/model" string
+        effective_model = model if base_url.startswith(ENGINE_URL) else model_name
+
+    body = _build_body(
+        effective_model, messages, temperature, max_tokens,
+        top_p, stop, tools, tool_choice, stream, extra,
+    )
+    return base_url, key, body, provider_name, effective_model
+
+
 def _send_completion(
     model: str,
     messages: list[dict],
@@ -407,52 +493,34 @@ def _send_completion(
     force_direct: bool,
     **kwargs: Any,
 ) -> ModelResponse:
-    provider_name, model_name = parse_model(model)
-
-    # Determine target
-    if force_engine:
-        base_url = f"{ENGINE_URL}/v1"
-        key = api_key or os.environ.get("LUNAR_API_KEY", "none")
-        model_name = model  # pass full "provider/model" to engine
-    elif force_direct:
-        cfg = PROVIDERS.get(provider_name, {})
-        base_url = api_base or cfg.get("base_url", "")
-        key = api_key or os.environ.get(cfg.get("api_key_env", ""), "")
-    else:
-        base_url, key = _resolve_target(provider_name, model_name, api_key, api_base)
-        if base_url.startswith(ENGINE_URL):
-            model_name = model  # pass full "provider/model" to engine
+    base_url, key, body, provider_name, effective_model = _prepare_request(
+        model, messages,
+        api_key=api_key, api_base=api_base,
+        temperature=temperature, max_tokens=max_tokens, top_p=top_p,
+        stop=stop, tools=tools, tool_choice=tool_choice,
+        stream=False, force_engine=force_engine, force_direct=force_direct,
+        extra=kwargs,
+    )
 
     # Try openai SDK first (better DX, handles retries, types)
     try:
         return _send_via_openai_sdk(
-            base_url, key, model_name, messages,
-            temperature, max_tokens, top_p, stop,
-            tools, tool_choice, timeout, provider_name, kwargs,
+            base_url, key, body, timeout, provider_name, effective_model,
         )
     except ImportError:
         pass
 
     # Fallback: raw HTTP
     return _send_via_http(
-        base_url, key, model_name, messages,
-        temperature, max_tokens, top_p, stop,
-        tools, tool_choice, timeout, provider_name, kwargs,
+        base_url, key, body, timeout, provider_name, effective_model,
     )
 
 
 def _send_via_openai_sdk(
-    base_url: str, api_key: str, model_name: str,
-    messages: list[dict], temperature: Optional[float],
-    max_tokens: Optional[int], top_p: Optional[float],
-    stop: Optional[Union[str, list[str]]],
-    tools: Optional[list[dict]], tool_choice: Optional[Union[str, dict]],
-    timeout: float, provider_name: str, extra: dict,
+    base_url: str, api_key: str, body: dict[str, Any],
+    timeout: float, provider_name: str, model_name: str,
 ) -> ModelResponse:
     from openai import OpenAI
-
-    body = _build_body(model_name, messages, temperature, max_tokens,
-                       top_p, stop, tools, tool_choice, False, extra)
 
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
     start = time.time()
@@ -463,17 +531,10 @@ def _send_via_openai_sdk(
 
 
 def _send_via_http(
-    base_url: str, api_key: str, model_name: str,
-    messages: list[dict], temperature: Optional[float],
-    max_tokens: Optional[int], top_p: Optional[float],
-    stop: Optional[Union[str, list[str]]],
-    tools: Optional[list[dict]], tool_choice: Optional[Union[str, dict]],
-    timeout: float, provider_name: str, extra: dict,
+    base_url: str, api_key: str, body: dict[str, Any],
+    timeout: float, provider_name: str, model_name: str,
 ) -> ModelResponse:
     """Fallback: call provider via raw HTTP (no openai SDK needed)."""
-    body = _build_body(model_name, messages, temperature, max_tokens,
-                       top_p, stop, tools, tool_choice, False, extra)
-
     data = json.dumps(body).encode()
     url = f"{base_url}/chat/completions"
 
@@ -509,26 +570,18 @@ def _stream_completion(
     **kwargs: Any,
 ) -> Iterator[StreamChunk]:
     """Stream completion via openai SDK or raw SSE."""
-    provider_name, model_name = parse_model(model)
-
-    if force_engine:
-        base_url = f"{ENGINE_URL}/v1"
-        key = api_key or os.environ.get("LUNAR_API_KEY", "none")
-        model_name = model
-    elif force_direct:
-        cfg = PROVIDERS.get(provider_name, {})
-        base_url = api_base or cfg.get("base_url", "")
-        key = api_key or os.environ.get(cfg.get("api_key_env", ""), "")
-    else:
-        base_url, key = _resolve_target(provider_name, model_name, api_key, api_base)
-        if base_url.startswith(ENGINE_URL):
-            model_name = model
+    base_url, key, body, _provider, _model = _prepare_request(
+        model, messages,
+        api_key=api_key, api_base=api_base,
+        temperature=temperature, max_tokens=max_tokens, top_p=top_p,
+        stop=stop, tools=tools, tool_choice=tool_choice,
+        stream=True, force_engine=force_engine, force_direct=force_direct,
+        extra=kwargs,
+    )
 
     # Prefer openai SDK for streaming (handles SSE parsing)
     try:
         from openai import OpenAI
-        body = _build_body(model_name, messages, temperature, max_tokens,
-                           top_p, stop, tools, tool_choice, True, kwargs)
         client = OpenAI(api_key=key, base_url=base_url, timeout=timeout)
         stream = client.chat.completions.create(**body)
         for chunk in stream:
@@ -538,25 +591,13 @@ def _stream_completion(
         pass
 
     # Fallback: raw SSE
-    yield from _stream_via_http(
-        base_url, key, model_name, messages,
-        temperature, max_tokens, top_p, stop,
-        tools, tool_choice, timeout, kwargs,
-    )
+    yield from _stream_via_http(base_url, key, body, timeout)
 
 
 def _stream_via_http(
-    base_url: str, api_key: str, model_name: str,
-    messages: list[dict], temperature: Optional[float],
-    max_tokens: Optional[int], top_p: Optional[float],
-    stop: Optional[Union[str, list[str]]],
-    tools: Optional[list[dict]], tool_choice: Optional[Union[str, dict]],
-    timeout: float, extra: dict,
+    base_url: str, api_key: str, body: dict[str, Any], timeout: float,
 ) -> Generator[StreamChunk, None, None]:
     """Raw SSE streaming fallback."""
-    body = _build_body(model_name, messages, temperature, max_tokens,
-                       top_p, stop, tools, tool_choice, True, extra)
-
     data = json.dumps(body).encode()
     url = f"{base_url}/chat/completions"
     headers = {

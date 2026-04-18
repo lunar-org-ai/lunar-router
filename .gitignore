@@ -131,3 +131,12 @@ data/
 .vite/
 outputs/
 unsloth_compiled_cache/
+
+# Per-platform Go binary + onnxruntime lib + ONNX MiniLM model — CI downloads
+# these fresh during each release job and sets up package_data; local-only.
+lunar_router/_bin/
+lunar_router/_onnx/
+dist_multi/
+
+# Claude Code local state (memory, tasks, session notes)
+.claude/

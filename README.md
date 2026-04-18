@@ -1,33 +1,83 @@
 # Lunar Router
 
-**Unified LLM Gateway + Evaluation Engine — route, observe, evaluate, distill.**
+**The auto-distillation layer for your LLM calls.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![HuggingFace](https://img.shields.io/badge/HuggingFace-Weights-orange)](https://huggingface.co/diogovieira/lunar-router-weights)
+[![PyPI](https://img.shields.io/pypi/v/lunar-router.svg)](https://pypi.org/project/lunar-router/)
 
-Lunar Router is an LLM infrastructure platform. It routes requests to **13 providers** through a single OpenAI-compatible API, collects traces with full input/output content, clusters prompts into domain datasets, runs evaluations with AI-suggested metrics, and prepares training data for model distillation.
+Drop-in OpenAI-compatible SDK. Every request becomes a trace; traces become datasets; datasets become distilled custom models; the routing layer swaps those models in under your app via aliases — so your cost curve goes down over time **without code changes**.
 
-## Quick Start
+## Install
 
 ```bash
-git clone https://github.com/lunar-org-ai/lunar-router.git
-cd lunar-router
-make start-full   # Gateway + ClickHouse analytics + Python API
+pip install lunar-router
 ```
 
-Engine at `http://localhost:8080`, Python API at `http://localhost:8000`, UI at `http://localhost:3000`.
+## Quick start
 
 ```python
 import lunar_router as lr
 
-response = lr.completion(
+resp = lr.completion(
     model="openai/gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}],
+    messages=[{"role": "user", "content": "Hello"}],
 )
-print(response.choices[0].message.content)
-print(f"Cost: ${response._cost:.6f}")
+print(resp.choices[0].message.content)
+print(f"cost: ${resp._cost:.6f}  latency: {resp._latency_ms:.0f}ms")
 ```
+
+Works with 13 providers out of the box: OpenAI, Anthropic, Gemini, Groq, Mistral, DeepSeek, Together, Fireworks, Cerebras, Sambanova, Perplexity, Cohere, Bedrock.
+
+## Routing with fallbacks
+
+```python
+router = lr.Router(
+    model_list=[
+        {"model_name": "smart", "model": "openai/gpt-4o"},
+        {"model_name": "smart", "model": "anthropic/claude-sonnet-4-6"},
+    ],
+    fallbacks=[{"smart": ["deepseek/deepseek-chat"]}],
+)
+resp = router.completion(model="smart", messages=[{"role": "user", "content": "Hi"}])
+```
+
+## Drop-in replacement for the OpenAI SDK
+
+Point any existing OpenAI app at the Lunar engine — zero code changes beyond `base_url`:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="any")
+# All 13 providers routed through the Lunar engine; every request is a trace.
+```
+
+## Distillation — what makes Lunar different from a plain gateway
+
+```python
+from lunar_router import Distiller
+
+d = Distiller()
+# Submit a dataset built from your own traces, pick a teacher + student model,
+# and Lunar trains the distilled model and serves it behind a routing alias
+# you can point traffic at. Your app code never changes.
+```
+
+Install the training extras for the distillation pipeline:
+
+```bash
+pip install lunar-router[distill]
+```
+
+## Self-host the full platform (traces + UI + REST API)
+
+```bash
+git clone https://github.com/lunar-org-ai/lunar-router.git
+cd lunar-router
+make start-full   # Gateway + ClickHouse analytics + Python API + UI
+```
+
+Engine at `http://localhost:8080`, Python API at `http://localhost:8000`, UI at `http://localhost:3000`.
 
 ## What Lunar Router Does
 

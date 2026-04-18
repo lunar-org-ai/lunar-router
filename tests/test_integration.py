@@ -414,7 +414,10 @@ class TestRealEmbeddings:
         if not weights_path.exists():
             pytest.skip("Default weights not downloaded")
 
-        router = load_router(weights_path=weights_path, verbose=False)
+        # Force the Python backend so this test doesn't depend on the Go
+        # binary being installed in the test environment. Backend selection
+        # is covered elsewhere; this test is about weight loading + routing.
+        router = load_router(weights_path=weights_path, verbose=False, engine="python")
         decision = router.route("Explain quantum computing")
 
         assert decision.selected_model is not None

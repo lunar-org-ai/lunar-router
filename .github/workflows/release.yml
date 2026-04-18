@@ -1,0 +1,212 @@
+name: release
+
+# Publishes platform-specific wheels when a `vX.Y.Z` tag is pushed.
+# Each matrix job:
+#   1. Installs Go + downloads ONNX Runtime + the MiniLM ONNX model
+#   2. Builds the lunar-engine binary for the job's platform
+#   3. Packages everything into a wheel and retags it with the platform tag
+#   4. Uploads the wheel to PyPI
+# Users do `pip install lunar-router` and pip picks the right wheel.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # required for PyPI trusted publishing (OIDC)
+  id-token: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  GO_VERSION: '1.23'
+  ORT_VERSION: '1.24.4'
+  MINILM_REPO: 'sentence-transformers/all-MiniLM-L6-v2'
+
+jobs:
+  # -------------------------------------------------------------------
+  # Build one wheel per platform. Each job cross-compiles the Go binary,
+  # pulls the matching onnxruntime shared library, and emits a wheel.
+  # -------------------------------------------------------------------
+  wheels:
+    name: ${{ matrix.os }} / ${{ matrix.platform_tag }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-amd64
+            runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            platform_tag: manylinux_2_34_x86_64
+            binary_name: lunar-engine-linux-amd64
+            ort_asset: onnxruntime-linux-x64-${ORT_VERSION}.tgz
+            ort_lib: libonnxruntime.so.${ORT_VERSION}
+            ort_lib_dst: libonnxruntime.so.${ORT_VERSION}
+          - os: linux-arm64
+            runner: ubuntu-latest          # cross-build with GOARCH=arm64
+            goos: linux
+            goarch: arm64
+            platform_tag: manylinux_2_34_aarch64
+            binary_name: lunar-engine-linux-arm64
+            ort_asset: onnxruntime-linux-aarch64-${ORT_VERSION}.tgz
+            ort_lib: libonnxruntime.so.${ORT_VERSION}
+            ort_lib_dst: libonnxruntime.so.${ORT_VERSION}
+          - os: macos-arm64
+            runner: macos-14               # Apple Silicon
+            goos: darwin
+            goarch: arm64
+            platform_tag: macosx_11_0_arm64
+            binary_name: lunar-engine-darwin-arm64
+            ort_asset: onnxruntime-osx-arm64-${ORT_VERSION}.tgz
+            ort_lib: libonnxruntime.${ORT_VERSION}.dylib
+            ort_lib_dst: libonnxruntime.dylib
+          - os: macos-amd64
+            runner: macos-13               # Intel
+            goos: darwin
+            goarch: amd64
+            platform_tag: macosx_10_15_x86_64
+            binary_name: lunar-engine-darwin-amd64
+            ort_asset: onnxruntime-osx-x86_64-${ORT_VERSION}.tgz
+            ort_lib: libonnxruntime.${ORT_VERSION}.dylib
+            ort_lib_dst: libonnxruntime.dylib
+          - os: windows-amd64
+            runner: windows-latest
+            goos: windows
+            goarch: amd64
+            platform_tag: win_amd64
+            binary_name: lunar-engine-windows-amd64.exe
+            ort_asset: onnxruntime-win-x64-${ORT_VERSION}.zip
+            ort_lib: onnxruntime.dll
+            ort_lib_dst: onnxruntime.dll
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Install build deps (Python)
+        run: python -m pip install --upgrade build wheel
+
+      # --------------------------------------------------------------
+      # Build Go binary
+      # --------------------------------------------------------------
+      - name: Build lunar-engine binary
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '1'
+        run: |
+          cd go
+          go build -ldflags "-s -w" -o "../lunar_router/_bin/${{ matrix.binary_name }}" ./cmd/lunar-engine
+
+      # --------------------------------------------------------------
+      # Download + unpack onnxruntime for this platform
+      # --------------------------------------------------------------
+      - name: Download ONNX Runtime ${{ env.ORT_VERSION }}
+        shell: bash
+        run: |
+          mkdir -p lunar_router/_bin
+          ort_asset="${{ matrix.ort_asset }}"
+          ort_asset="${ort_asset//\$\{ORT_VERSION\}/${{ env.ORT_VERSION }}}"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${{ env.ORT_VERSION }}/${ort_asset}"
+          echo "downloading $url"
+          curl -sSL -o /tmp/ort.archive "$url"
+          case "$ort_asset" in
+            *.tgz) tar -C /tmp -xzf /tmp/ort.archive ;;
+            *.zip) unzip -q /tmp/ort.archive -d /tmp ;;
+          esac
+          extracted=$(find /tmp -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
+          src_lib="${{ matrix.ort_lib }}"
+          src_lib="${src_lib//\$\{ORT_VERSION\}/${{ env.ORT_VERSION }}}"
+          cp "$extracted/lib/$src_lib" "lunar_router/_bin/${{ matrix.ort_lib_dst }}" 2>/dev/null \
+            || cp "$extracted/lib/$src_lib" "lunar_router/_bin/${{ matrix.ort_lib_dst }}"
+
+      # --------------------------------------------------------------
+      # Download MiniLM ONNX + vocab (one-time, same bytes for every platform)
+      # --------------------------------------------------------------
+      - name: Download MiniLM ONNX
+        shell: bash
+        run: |
+          mkdir -p lunar_router/_onnx
+          base="https://huggingface.co/${{ env.MINILM_REPO }}/resolve/main"
+          curl -sfL -o lunar_router/_onnx/model.onnx "$base/onnx/model.onnx"
+          curl -sfL -o lunar_router/_onnx/vocab.txt  "$base/vocab.txt"
+
+      # --------------------------------------------------------------
+      # Build + retag wheel
+      # --------------------------------------------------------------
+      - name: Build wheel
+        shell: bash
+        run: python -m build --wheel
+
+      - name: Retag wheel for platform
+        shell: bash
+        run: |
+          cd dist
+          python -m wheel tags --platform-tag ${{ matrix.platform_tag }} --remove *.whl
+          ls -lh
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist/*.whl
+
+  # -------------------------------------------------------------------
+  # Build the sdist once (source distribution — no platform-specific files)
+  # -------------------------------------------------------------------
+  sdist:
+    name: sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - run: python -m pip install --upgrade build
+      - run: python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # -------------------------------------------------------------------
+  # Publish everything to PyPI via trusted publishing (OIDC).
+  # Configure at https://pypi.org/manage/project/lunar-router/settings/publishing/
+  # - Owner: lunar-org-ai
+  # - Repo:  lunar-router
+  # - Workflow: release.yml
+  # - Environment: pypi
+  # -------------------------------------------------------------------
+  publish:
+    name: Publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: '*'
+          merge-multiple: true
+      - name: List artifacts
+        run: ls -lh dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          verbose: true

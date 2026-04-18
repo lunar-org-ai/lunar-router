@@ -4,15 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lunar-router"
-version = "0.1.0"
-description = "Lunar Router - Intelligent LLM Routing for Efficient Inference"
+version = "0.2.1"
+description = "Auto-distillation layer for your LLM calls — drop-in OpenAI-compatible SDK that turns every request into training data for cheaper custom models."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "Lunar Team"}
 ]
-keywords = ["llm", "routing", "ai", "machine-learning", "semantic-routing"]
+keywords = [
+    "llm", "distillation", "fine-tuning", "routing",
+    "openai", "anthropic", "gateway", "ai",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -25,62 +28,59 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
+# Core dependencies — everything needed for `completion()`, `Router`, and
+# `Distiller` to work out of the box. Provider-specific SDKs and
+# research/training deps live in extras so the base install stays lean.
 dependencies = [
-    "numpy>=1.24.0",
+    "openai>=1.0.0",      # chat.completions plumbing used by sdk.completion + acompletion
+    "httpx>=0.24.0",      # Distiller / TrainingClient talk to /v1/distillation
+    "numpy>=1.24.0",      # used by models.llm_profile and trace math
     "tqdm>=4.65.0",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-openai = [
-    "openai>=1.0.0",
-]
-anthropic = [
-    "anthropic>=0.18.0",
-]
-mistral = [
-    "mistralai>=0.1.0",
-]
-google = [
-    "google-generativeai>=0.3.0",
-]
-groq = [
-    "groq>=0.4.0",
-]
-embeddings = [
-    "sentence-transformers>=2.2.0",
-]
-training = [
-    "scikit-learn>=1.3.0",
-]
-api = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "pydantic>=2.0.0",
-    "httpx>=0.24.0",
-]
-s3 = [
-    "boto3>=1.28.0",
-]
-huggingface = [
-    "huggingface_hub>=0.16.0",
-]
-distillation = [
+# ── Per-provider SDKs ────────────────────────────────────────────────
+# Only required if you use `create_client("<provider>", ...)`. Without
+# them, `completion()` still works via the raw-HTTP fallback path.
+anthropic = ["anthropic>=0.18.0"]
+mistral   = ["mistralai>=0.1.0"]
+google    = ["google-generativeai>=0.3.0"]
+groq      = ["groq>=0.4.0"]
+
+# ── The wedge: automated distillation ───────────────────────────────
+# Train custom student models from your trace data. Pulls GPU/training deps.
+distill = [
     "datasets>=2.14.0",
-    "unsloth>=2024.0",
     "trl>=0.7.0",
     "peft>=0.6.0",
     "bitsandbytes>=0.41.0",
+    "unsloth>=2024.0",
 ]
-mcp = [
+
+# ── Research router (paper impl) ────────────────────────────────────
+# UniRouteRouter + clustering + embeddings + training pipeline.
+research = [
+    "sentence-transformers>=2.2.0",
+    "scikit-learn>=1.3.0",
+    "huggingface_hub>=0.16.0",
+    "boto3>=1.28.0",
+]
+
+# ── Self-host the full REST API + engine-integrated services ────────
+server = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "pydantic>=2.0.0",
+    "clickhouse-connect>=0.7.0",
     "mcp>=1.0.0",
 ]
-clickhouse = [
-    "clickhouse-connect>=0.7.0",
-]
+
+# ── Kitchen sink ────────────────────────────────────────────────────
 all = [
-    "lunar-router[openai,anthropic,mistral,google,groq,embeddings,training,api,s3,huggingface,mcp,clickhouse,distillation]",
+    "lunar-router[anthropic,mistral,google,groq,distill,research,server]",
 ]
+
 dev = [
     "lunar-router[all]",
     "pytest>=7.0.0",
@@ -92,9 +92,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/pureai-ecosystem/lunar-router"
-Documentation = "https://github.com/pureai-ecosystem/lunar-router#readme"
-Repository = "https://github.com/pureai-ecosystem/lunar-router"
+Homepage = "https://github.com/lunar-org-ai/lunar-router"
+Documentation = "https://github.com/lunar-org-ai/lunar-router#readme"
+Repository = "https://github.com/lunar-org-ai/lunar-router"
+Issues = "https://github.com/lunar-org-ai/lunar-router/issues"
 
 [project.scripts]
 lunar-router = "lunar_router.cli:main"
@@ -102,6 +103,25 @@ lunar-router = "lunar_router.cli:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lunar_router*"]
+
+# Ship the per-platform Go binary inside the wheel so `pip install lunar-router`
+# works out of the box. _find_binary() loads lunar_router/_bin/lunar-engine-<tag>
+# at runtime. Each CI job builds for its platform and publishes a platform-tagged
+# wheel; pip will resolve the right one automatically.
+[tool.setuptools.package-data]
+lunar_router = [
+    # Per-platform Go binary + the onnxruntime shared library it dlopens.
+    "_bin/lunar-engine-*",
+    "_bin/lunar-engine-*.exe",
+    "_bin/libonnxruntime.so*",
+    "_bin/libonnxruntime.dylib",
+    "_bin/onnxruntime.dll",
+    # ONNX MiniLM model + vocab — copied into the weights dir on first start
+    # so the engine's built-in embedder works out of the box.
+    "_onnx/model.onnx",
+    "_onnx/vocab.txt",
+    "hub/index.json",
+]
 
 [tool.black]
 line-length = 100

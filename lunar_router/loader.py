@@ -47,45 +47,41 @@ def load_router(
     allowed_models: Optional[List[str]] = None,
     download_if_missing: bool = True,
     verbose: bool = True,
-    engine: str = "auto",
+    engine: str = "go",
 ) -> UniRouteRouter:
-    """
-    Load a UniRoute router from pre-trained weights.
+    """Load a UniRoute router from pre-trained weights.
 
-    This is the main entry point for using UniRoute with pre-trained weights.
+    Main entry point for the auto-routing layer. Downloads weights on first
+    run and returns a router you can call ``.route(prompt)`` on.
 
     Args:
         weights_path: Path to weights directory. If None, downloads from registry.
         weights_name: Name of weights to download if weights_path is None.
-        embedding_model: SentenceTransformers model name for embeddings.
+        embedding_model: SentenceTransformers model name (only used by Python backend).
         cost_weight: Lambda parameter for cost-quality tradeoff.
-        use_soft_assignment: Use soft cluster probabilities.
+        use_soft_assignment: Use soft cluster probabilities (Python backend only).
         allowed_models: Restrict routing to these models.
         download_if_missing: Download weights if not found locally.
         verbose: Print progress information.
-        engine: Backend engine - "auto", "go", or "python".
-            - "auto": Use Go engine if available, fall back to Python (default).
-            - "go": Use Go engine (raises error if not available).
-            - "python": Use pure Python (original behavior).
+        engine: Backend engine. **Default: ``"go"``** — the Go engine is the
+            canonical/production path. Pass ``"auto"`` only if you want a
+            silent fallback to Python when the Go binary is missing; pass
+            ``"python"`` only for the research/offline path.
+            - ``"go"``: Use the Go engine. Raises if binary is unavailable. (Default.)
+            - ``"auto"``: Prefer Go, fall back to Python if Go binary is missing.
+            - ``"python"``: Force the pure-Python backend.
 
     Returns:
         Configured UniRouteRouter ready for use.
 
     Example:
         >>> from lunar_router import load_router
-        >>>
-        >>> # Load with default weights (auto-detects Go engine)
-        >>> router = load_router()
-        >>>
-        >>> # Route a prompt
+        >>> router = load_router()                       # Go engine (default)
         >>> decision = router.route("What is machine learning?")
         >>> print(f"Best model: {decision.selected_model}")
         >>>
-        >>> # Force Python backend
-        >>> router = load_router(engine="python")
-        >>>
-        >>> # Force Go backend (faster)
-        >>> router = load_router(engine="go")
+        >>> router = load_router(engine="python")        # research/offline path
+        >>> router = load_router(engine="auto")          # silent-fallback mode
     """
     # Determine weights path
     if weights_path is None:

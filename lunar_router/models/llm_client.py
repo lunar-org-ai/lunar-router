@@ -676,58 +676,148 @@ class MockLLMClient(LLMClient):
         )
 
 
+class UnifiedClient(LLMClient):
+    """Generic LLMClient backed by ``sdk.completion``.
+
+    Lets ``create_client`` cover every provider registered in
+    ``sdk.PROVIDERS`` without requiring a hand-written subclass for each.
+    Used for providers like DeepSeek, Perplexity, Cerebras, Fireworks,
+    Together, Cohere, Sambanova — anything OpenAI-chat-compatible.
+    """
+
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
+        self._provider = provider
+        self._model = model
+        self._api_key = api_key
+        self._base_url = base_url
+
+    @property
+    def model_id(self) -> str:
+        return self._model
+
+    @property
+    def cost_per_1k_tokens(self) -> float:
+        from ..model_prices import MODEL_INFO
+        info = MODEL_INFO.get(self._model)
+        if not info:
+            return 0.001  # unknown — conservative default
+        input_cost, output_cost = info[0], info[1]
+        return (input_cost + output_cost) / 2 * 1000
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+    ) -> LLMResponse:
+        # Lazy import to avoid circular dependency (sdk imports from models/*).
+        from ..sdk import completion
+
+        start = time.time()
+        resp = completion(
+            model=f"{self._provider}/{self._model}",
+            messages=[{"role": "user", "content": prompt}],
+            api_key=self._api_key,
+            api_base=self._base_url,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            force_direct=True,  # create_client is the "direct provider" entry point
+        )
+        latency_ms = (time.time() - start) * 1000
+
+        usage = resp.get("usage") or {}
+        input_tokens = usage.get("prompt_tokens")
+        output_tokens = usage.get("completion_tokens")
+        text = ""
+        choices = resp.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            text = msg.get("content") or ""
+
+        return LLMResponse(
+            text=text,
+            tokens_used=usage.get("total_tokens", 0),
+            latency_ms=latency_ms,
+            model_id=self._model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+
+# Dedicated subclasses get first pick; anything else falls through to UnifiedClient.
+_DEDICATED_CLIENTS: dict[str, type] = {
+    "openai": OpenAIClient,
+    "anthropic": AnthropicClient,
+    "mistral": MistralClient,
+    "google": GoogleClient,
+    "groq": GroqClient,
+    "vllm": VLLMClient,
+    "mock": MockLLMClient,
+}
+
+# Aliases between the two naming conventions in the codebase
+# (models/llm_client.py uses "google"; sdk.PROVIDERS uses "gemini").
+_PROVIDER_ALIASES: dict[str, str] = {
+    "gemini": "google",
+    "google": "google",
+}
+
+
 def create_client(
     provider: str,
     model: str,
     **kwargs,
 ) -> LLMClient:
-    """
-    Factory function to create an LLM client.
+    """Factory for LLM clients covering every provider in ``sdk.PROVIDERS``.
+
+    Resolution order:
+      1. If ``provider`` (or its alias) has a dedicated client class
+         (OpenAI, Anthropic, Mistral, Google, Groq, vLLM, Mock), use it.
+      2. Otherwise, if ``provider`` is registered in ``sdk.PROVIDERS``
+         (DeepSeek, Perplexity, Cerebras, Sambanova, Together, Fireworks,
+         Cohere, Bedrock, …), return a ``UnifiedClient`` that dispatches
+         through ``sdk.completion``.
+      3. Otherwise, raise ``ValueError``.
+
+    Bedrock is registered but not directly usable via UnifiedClient
+    (AWS SigV4 auth, non-OpenAI-compatible) — it will still raise.
 
     Args:
-        provider: Provider name ("openai", "anthropic", "mistral", "google", "groq", "vllm", "mock").
+        provider: Provider name — see ``sdk.PROVIDERS`` for the full list.
         model: Model name.
-        **kwargs: Additional arguments for the client.
-
-    Returns:
-        Configured LLMClient instance.
-
-    Raises:
-        ValueError: If provider is not recognized.
+        **kwargs: Passed to the client constructor (e.g. ``api_key``,
+            ``base_url`` for vLLM / UnifiedClient).
 
     Example:
         >>> from lunar_router import create_client
-        >>>
-        >>> # OpenAI
-        >>> client = create_client("openai", "gpt-4o-mini")
-        >>>
-        >>> # Anthropic
-        >>> client = create_client("anthropic", "claude-3-5-haiku-20241022")
-        >>>
-        >>> # Google Gemini
-        >>> client = create_client("google", "gemini-1.5-flash")
-        >>>
-        >>> # Groq (ultra-fast)
-        >>> client = create_client("groq", "llama-3.1-8b-instant")
-        >>>
-        >>> # Mistral
-        >>> client = create_client("mistral", "mistral-small-latest")
-        >>>
-        >>> # Local vLLM
-        >>> client = create_client("vllm", "meta-llama/Llama-2-7b-chat-hf",
-        ...                        base_url="http://localhost:8000")
+        >>> create_client("openai", "gpt-4o-mini")        # dedicated
+        >>> create_client("groq", "llama-3.1-8b-instant") # dedicated
+        >>> create_client("deepseek", "deepseek-chat")    # via UnifiedClient
+        >>> create_client("together", "meta-llama/...")   # via UnifiedClient
     """
-    providers = {
-        "openai": OpenAIClient,
-        "anthropic": AnthropicClient,
-        "mistral": MistralClient,
-        "google": GoogleClient,
-        "groq": GroqClient,
-        "vllm": VLLMClient,
-        "mock": MockLLMClient,
-    }
+    # Lazy import: PROVIDERS lives in sdk.py which imports from this module.
+    from ..sdk import PROVIDERS
 
-    if provider not in providers:
-        raise ValueError(f"Unknown provider: {provider}. Options: {list(providers.keys())}")
+    canonical = _PROVIDER_ALIASES.get(provider, provider)
 
-    return providers[provider](model=model, **kwargs)
+    if canonical in _DEDICATED_CLIENTS:
+        return _DEDICATED_CLIENTS[canonical](model=model, **kwargs)
+
+    # Bedrock uses a non-OpenAI-compatible format; UnifiedClient can't speak it.
+    if canonical == "bedrock":
+        raise ValueError(
+            "Bedrock is not yet supported via create_client. "
+            "Use sdk.completion with force_engine=True, or call the Bedrock SDK directly."
+        )
+
+    if canonical in PROVIDERS:
+        return UnifiedClient(provider=canonical, model=model, **kwargs)
+
+    known = sorted(set(_DEDICATED_CLIENTS) | set(PROVIDERS) | set(_PROVIDER_ALIASES))
+    raise ValueError(f"Unknown provider: {provider}. Options: {known}")

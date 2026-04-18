@@ -97,6 +97,15 @@ class GoEngine:
         binary = self._binary_path or _find_binary()
         weights = self._weights_path or _find_weights()
 
+        # Make sure the ONNX embedder has what it needs: a shared library path
+        # (for onnxruntime_go to dlopen) and model.onnx + vocab.txt inside the
+        # weights directory. Both are shipped in the wheel alongside the binary.
+        _ensure_onnx_assets(weights)
+        env = os.environ.copy()
+        bundled_lib = _find_bundled_onnxruntime()
+        if bundled_lib and "ONNXRUNTIME_LIB_PATH" not in env:
+            env["ONNXRUNTIME_LIB_PATH"] = str(bundled_lib)
+
         args = [
             binary,
             "--host", self._host,
@@ -112,6 +121,7 @@ class GoEngine:
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=env,
         )
 
         # Wait for health check
@@ -490,11 +500,67 @@ def _find_binary() -> str:
         return path_binary
 
     raise FileNotFoundError(
-        "lunar-engine binary not found. Options:\n"
-        "  1. Build from source: cd go && make build\n"
-        "  2. Install: pip install lunar-router[engine]\n"
-        "  3. Add to PATH"
+        f"lunar-engine binary not bundled for this platform ({_platform_tag()}).\n"
+        f"Supported platforms get the binary automatically via `pip install lunar-router`.\n"
+        f"If you hit this, options:\n"
+        f"  1. File an issue — https://github.com/lunar-org-ai/lunar-router/issues\n"
+        f"  2. Build from source: cd go && make build  (requires Go toolchain)\n"
+        f"  3. Use the Python backend instead: load_router(engine='python')"
     )
+
+
+def _find_bundled_onnxruntime() -> Optional[Path]:
+    """Return the path to the bundled libonnxruntime shared library, if any.
+
+    The Go engine uses onnxruntime_go which dlopens onnxruntime at runtime.
+    Ship the library inside ``lunar_router/_bin/`` so users don't need to
+    install it system-wide.
+    """
+    bin_dir = Path(__file__).parent / "_bin"
+    # Preferred names per platform (Linux: .so, macOS: .dylib, Windows: .dll)
+    candidates = [
+        bin_dir / "libonnxruntime.so",
+        bin_dir / "libonnxruntime.so.1",
+        bin_dir / "libonnxruntime.dylib",
+        bin_dir / "onnxruntime.dll",
+    ]
+    # Also match any version-suffixed .so (e.g. libonnxruntime.so.1.19.2)
+    if bin_dir.exists():
+        for p in bin_dir.iterdir():
+            name = p.name
+            if name.startswith("libonnxruntime.so") or name.startswith("libonnxruntime.") or name == "onnxruntime.dll":
+                candidates.append(p)
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def _ensure_onnx_assets(weights_path: str) -> None:
+    """Ensure the weights directory has the ONNX model + vocab the engine needs.
+
+    The Go engine expects ``<weights>/onnx/model.onnx`` and
+    ``<weights>/onnx/vocab.txt``. When the wheel ships them under
+    ``lunar_router/_onnx/``, copy them on first start so the user never has to
+    manage ONNX assets manually.
+    """
+    target = Path(weights_path) / "onnx"
+    model_dst = target / "model.onnx"
+    vocab_dst = target / "vocab.txt"
+    if model_dst.exists() and vocab_dst.exists():
+        return
+
+    src = Path(__file__).parent / "_onnx"
+    model_src = src / "model.onnx"
+    vocab_src = src / "vocab.txt"
+    if not (model_src.exists() and vocab_src.exists()):
+        return  # nothing to wire up; engine will surface its own error
+
+    target.mkdir(parents=True, exist_ok=True)
+    if not model_dst.exists():
+        shutil.copy2(model_src, model_dst)
+    if not vocab_dst.exists():
+        shutil.copy2(vocab_src, vocab_dst)
 
 
 def _find_weights() -> str:
