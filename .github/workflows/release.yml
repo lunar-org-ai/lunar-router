@@ -114,47 +114,77 @@ jobs:
       - name: Download ONNX Runtime ${{ env.ORT_VERSION }}
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p lunar_router/_bin
           ORT=${{ env.ORT_VERSION }}
+          WORK="${RUNNER_TEMP:-/tmp}/ort_download"
+          rm -rf "$WORK"; mkdir -p "$WORK"
 
           case "${{ matrix.os }}" in
             linux-amd64)
               asset="onnxruntime-linux-x64-${ORT}.tgz"
               lib_src="libonnxruntime.so.${ORT}"
-              lib_dst="libonnxruntime.so.${ORT}"
-              ;;
+              lib_dst="libonnxruntime.so.${ORT}" ;;
             linux-arm64)
               asset="onnxruntime-linux-aarch64-${ORT}.tgz"
               lib_src="libonnxruntime.so.${ORT}"
-              lib_dst="libonnxruntime.so.${ORT}"
-              ;;
+              lib_dst="libonnxruntime.so.${ORT}" ;;
             macos-arm64)
               asset="onnxruntime-osx-arm64-${ORT}.tgz"
               lib_src="libonnxruntime.${ORT}.dylib"
-              lib_dst="libonnxruntime.dylib"
-              ;;
+              lib_dst="libonnxruntime.dylib" ;;
             macos-amd64)
               asset="onnxruntime-osx-x86_64-${ORT}.tgz"
               lib_src="libonnxruntime.${ORT}.dylib"
-              lib_dst="libonnxruntime.dylib"
-              ;;
+              lib_dst="libonnxruntime.dylib" ;;
             windows-amd64)
               asset="onnxruntime-win-x64-${ORT}.zip"
               lib_src="onnxruntime.dll"
-              lib_dst="onnxruntime.dll"
-              ;;
+              lib_dst="onnxruntime.dll" ;;
           esac
 
           url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT}/${asset}"
-          echo "downloading $url"
-          curl -sSL -o /tmp/ort.archive "$url"
+          echo "::group::Download"
+          echo "os:      ${{ matrix.os }}"
+          echo "asset:   $asset"
+          echo "lib_src: $lib_src"
+          echo "lib_dst: $lib_dst"
+          echo "url:     $url"
+          echo "work:    $WORK"
+          curl -sSL -f -o "$WORK/ort.archive" "$url"
+          echo "archive size: $(wc -c < "$WORK/ort.archive") bytes"
+          echo "::endgroup::"
+
+          echo "::group::Extract"
           case "$asset" in
-            *.tgz) tar -C /tmp -xzf /tmp/ort.archive ;;
-            *.zip) unzip -q /tmp/ort.archive -d /tmp ;;
+            *.tgz) tar -C "$WORK" -xzf "$WORK/ort.archive" ;;
+            *.zip) unzip -q "$WORK/ort.archive" -d "$WORK" ;;
           esac
-          extracted=$(find /tmp -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
-          cp "$extracted/lib/$lib_src" "lunar_router/_bin/$lib_dst"
-          echo "bundled: $(ls -l lunar_router/_bin/)"
+          extracted=$(find "$WORK" -maxdepth 1 -type d -name "onnxruntime-*" | head -1)
+          echo "extracted to: $extracted"
+          if [ -z "$extracted" ]; then
+            echo "FATAL: no onnxruntime-* directory found after extract"
+            ls -la "$WORK"
+            exit 1
+          fi
+          echo "lib/ contents:"
+          ls -l "$extracted/lib" || ls -l "$extracted"
+          echo "::endgroup::"
+
+          echo "::group::Bundle"
+          # Search broadly in case the archive layout drifts between platforms.
+          src_path=""
+          for candidate in "$extracted/lib/$lib_src" "$extracted/$lib_src"; do
+            if [ -e "$candidate" ]; then src_path="$candidate"; break; fi
+          done
+          if [ -z "$src_path" ]; then
+            echo "FATAL: $lib_src not found under $extracted"
+            find "$extracted" -name "libonnxruntime*" -o -name "onnxruntime.dll" 2>/dev/null | head
+            exit 1
+          fi
+          cp "$src_path" "lunar_router/_bin/$lib_dst"
+          ls -l lunar_router/_bin/
+          echo "::endgroup::"
 
       # --------------------------------------------------------------
       # Download MiniLM ONNX + vocab (one-time, same bytes for every platform)
