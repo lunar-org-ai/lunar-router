@@ -168,11 +168,9 @@ export function useDeployments(
 
   const deleteDeployment = useCallback(
     async (id: string) => {
-      if (!accessToken) return false;
-
       try {
         optimisticStatusUpdate(id, 'deleting');
-        await deleteDeploymentApi(accessToken, id);
+        await deleteDeploymentApi(accessToken ?? '', id);
 
         posthog.capture('deployment_deleted');
 
@@ -194,11 +192,9 @@ export function useDeployments(
 
   const pauseDeployment = useCallback(
     async (id: string) => {
-      if (!accessToken) return false;
-
       try {
         optimisticStatusUpdate(id, 'pausing');
-        await pauseDeploymentApi(accessToken, id);
+        await pauseDeploymentApi(accessToken ?? '', id);
         posthog.capture('deployment_paused');
         await listDeployments();
         return true;
@@ -212,11 +208,9 @@ export function useDeployments(
 
   const resumeDeployment = useCallback(
     async (id: string) => {
-      if (!accessToken) return false;
-
       try {
         optimisticStatusUpdate(id, 'resuming');
-        await resumeDeploymentApi(accessToken, id);
+        await resumeDeploymentApi(accessToken ?? '', id);
         posthog.capture('deployment_resumed');
         await listDeployments();
         return true;
@@ -230,8 +224,6 @@ export function useDeployments(
 
   // Polling for status updates every 5 seconds
   useEffect(() => {
-    if (!accessToken) return;
-
     const interval = setInterval(async () => {
       const fresh = await listDeployments();
 
