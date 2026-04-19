@@ -1,8 +1,17 @@
 """
 Datasets API Router
 
-Mounts on the main FastAPI app under /v1/datasets.
-All endpoints here match what the frontend (evaluationsService.ts) expects.
+⚠️ UNUSED — DO NOT ADD LOGIC HERE WITHOUT WIRING IT UP.
+
+This module is never imported anywhere in the app. The live `/v1/datasets/*`
+endpoints currently live inline in `opentracy/api/server.py` (search for
+`@app.get("/v1/datasets`). Two parallel implementations previously had
+different defaults (this one: include_samples=True / limit=1000; server.py:
+include_samples=False / limit=50), which caused the dataset detail page to
+render "No samples yet" for populated datasets because only the server.py
+route was actually registered. Do not add new routes here — edit
+`api/server.py` instead — until this module is explicitly mounted via
+`app.include_router(...)` and the duplicate routes in server.py are removed.
 """
 from __future__ import annotations
 

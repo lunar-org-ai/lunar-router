@@ -20,7 +20,10 @@ export function useDatasetDetailPage() {
   useEffect(() => {
     if (!datasetId) return;
     setPageLoading(true);
-    getDataset(datasetId)
+    // Metadata-only — the samples are loaded separately by useDatasetSamples
+    // so there's no reason to fetch them twice. Opt out explicitly now that
+    // the server defaults to hydrating samples.
+    getDataset(datasetId, { include_samples: false })
       .then((result) => {
         if (result) {
           setDataset({

@@ -1674,11 +1674,19 @@ async def create_dataset(body: dict, request: Request):
 async def get_dataset(
     dataset_id: str,
     request: Request,
-    include_samples: bool = False,
-    samples_limit: int = 50,
+    include_samples: bool = True,
+    samples_limit: int = 1000,
     samples_offset: int = 0,
 ):
-    """Get a single dataset by ID."""
+    """Get a single dataset by ID.
+
+    Defaults: ``include_samples=True`` and ``samples_limit=1000`` so that any
+    caller hitting this endpoint without options gets a usable response.
+    Pass ``include_samples=false`` explicitly when only metadata is needed
+    (e.g. list-page auxiliary lookups). Prior defaults (``False``/``50``)
+    silently returned empty ``samples`` arrays and caused the dataset detail
+    page to render "No samples yet" for populated datasets.
+    """
     from ..datasets import repository as ds_repo
     tenant = request.headers.get("x-tenant-id", "default")
 
