@@ -1,6 +1,8 @@
+import type { ReactNode } from 'react';
+
 type Props = {
   label: string;
-  value: string;
+  value: ReactNode;
 };
 
 export const InfoRow = ({ label, value }: Props) => (

@@ -86,6 +86,7 @@ export interface DeploymentData {
     | 'resuming';
   error_message?: string;
   error_code?: string;
+  endpoint_url?: string;
 }
 
 export interface GPUInstanceSpecs {

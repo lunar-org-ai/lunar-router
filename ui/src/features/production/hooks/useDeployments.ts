@@ -50,7 +50,8 @@ function mapResponseToDeploymentData(apiDep: DeploymentResponse): DeploymentData
     deployment_id: apiDep.deployment_id,
     name: `Deployment ${apiDep.deployment_id.slice(0, 8)}`,
     selectedModel: apiDep.model_id ?? 'unknown',
-    selectedInstance: apiDep.instance_type ?? 'unknown',
+    selectedInstance: apiDep.instance_type ?? 'local',
+    endpoint_url: apiDep.endpoint_url ?? '',
     createdAt: apiDep.updated_at ?? new Date().toISOString(),
     status: apiDep.status as DeploymentData['status'],
     error_message: userMessage,
@@ -103,16 +104,15 @@ export function useDeployments(
   }, []);
 
   const listDeployments = useCallback(async () => {
-    if (!accessToken) return [];
-
     try {
-      const apiData = await listDeploymentsApi(accessToken, [...ACTIVE_STATUSES]);
+      const apiData = await listDeploymentsApi(accessToken ?? '', [...ACTIVE_STATUSES]);
       const mapped = apiData.map(mapResponseToDeploymentData);
 
       setState((prev) => ({
         ...prev,
         deployments: mapped,
         loading: false,
+        error: null,
       }));
       return mapped;
     } catch (err) {

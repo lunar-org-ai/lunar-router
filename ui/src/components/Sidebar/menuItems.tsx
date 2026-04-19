@@ -1,4 +1,4 @@
-import { Activity, Brain, Database, Layers, Route, BookOpen, Sparkles } from 'lucide-react';
+import { Activity, Brain, Database, Layers, Route, BookOpen, Rocket, Sparkles } from 'lucide-react';
 import type { TabKey } from '../../types/tabs';
 
 export interface MenuItem {
@@ -58,6 +58,13 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/distill-metrics',
         icon: <Activity size={20} />,
         description: 'Evaluation metrics & experiments',
+      },
+      {
+        label: 'Deployments',
+        value: 'production',
+        path: '/production',
+        icon: <Rocket size={20} />,
+        description: 'Deploy distilled models with llama.cpp',
       },
     ],
   },

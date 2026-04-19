@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react';
-import { CheckCircle2, Cpu, Download, HeartPulse, Server } from 'lucide-react';
+import { CheckCircle2, Cpu, FileBox, HeartPulse, Server } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 
 const DEPLOYMENT_STEPS = [
-  { label: 'Provisioning GPU instance', icon: Server },
-  { label: 'Pulling model weights', icon: Download },
-  { label: 'Starting inference engine', icon: Cpu },
-  { label: 'Running health checks', icon: HeartPulse },
+  { label: 'Locating GGUF artifact', icon: FileBox },
+  { label: 'Launching llama-server', icon: Server },
+  { label: 'Loading model into memory', icon: Cpu },
+  { label: 'Waiting for health check', icon: HeartPulse },
 ] as const;
 
 const TICK_INTERVAL = 100;
@@ -17,9 +17,10 @@ const TICK_INTERVAL = 100;
 interface SuccessScreenProps {
   onClose: () => void;
   autoCloseMs: number;
+  alreadyDeployed?: boolean;
 }
 
-export function SuccessScreen({ onClose, autoCloseMs }: SuccessScreenProps) {
+export function SuccessScreen({ onClose, autoCloseMs, alreadyDeployed }: SuccessScreenProps) {
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -40,9 +41,13 @@ export function SuccessScreen({ onClose, autoCloseMs }: SuccessScreenProps) {
             </div>
           </div>
 
-          <h3 className="text-base font-semibold mb-0.5">Deployment Created</h3>
+          <h3 className="text-base font-semibold mb-0.5">
+            {alreadyDeployed ? 'Already Deployed' : 'Deployment Created'}
+          </h3>
           <p className="text-sm text-muted-foreground max-w-sm">
-            Your endpoint is provisioning and will be ready shortly.
+            {alreadyDeployed
+              ? 'This model is already running. Switching you to Active Models.'
+              : 'llama-server is starting up. The model will be ready shortly.'}
           </p>
         </div>
 

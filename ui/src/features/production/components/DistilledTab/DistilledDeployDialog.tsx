@@ -12,33 +12,32 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 
-type InstanceType = 'cpu-small' | 'cpu-large';
+type RuntimeMode = 'cpu-small' | 'cpu-large';
 
 interface DistilledDeployDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   jobName: string;
-  onDeploy: (instanceType: InstanceType) => void;
+  onDeploy: (instanceType: RuntimeMode) => void;
   isDeploying: boolean;
 }
 
-const TIERS: { id: InstanceType; label: string; icon: typeof Cpu; specs: string; desc: string }[] =
-  [
-    {
-      id: 'cpu-small',
-      label: 'Standard',
-      icon: Cpu,
-      specs: '8 vCPU · 16 GiB · 4K context',
-      desc: 'Good for most distilled models under 4B parameters',
-    },
-    {
-      id: 'cpu-large',
-      label: 'Large',
-      icon: Zap,
-      specs: '16 vCPU · 32 GiB · 8K context',
-      desc: 'Higher throughput and longer context for larger models',
-    },
-  ];
+const TIERS: { id: RuntimeMode; label: string; icon: typeof Cpu; specs: string; desc: string }[] = [
+  {
+    id: 'cpu-small',
+    label: 'GPU offload (recommended)',
+    icon: Zap,
+    specs: 'llama.cpp · all layers on GPU when available',
+    desc: 'Uses the local GPU for inference; falls back to CPU if no GPU is detected.',
+  },
+  {
+    id: 'cpu-large',
+    label: 'CPU only',
+    icon: Cpu,
+    specs: 'llama.cpp · CPU threads only',
+    desc: 'No GPU acceleration. Slower but works on any machine.',
+  },
+];
 
 export function DistilledDeployDialog({
   open,
@@ -47,14 +46,16 @@ export function DistilledDeployDialog({
   onDeploy,
   isDeploying,
 }: DistilledDeployDialogProps) {
-  const [selectedType, setSelectedType] = useState<InstanceType>('cpu-small');
+  const [selectedType, setSelectedType] = useState<RuntimeMode>('cpu-small');
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Deploy "{jobName}"</DialogTitle>
-          <DialogDescription>Choose the CPU instance size for this model.</DialogDescription>
+          <DialogTitle>Deploy "{jobName}" locally</DialogTitle>
+          <DialogDescription>
+            llama-server will load the smallest GGUF artifact (q4_k_m preferred) on this machine.
+          </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3 py-2">

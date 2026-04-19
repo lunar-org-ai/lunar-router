@@ -1,54 +1,39 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Beaker, Library, Plus, Server } from 'lucide-react';
-import { toast } from 'sonner';
+import { Beaker, Server } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { PageHeader } from '@/components/shared/PageHeader';
 import { PageTabs, type PageTab } from '@/components/shared/PageTabs';
-import type { DeploymentData, DeploymentModel } from '@/types/deploymentTypes';
 import type { DistillationJob } from '@/types/distillationTypes';
 import { useDistillation } from '@/hooks/useDistillation';
 
 import { useProductionModels } from './hooks/useProductionModels';
 import { useDeploymentActions } from './hooks/useDeploymentActions';
 
-import { DeploymentModal } from './components/DeploymentModal';
 import { StatsBar } from './components/StatsBar';
 import { DeploymentTab } from './components/ModelsTab';
-import { LibraryTab } from './components/LibraryTab';
 import { DistilledTab } from './components/DistilledTab';
 import { DistilledDeployDialog } from './components/DistilledTab/DistilledDeployDialog';
 import {
   DeployProgressDialog,
   type DeployProgressState,
 } from './components/ModelsTab/DeploymentProgress/DeployProgressDialog';
-import { ModelSpecsModal } from './components/LibraryTab/ModelSpecsModal';
-import { AddHuggingFaceModelModal } from './components/LibraryTab/AddHuggingFaceModelModal';
 
-type TabId = 'deployments' | 'library' | 'distilled';
+type TabId = 'deployments' | 'distilled';
 
 const TABS: PageTab<TabId>[] = [
   { id: 'deployments', label: 'Active Models', icon: <Server /> },
-  { id: 'library', label: 'Model Library', icon: <Library /> },
   { id: 'distilled', label: 'Distilled Models', icon: <Beaker /> },
 ];
 
 export default function Production() {
-  const [activeTab, setActiveTab] = useState<TabId>('deployments');
+  const [activeTab, setActiveTab] = useState<TabId>('distilled');
   const [searchTerm, setSearchTerm] = useState('');
-
-  const [isDeployModalOpen, setIsDeployModalOpen] = useState(false);
-  const [preSelectedModelId, setPreSelectedModelId] = useState<string | undefined>(undefined);
-
-  const [isSpecsModalOpen, setIsSpecsModalOpen] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<DeploymentModel | null>(null);
-
-  const [isHfModalOpen, setIsHfModalOpen] = useState(false);
 
   // Deploy progress dialog state
   const [progressState, setProgressState] = useState<DeployProgressState>(null);
   const [isProgressOpen, setIsProgressOpen] = useState(false);
+  const [progressAlreadyDeployed, setProgressAlreadyDeployed] = useState(false);
 
   const navigate = useNavigate();
 
@@ -109,7 +94,6 @@ export default function Production() {
     );
   }, [activeTab, completedJobs, enrichedJobs, distillation]);
 
-  // Merge enriched data into completed jobs
   const resolvedCompletedJobs = useMemo(
     () => completedJobs.map((j) => enrichedJobs.get(j.id) ?? j),
     [completedJobs, enrichedJobs]
@@ -124,60 +108,13 @@ export default function Production() {
   const isSearchDisabled =
     activeTab === 'deployments'
       ? actions.deployments.length === 0
-      : activeTab === 'library'
-        ? models.allModels.length === 0
-        : completedJobs.length === 0;
-
-  const openDeployModal = (modelId?: string) => {
-    setPreSelectedModelId(modelId);
-    setIsDeployModalOpen(true);
-  };
-
-  const closeDeployModal = () => {
-    setIsDeployModalOpen(false);
-    setPreSelectedModelId(undefined);
-  };
-
-  const handleViewSpecs = (model: DeploymentModel) => {
-    setSelectedModel(model);
-    setIsSpecsModalOpen(true);
-  };
-
-  const handleSpecsDeploy = (modelId: string) => {
-    setIsSpecsModalOpen(false);
-    setSelectedModel(null);
-    openDeployModal(modelId);
-  };
-
-  const handleHfRetry = (model: Parameters<typeof models.handleRetryModel>[0]) => {
-    models.handleRetryModel(model);
-    setIsHfModalOpen(true);
-  };
+      : completedJobs.length === 0;
 
   const closeProgressDialog = useCallback(() => {
     setIsProgressOpen(false);
     setProgressState(null);
+    setProgressAlreadyDeployed(false);
   }, []);
-
-  const handleDeploy = useCallback(
-    (data: Omit<DeploymentData, 'id' | 'status' | 'createdAt'>) => {
-      // Immediately show progress dialog in "creating" state
-      setProgressState('creating');
-      setIsProgressOpen(true);
-
-      actions.handleCreate(data).then((ok) => {
-        if (ok) {
-          setProgressState('success');
-          setActiveTab('deployments');
-          // Auto-close is handled by DeployProgressDialog's internal timer
-        } else {
-          // handleCreate already shows error toast
-          setProgressState('error');
-        }
-      });
-    },
-    [actions, setActiveTab]
-  );
 
   const handleOpenDeployDialog = useCallback((jobId: string) => {
     setDeployModalJobId(jobId);
@@ -191,18 +128,14 @@ export default function Production() {
 
       setDeployingJobIds((prev) => new Set(prev).add(jobId));
       setProgressState('creating');
+      setProgressAlreadyDeployed(false);
       setIsProgressOpen(true);
 
       try {
         const result = await distillation.deployJob(jobId, instanceType);
         if (result) {
-          if (result.already_deployed) {
-            toast.info('Model is already deployed');
-            setIsProgressOpen(false);
-            setProgressState(null);
-          } else {
-            setProgressState('success');
-          }
+          setProgressAlreadyDeployed(!!result.already_deployed);
+          setProgressState('success');
           setActiveTab('deployments');
           listDeployments();
         } else {
@@ -231,13 +164,8 @@ export default function Production() {
   return (
     <div>
       <PageHeader
-        title="Production"
-        action={
-          <Button onClick={() => openDeployModal()}>
-            <Plus className="w-4 h-4" />
-            New Deployment
-          </Button>
-        }
+        title="Deployments"
+        description="Run distilled models locally with llama.cpp"
       />
 
       <PageTabs tabs={TABS} value={activeTab} onValueChange={setActiveTab} />
@@ -265,30 +193,10 @@ export default function Production() {
             pausingDeploymentIds={actions.pausingDeployments}
             resumingDeploymentIds={actions.resumingDeployments}
             searchTerm={searchTerm}
-            onBrowseLibrary={() => setActiveTab('library')}
+            onBrowseLibrary={() => setActiveTab('distilled')}
             onPause={(d) => actions.handlePause(d.id)}
             onResume={(d) => actions.handleResume(d.id)}
             onDelete={(d) => actions.handleDelete(d.id)}
-          />
-        )}
-
-        {activeTab === 'library' && (
-          <LibraryTab
-            allModels={models.allModels}
-            availableModels={models.availableModels}
-            downloadingModels={models.inProgressModels}
-            readyModels={models.readyModels}
-            failedModels={models.failedModels}
-            modelStatuses={models.modelStatuses}
-            isLoadingModels={models.loadingModels}
-            deletingModelIds={models.deletingModels}
-            searchTerm={searchTerm}
-            onAddModel={() => setIsHfModalOpen(true)}
-            onViewSpecs={handleViewSpecs}
-            onDeploy={openDeployModal}
-            onDelete={models.handleDeleteModel}
-            onRetry={handleHfRetry}
-            onClearSearch={() => setSearchTerm('')}
           />
         )}
 
@@ -306,28 +214,11 @@ export default function Production() {
         )}
       </div>
 
-      <DeploymentModal
-        isOpen={isDeployModalOpen}
-        deploymentModels={models.deployableModels}
-        preSelectedModelId={preSelectedModelId}
-        onClose={closeDeployModal}
-        onDeploy={handleDeploy}
-      />
-
       <DeployProgressDialog
         isOpen={isProgressOpen}
         state={progressState}
+        alreadyDeployed={progressAlreadyDeployed}
         onClose={closeProgressDialog}
-      />
-
-      <ModelSpecsModal
-        isOpen={isSpecsModalOpen}
-        model={selectedModel}
-        onClose={() => {
-          setIsSpecsModalOpen(false);
-          setSelectedModel(null);
-        }}
-        onDeploy={handleSpecsDeploy}
       />
 
       <DistilledDeployDialog
@@ -338,16 +229,6 @@ export default function Production() {
         jobName={resolvedCompletedJobs.find((j) => j.id === deployModalJobId)?.name ?? ''}
         onDeploy={handleConfirmDeploy}
         isDeploying={deployModalJobId !== null && deployingJobIds.has(deployModalJobId)}
-      />
-
-      <AddHuggingFaceModelModal
-        isOpen={isHfModalOpen}
-        initialModelId={models.preFillHfModelId}
-        onClose={() => {
-          setIsHfModalOpen(false);
-          models.setPreFillHfModelId(undefined);
-        }}
-        onModelRegistered={models.handleModelRegistered}
       />
     </div>
   );

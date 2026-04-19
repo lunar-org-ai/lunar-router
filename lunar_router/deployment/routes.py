@@ -128,29 +128,35 @@ async def get_deployment_metrics(
     minutes: int = Query(60),
     period: int = Query(60),
 ):
-    """Get deployment metrics.
+    """Get deployment metrics aggregated from ClickHouse inference_metrics."""
+    from . import inference_metrics as metrics_store
 
-    Currently returns the skeleton the UI expects; a future version can
-    query vLLM's Prometheus ``/metrics`` endpoint for real data.
-    """
     dep = storage.get_deployment(deployment_id)
     if dep is None:
         raise HTTPException(404, f"Deployment {deployment_id} not found")
+
+    stats = metrics_store.get_aggregate_stats(deployment_id, minutes=minutes)
+    series = metrics_store.get_time_series(deployment_id, minutes=minutes, period_seconds=period)
+    latest = metrics_store.get_latest(deployment_id)
 
     now = datetime.now(timezone.utc).isoformat()
 
     return DeploymentMetricsResponse(
         deployment_id=deployment_id,
-        latest=DeploymentMetricsLatest(timestamp=now),
-        inference_stats=DeploymentInferenceStats(),
-        time_series={
-            "cpu_utilization": [],
-            "memory_utilization": [],
-            "gpu_utilization": [],
-            "gpu_memory_utilization": [],
-            "model_latency": [],
-            "invocations": [],
-        },
+        latest=DeploymentMetricsLatest(
+            timestamp=latest.get("timestamp") or now,
+            model_latency_ms=float(latest.get("model_latency_ms", 0)),
+            invocations=stats.get("total_inferences", 0),
+        ),
+        inference_stats=DeploymentInferenceStats(
+            total_inferences=stats.get("total_inferences", 0),
+            successful=stats.get("successful", 0),
+            failed=stats.get("failed", 0),
+            success_rate=stats.get("success_rate", 100.0),
+            avg_latency_ms=stats.get("avg_latency_ms", 0),
+            total_tokens=stats.get("total_tokens", 0),
+        ),
+        time_series=series,
     )
 
 

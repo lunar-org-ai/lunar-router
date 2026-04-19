@@ -7,6 +7,7 @@ import { FullScreenSpinner } from '@/components/shared/FullScreenSpinner';
 const Intelligence = lazy(() => import('@/features/intelligence'));
 const Traces = lazy(() => import('@/views/Traces'));
 const DataSources = lazy(() => import('@/views/DataSources'));
+const Production = lazy(() => import('@/features/production/Production'));
 const DistillDatasets = lazy(() => import('@/features/distill-dataset'));
 const DatasetDetail = lazy(
   () => import('@/features/distill-dataset/components/DatasetDetail/DatasetDetailPage')
@@ -37,6 +38,8 @@ export function AppRoutes() {
           <Route path="distill-job/:jobId" element={<DistillationJobView />} />
           <Route path="distill-job/:jobId/results" element={<DistillationResults />} />
           <Route path="distill-metrics" element={<Evaluations />} />
+          <Route path="production" element={<Production />} />
+          <Route path="deployments" element={<Navigate to="/production" replace />} />
         </Route>
 
         <Route path="*" element={<Navigate to="traces" replace />} />

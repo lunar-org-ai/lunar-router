@@ -24,7 +24,7 @@ def _ensure_tables() -> None:
             id              String,
             model_id        String,
             model_path      String,
-            engine          LowCardinality(String) DEFAULT 'vllm',
+            engine          LowCardinality(String) DEFAULT 'llama_cpp',
             status          LowCardinality(String),
             endpoint_name   String DEFAULT '',
             endpoint_url    String DEFAULT '',
@@ -99,7 +99,7 @@ def insert_deployment(
     client.insert(
         "local_deployments",
         [[
-            deployment_id, model_id, model_path, "vllm",
+            deployment_id, model_id, model_path, "llama_cpp",
             "creating",  # initial status
             model_id,    # endpoint_name
             "",          # endpoint_url (set once healthy)
