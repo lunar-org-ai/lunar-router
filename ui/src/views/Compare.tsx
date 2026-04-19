@@ -82,16 +82,16 @@ function getModelIconsFromAvailable(model: AvailableModel): {
   providerIcon: string;
   bedrockIcon?: string;
   isBedrock: boolean;
-  isLunar: boolean;
+  isOpentracy: boolean;
 } {
-  const isLunar = isOpentracyModel(model);
+  const isOpentracy = isOpentracyModel(model);
   const isBedrock = isBedrockModelFromAvailable(model);
 
-  if (isLunar) {
+  if (isOpentracy) {
     return {
       providerIcon: MODEL_ICONS.opentracyIcon,
       isBedrock: false,
-      isLunar: true,
+      isOpentracy: true,
     };
   }
 
@@ -100,14 +100,14 @@ function getModelIconsFromAvailable(model: AvailableModel): {
     return {
       providerIcon: MODEL_ICONS.bedrockIcon,
       isBedrock: true,
-      isLunar: false,
+      isOpentracy: false,
     };
   }
 
   return {
     providerIcon: getProviderIconByBackend(model.provider, model.id),
     isBedrock: false,
-    isLunar: false,
+    isOpentracy: false,
   };
 }
 

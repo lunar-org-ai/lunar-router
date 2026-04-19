@@ -131,7 +131,7 @@ interface ModelStats {
   totalCost: number;
   totalLatency: number;
   latencies: number[];
-  isLunar: boolean;
+  isOpentracy: boolean;
 }
 
 function aggregateByModel(traces: TraceItem[]): Map<string, ModelStats> {
@@ -154,7 +154,7 @@ function aggregateByModel(traces: TraceItem[]): Map<string, ModelStats> {
         totalCost: trace.cost_usd,
         totalLatency: trace.latency_s,
         latencies: [trace.latency_s],
-        isLunar: isOpentracyProvider(trace.backend),
+        isOpentracy: isOpentracyProvider(trace.backend),
       });
     }
   }
@@ -168,7 +168,7 @@ interface ProviderStats {
   totalCost: number;
   totalLatency: number;
   latencies: number[];
-  isLunar: boolean;
+  isOpentracy: boolean;
 }
 
 function aggregateByProvider(traces: TraceItem[]): Map<string, ProviderStats> {
@@ -190,7 +190,7 @@ function aggregateByProvider(traces: TraceItem[]): Map<string, ProviderStats> {
         totalCost: trace.cost_usd,
         totalLatency: trace.latency_s,
         latencies: [trace.latency_s],
-        isLunar: isOpentracyProvider(provider),
+        isOpentracy: isOpentracyProvider(provider),
       });
     }
   }
@@ -202,14 +202,14 @@ function transformToModelUsage(modelStats: Map<string, ModelStats>): UsageByMode
   return Array.from(modelStats.values())
     .map((stats) => {
       const displayName = formatModelName(stats.modelId, stats.backend);
-      const icon = stats.isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
+      const icon = stats.isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
 
       return {
         model: displayName,
         name: displayName,
         requests: stats.requests,
         icon,
-        isLunar: stats.isLunar,
+        isOpentracy: stats.isOpentracy,
         cost: stats.totalCost,
         latency: calculateP95(stats.latencies) * 1000,
       };
@@ -219,7 +219,7 @@ function transformToModelUsage(modelStats: Map<string, ModelStats>): UsageByMode
 
 function transformToProviderCost(providerStats: Map<string, ProviderStats>): CostByProvider[] {
   return Array.from(providerStats.values())
-    .filter((stats) => !stats.isLunar)
+    .filter((stats) => !stats.isOpentracy)
     .map((stats) => {
       const displayName = formatProviderName(stats.provider);
       const icon = getProviderIconByBackend(stats.provider);
@@ -228,7 +228,7 @@ function transformToProviderCost(providerStats: Map<string, ProviderStats>): Cos
         provider: displayName,
         cost: stats.totalCost,
         icon,
-        isLunar: stats.isLunar,
+        isOpentracy: stats.isOpentracy,
       };
     })
     .sort((a, b) => b.cost - a.cost);
@@ -242,14 +242,14 @@ function transformToCostByTask(traces: TraceItem[]): CostByTask[] {
     .filter((stats) => stats.requests > 0 && stats.totalCost > 0)
     .map((stats) => {
       const displayName = formatModelName(stats.modelId, stats.backend);
-      const icon = stats.isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
+      const icon = stats.isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
 
       return {
         task: displayName,
         name: displayName,
         cost: stats.totalCost,
         icon,
-        isLunar: stats.isLunar,
+        isOpentracy: stats.isOpentracy,
       };
     })
     .sort((a, b) => b.cost - a.cost);
@@ -259,7 +259,7 @@ function transformToLatencyData(modelStats: Map<string, ModelStats>): LatencyDat
   return Array.from(modelStats.values())
     .map((stats) => {
       const displayName = formatModelName(stats.modelId, stats.backend);
-      const icon = stats.isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
+      const icon = stats.isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(stats.backend);
       const p95Latency = calculateP95(stats.latencies);
 
       return {
@@ -267,7 +267,7 @@ function transformToLatencyData(modelStats: Map<string, ModelStats>): LatencyDat
         name: displayName,
         value: p95Latency * 1000,
         icon,
-        isLunar: stats.isLunar,
+        isOpentracy: stats.isOpentracy,
       };
     })
     .sort((a, b) => b.value - a.value)
@@ -295,7 +295,7 @@ function transformToExpensiveRequests(traces: TraceItem[]): ExpensiveRequest[] {
           hour: '2-digit',
           minute: '2-digit',
         }),
-        isLunar: false,
+        isOpentracy: false,
       };
     });
 }
@@ -564,8 +564,8 @@ export function MetricsProvider({ children }: { children: ReactNode }) {
 
     const models = transformToModelUsage(modelStats);
     const providers = transformToProviderCost(providerStats);
-    const lunarModels = models.filter((m) => m.isLunar);
-    const externalModels = models.filter((m) => !m.isLunar);
+    const opentracyModels = models.filter((m) => m.isOpentracy);
+    const externalModels = models.filter((m) => !m.isOpentracy);
 
     return {
       kpis: [
@@ -602,10 +602,10 @@ export function MetricsProvider({ children }: { children: ReactNode }) {
       models,
       alerts: [],
       opentracy: {
-        totalCost: lunarModels.reduce((sum, m) => sum + (m.cost || 0), 0),
-        totalRequests: lunarModels.reduce((sum, m) => sum + m.requests, 0),
+        totalCost: opentracyModels.reduce((sum, m) => sum + (m.cost || 0), 0),
+        totalRequests: opentracyModels.reduce((sum, m) => sum + m.requests, 0),
         providers: [],
-        models: lunarModels,
+        models: opentracyModels,
       },
       external: {
         totalCost: externalModels.reduce((sum, m) => sum + (m.cost || 0), 0),
@@ -621,8 +621,8 @@ export function MetricsProvider({ children }: { children: ReactNode }) {
 
     const costByTask = transformToCostByTask(filteredTraces);
     const expensiveRequests = transformToExpensiveRequests(filteredTraces);
-    const opentracyCosts = costByTask.filter((c) => c.isLunar);
-    const externalCosts = costByTask.filter((c) => !c.isLunar);
+    const opentracyCosts = costByTask.filter((c) => c.isOpentracy);
+    const externalCosts = costByTask.filter((c) => !c.isOpentracy);
 
     return {
       timeSeries: buildTimeSeries(filteredTraces, state.selectedDays),

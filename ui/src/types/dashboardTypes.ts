@@ -13,7 +13,7 @@ export interface CostByProvider {
   icon?: string;
   name?: string;
   value?: number;
-  isLunar?: boolean;
+  isOpentracy?: boolean;
 }
 
 export interface UsageByModel {
@@ -21,7 +21,7 @@ export interface UsageByModel {
   name?: string;
   requests: number;
   icon?: string;
-  isLunar?: boolean;
+  isOpentracy?: boolean;
   cost?: number;
   latency?: number;
 }
@@ -44,7 +44,7 @@ export interface CostByTask {
   name?: string;
   cost: number;
   icon?: string;
-  isLunar?: boolean;
+  isOpentracy?: boolean;
 }
 
 export interface ExpensiveRequest {
@@ -54,7 +54,7 @@ export interface ExpensiveRequest {
   icon?: string;
   promptSize: number;
   date: string;
-  isLunar?: boolean;
+  isOpentracy?: boolean;
 }
 
 export interface LatencyData {
@@ -62,7 +62,7 @@ export interface LatencyData {
   name?: string;
   value: number;
   icon?: string;
-  isLunar?: boolean;
+  isOpentracy?: boolean;
 }
 
 export interface LatencyHistogram {

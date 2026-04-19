@@ -90,7 +90,7 @@ function OverviewContent({ data }: { data: IntelligenceData }) {
   const barData = useMemo(() => {
     if (!overviewData?.models) return [];
     return [...overviewData.models]
-      .filter((m) => !m.isLunar)
+      .filter((m) => !m.isOpentracy)
       .sort((a, b) => b.requests - a.requests)
       .slice(0, 8)
       .map((m, i) => ({
@@ -104,7 +104,7 @@ function OverviewContent({ data }: { data: IntelligenceData }) {
     if (!overviewData?.models) return { requests: { label: 'Requests' } };
     const cfg: ChartConfig = { requests: { label: 'Requests' } };
     [...overviewData.models]
-      .filter((m) => !m.isLunar)
+      .filter((m) => !m.isOpentracy)
       .sort((a, b) => b.requests - a.requests)
       .slice(0, 8)
       .forEach((m, i) => {

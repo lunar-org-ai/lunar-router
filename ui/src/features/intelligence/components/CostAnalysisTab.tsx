@@ -86,7 +86,7 @@ function CostAnalysisContent({ data }: { data: IntelligenceData }) {
 
   const cb = efficiency?.cost_breakdown;
 
-  const externalProviders = overviewData?.providers?.filter((p) => !p.isLunar) ?? [];
+  const externalProviders = overviewData?.providers?.filter((p) => !p.isOpentracy) ?? [];
 
   const pieData = useMemo(
     () =>
@@ -146,7 +146,7 @@ function CostAnalysisContent({ data }: { data: IntelligenceData }) {
     []
   );
 
-  const externalRequests = costData?.expensiveRequests?.filter((r) => !r.isLunar) ?? [];
+  const externalRequests = costData?.expensiveRequests?.filter((r) => !r.isOpentracy) ?? [];
 
   const handleExportExpensive = () => {
     const headers = ['Cost', 'Model', 'Tokens', 'Date'];

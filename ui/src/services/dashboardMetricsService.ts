@@ -224,17 +224,17 @@ export function useDashboardMetricsService() {
   const formatProviders = useCallback(
     (metrics: DashboardMetricsResponse) => {
       const providerMap = buildProviderMap(metrics);
-      const providerCosts: Record<string, { cost: number; requests: number; isLunar: boolean }> =
+      const providerCosts: Record<string, { cost: number; requests: number; isOpentracy: boolean }> =
         {};
 
       // Use top_cost_models which has real cost_usd
       for (const model of metrics.leaders.top_cost_models) {
         const provider = providerMap.get(model.model_id) || 'unknown';
-        const isLunar = isOpentracyProvider(provider);
-        const displayProvider = isLunar ? 'OpenTracy' : formatProviderName(provider);
+        const isOpentracy = isOpentracyProvider(provider);
+        const displayProvider = isOpentracy ? 'OpenTracy' : formatProviderName(provider);
 
         if (!providerCosts[displayProvider]) {
-          providerCosts[displayProvider] = { cost: 0, requests: 0, isLunar };
+          providerCosts[displayProvider] = { cost: 0, requests: 0, isOpentracy };
         }
         providerCosts[displayProvider].cost += model.cost_usd;
         providerCosts[displayProvider].requests += model.count;
@@ -244,10 +244,10 @@ export function useDashboardMetricsService() {
         .map(([provider, data]) => ({
           provider,
           cost: data.cost,
-          icon: data.isLunar
+          icon: data.isOpentracy
             ? MODEL_ICONS.opentracyIcon
             : getProviderIconByBackend(provider.toLowerCase()),
-          isLunar: data.isLunar,
+          isOpentracy: data.isOpentracy,
         }))
         .sort((a, b) => b.cost - a.cost);
     },
@@ -290,37 +290,37 @@ export function useDashboardMetricsService() {
       // Format models with real data
       const models = series.by_model.map((model) => {
         const provider = providerMap.get(model.model_id) || '';
-        const isLunar = isOpentracyProvider(provider);
+        const isOpentracy = isOpentracyProvider(provider);
         const displayName = formatModelNameForDisplay(model.model_id, provider);
-        const icon = isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
+        const icon = isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
 
         return {
           model: displayName,
           name: displayName,
           requests: model.request_count,
           icon,
-          isLunar,
+          isOpentracy,
           cost: costLookup.get(model.model_id) || 0,
           latency: model.p95_latency_s * 1000,
         };
       });
 
       // Separate OpenTracy and external models
-      const lunarModels = models.filter((m) => m.isLunar);
-      const externalModels = models.filter((m) => !m.isLunar);
+      const opentracyModels = models.filter((m) => m.isOpentracy);
+      const externalModels = models.filter((m) => !m.isOpentracy);
 
       // Calculate summaries
-      const lunarSummary = {
-        totalCost: lunarModels.reduce((sum, m) => sum + m.cost, 0),
-        totalRequests: lunarModels.reduce((sum, m) => sum + m.requests, 0),
+      const opentracySummary = {
+        totalCost: opentracyModels.reduce((sum, m) => sum + m.cost, 0),
+        totalRequests: opentracyModels.reduce((sum, m) => sum + m.requests, 0),
         providers: [] as any[],
-        models: lunarModels,
+        models: opentracyModels,
       };
 
       const externalSummary = {
         totalCost: externalModels.reduce((sum, m) => sum + m.cost, 0),
         totalRequests: externalModels.reduce((sum, m) => sum + m.requests, 0),
-        providers: formatProviders(metrics).filter((p) => !p.isLunar),
+        providers: formatProviders(metrics).filter((p) => !p.isOpentracy),
         models: externalModels,
       };
 
@@ -358,7 +358,7 @@ export function useDashboardMetricsService() {
         providers: formatProviders(metrics),
         models,
         alerts: generateInsights(metrics),
-        opentracy: lunarSummary,
+        opentracy: opentracySummary,
         external: externalSummary,
       };
     },
@@ -392,30 +392,30 @@ export function useDashboardMetricsService() {
       // Cost by model using real cost_usd
       const costByTask = leaders.top_cost_models.map((model) => {
         const provider = providerMap.get(model.model_id) || '';
-        const isLunar = isOpentracyProvider(provider);
+        const isOpentracy = isOpentracyProvider(provider);
         const displayName = formatModelNameForDisplay(model.model_id, provider);
-        const icon = isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
+        const icon = isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
 
         return {
           task: displayName,
           name: displayName,
           cost: model.cost_usd,
           icon,
-          isLunar,
+          isOpentracy,
         };
       });
 
       // Separate OpenTracy and external costs
-      const opentracyCosts = costByTask.filter((c) => c.isLunar);
-      const externalCosts = costByTask.filter((c) => !c.isLunar);
+      const opentracyCosts = costByTask.filter((c) => c.isOpentracy);
+      const externalCosts = costByTask.filter((c) => !c.isOpentracy);
 
       // Expensive requests from raw_sample
       const expensiveRequests = (raw_sample || [])
         .filter((sample) => sample.cost_usd > 0)
         .map((sample, index) => {
-          const isLunar = isOpentracyProvider(sample.provider);
+          const isOpentracy = isOpentracyProvider(sample.provider);
           const displayName = formatModelNameForDisplay(sample.model, sample.provider);
-          const icon = isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(sample.provider);
+          const icon = isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(sample.provider);
 
           return {
             id: `req_${index}`,
@@ -429,7 +429,7 @@ export function useDashboardMetricsService() {
               hour: '2-digit',
               minute: '2-digit',
             }),
-            isLunar,
+            isOpentracy,
           };
         })
         .sort((a, b) => b.cost - a.cost)
@@ -449,16 +449,16 @@ export function useDashboardMetricsService() {
       // Latency by model using real p95 values
       const latencyBy = leaders.slowest_models_p95_latency.map((model) => {
         const provider = providerMap.get(model.model_id) || '';
-        const isLunar = isOpentracyProvider(provider);
+        const isOpentracy = isOpentracyProvider(provider);
         const displayName = formatModelNameForDisplay(model.model_id, provider);
-        const icon = isLunar ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
+        const icon = isOpentracy ? MODEL_ICONS.opentracyIcon : getProviderIconByBackend(provider);
 
         return {
           key: displayName,
           name: displayName,
           value: model.p95_latency_s * 1000, // Convert to ms
           icon,
-          isLunar,
+          isOpentracy,
         };
       });
 

@@ -76,7 +76,7 @@ const ALERT_STYLES = {
 };
 
 export function OverviewContent({ data, selectedDays, onTimeRangeChange }: OverviewContentProps) {
-  const externalProviders = data.providers.filter((p) => !p.isLunar);
+  const externalProviders = data.providers.filter((p) => !p.isOpentracy);
 
   const pieData = useMemo(
     () =>

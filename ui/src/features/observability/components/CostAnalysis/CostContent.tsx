@@ -85,7 +85,7 @@ export function CostContent({ data, selectedDays, onTimeRangeChange }: CostConte
     return cfg;
   }, [data.externalCosts]);
 
-  const externalRequests = data.expensiveRequests.filter((r) => !r.isLunar);
+  const externalRequests = data.expensiveRequests.filter((r) => !r.isOpentracy);
 
   return (
     <div className="space-y-6">
