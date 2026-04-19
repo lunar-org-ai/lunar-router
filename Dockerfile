@@ -26,8 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Includes convert_hf_to_gguf.py script
 RUN git clone --depth 1 https://github.com/ggerganov/llama.cpp /opt/llama.cpp && \
     cd /opt/llama.cpp && \
-    cmake -B build -DGGML_CUDA=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF && \
-    cmake --build build --target llama-quantize --config Release -j$(nproc)
+    cmake -B build -DGGML_CUDA=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_CURL=OFF && \
+    cmake --build build --target llama-quantize llama-server --config Release -j$(nproc)
 
 WORKDIR /app
 

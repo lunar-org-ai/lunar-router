@@ -325,8 +325,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 # --- Mount vLLM deployment router ---
 from ..deployment.routes import deployment_router
+from ..deployment.proxy import proxy_router as deployment_proxy_router
 
 app.include_router(deployment_router, prefix="/v1/deployments", tags=["deployments"])
+app.include_router(deployment_proxy_router, prefix="/v1/deployments", tags=["deployments"])
 
 
 def get_router() -> UniRouteRouter:
@@ -5377,6 +5379,94 @@ async def get_distillation_artifacts(job_id: str, tenant_id: str = Query("defaul
         })
 
     return result
+
+
+@app.post("/v1/distillation/{job_id}/deploy", tags=["distillation"])
+async def deploy_distilled_job(
+    job_id: str,
+    body: dict | None = None,
+    tenant_id: str = Query("default"),
+):
+    """Deploy a completed distillation job's GGUF model via llama-server.
+
+    Picks the smallest-quality GGUF artifact (preferring q4_k_m → q5_k_m → q8_0 → first available),
+    launches llama-server in the background, and registers it as a local deployment.
+    Returns immediately; UI polls /v1/deployments/{deployment_id}/status for readiness.
+    """
+    from pathlib import Path as _Path
+    from ..distillation import repository as dist_repo
+    from ..deployment.manager import deploy_model
+
+    tid = tenant_id or "default"
+    job = dist_repo.get_job(tid, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job.get("status") != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job must be completed before deploy (current status: {job.get('status')})",
+        )
+
+    artifacts_data = job.get("artifacts", {}) or {}
+    gguf_map = artifacts_data.get("gguf", {}) if isinstance(artifacts_data, dict) else {}
+    if not gguf_map:
+        raise HTTPException(
+            status_code=400,
+            detail="No GGUF artifacts found for this job — export must complete successfully first",
+        )
+
+    preferred_order = ["q4_k_m", "q5_k_m", "q4_0", "q5_0", "q8_0", "f16"]
+    selected_quant = None
+    selected_path = None
+    for quant in preferred_order:
+        if quant in gguf_map and _Path(gguf_map[quant]).exists():
+            selected_quant = quant
+            selected_path = gguf_map[quant]
+            break
+    if not selected_path:
+        for quant, fp in gguf_map.items():
+            if fp and _Path(fp).exists():
+                selected_quant = quant
+                selected_path = fp
+                break
+
+    if not selected_path:
+        raise HTTPException(
+            status_code=400,
+            detail="GGUF artifacts referenced in job results no longer exist on disk",
+        )
+
+    body = body or {}
+    instance_type = body.get("instance_type", "cpu-small")
+    config = body.get("config", {}) or {}
+
+    job_name = job.get("name") or f"distilled-{job_id[:8]}"
+    model_id = f"distilled/{job_name}"
+
+    deploy_config = {
+        **config,
+        "instance_type": instance_type,
+        "model_alias": model_id,
+        "source_job_id": job_id,
+        "quantization": selected_quant,
+    }
+
+    result = await deploy_model(
+        model_id=model_id,
+        model_path=selected_path,
+        config=deploy_config,
+    )
+
+    return {
+        "deployment_id": result["deployment_id"],
+        "model_id": result["model_id"],
+        "status": result["status"],
+        "endpoint_url": result.get("endpoint_url", ""),
+        "already_deployed": result.get("already_deployed", False),
+        "quantization": selected_quant,
+        "model_path": selected_path,
+    }
 
 
 @app.get("/v1/distillation/{job_id}/metrics", tags=["distillation"])

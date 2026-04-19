@@ -1,12 +1,14 @@
-"""vLLM deployment manager: launches, monitors, and stops vLLM subprocesses."""
+"""llama-server deployment manager: launches, monitors, and stops llama-server subprocesses for GGUF models."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import shutil
 import signal
 import sys
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -15,12 +17,31 @@ from . import storage
 
 logger = logging.getLogger(__name__)
 
-# Track running vLLM processes
+# Track running llama-server processes
 _processes: dict[str, asyncio.subprocess.Process] = {}
 
 # Port allocation
 _BASE_PORT = 8090
 _allocated_ports: set[int] = set()
+
+
+def _find_llama_server() -> str:
+    """Locate the llama-server binary."""
+    candidates = [
+        "/opt/llama.cpp/build/bin/llama-server",
+        "/opt/llama.cpp/llama-server",
+        str(Path.home() / ".unsloth" / "llama.cpp" / "build" / "bin" / "llama-server"),
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    found = shutil.which("llama-server")
+    if found:
+        return found
+    raise RuntimeError(
+        "llama-server binary not found. Expected at /opt/llama.cpp/build/bin/llama-server "
+        "(rebuild Docker image to compile it)."
+    )
 
 
 def _allocate_port() -> int:
@@ -91,23 +112,33 @@ async def _launch_and_monitor(
     port: int,
     config: dict,
 ) -> None:
-    """Launch vLLM subprocess, wait for health, update status."""
+    """Launch llama-server subprocess, wait for health, update status."""
     try:
         storage.update_deployment(deployment_id, status="starting")
 
-        # Build vLLM command
-        vllm_args = _build_vllm_args(model_path, port, config)
-        logger.info(f"Launching vLLM for {deployment_id}: {' '.join(vllm_args)}")
+        # Build llama-server command
+        try:
+            args = _build_llama_server_args(model_path, port, config)
+        except Exception as e:
+            storage.update_deployment(
+                deployment_id,
+                status="failed",
+                error_message=f"user_message={e}, error_code=binary_missing",
+                error_code="binary_missing",
+            )
+            return
+
+        logger.info(f"Launching llama-server for {deployment_id}: {' '.join(args)}")
 
         proc = await asyncio.create_subprocess_exec(
-            *vllm_args,
+            *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
         )
         _processes[deployment_id] = proc
 
         storage.update_deployment(deployment_id, pid=proc.pid)
-        logger.info(f"vLLM started (PID {proc.pid}) on port {port}")
+        logger.info(f"llama-server started (PID {proc.pid}) on port {port}")
 
         # Wait for health check
         healthy = await _wait_for_health(port, timeout=300)
@@ -129,23 +160,22 @@ async def _launch_and_monitor(
             storage.update_deployment(
                 deployment_id,
                 status="stopped",
-                error_message="vLLM process exited",
+                error_message="llama-server process exited",
             )
         else:
             # Health check timed out
             stderr = ""
             if proc.returncode is None:
                 proc.kill()
-                _, stderr_bytes = await proc.communicate()
-                stderr = stderr_bytes.decode(errors="replace")[-2000:]
-            else:
-                if proc.stderr:
-                    stderr = (await proc.stderr.read()).decode(errors="replace")[-2000:]
+                stdout_bytes, _ = await proc.communicate()
+                stderr = stdout_bytes.decode(errors="replace")[-2000:]
+            elif proc.stdout:
+                stderr = (await proc.stdout.read()).decode(errors="replace")[-2000:]
 
             storage.update_deployment(
                 deployment_id,
                 status="failed",
-                error_message=f"user_message=vLLM failed to start within timeout, error_code=startup_crash, details={stderr[-500:]}",
+                error_message=f"user_message=llama-server failed to start within timeout, error_code=startup_crash, details={stderr[-500:]}",
                 error_code="startup_crash",
             )
             logger.error(f"Deployment {deployment_id} failed to start: {stderr[-500:]}")
@@ -163,25 +193,28 @@ async def _launch_and_monitor(
         _release_port(port)
 
 
-def _build_vllm_args(model_path: str, port: int, config: dict) -> list[str]:
-    """Build the vLLM command-line arguments."""
+def _build_llama_server_args(model_path: str, port: int, config: dict) -> list[str]:
+    """Build the llama-server command-line arguments for a GGUF model."""
+    binary = _find_llama_server()
     args = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
+        binary,
         "--model", model_path,
         "--port", str(port),
         "--host", "127.0.0.1",
+        "--alias", config.get("model_alias", "lunar-distilled"),
     ]
 
-    # Parse vllm_args string from config if provided
-    vllm_args_str = config.get("vllm_args", "")
-    if vllm_args_str:
-        args.extend(vllm_args_str.split())
+    # Allow raw passthrough of extra flags via config
+    extra_args_str = config.get("llama_server_args", "")
+    if extra_args_str:
+        args.extend(extra_args_str.split())
     else:
-        # Sensible defaults
+        # Sensible defaults for distilled models on T4 / CPU
         args.extend([
-            "--max-model-len", str(config.get("max_model_len", 4096)),
-            "--dtype", config.get("dtype", "auto"),
-            "--gpu-memory-utilization", str(config.get("gpu_memory_utilization", 0.9)),
+            "--ctx-size", str(config.get("ctx_size", 4096)),
+            "--n-gpu-layers", str(config.get("n_gpu_layers", 99)),
+            "--threads", str(config.get("threads", os.cpu_count() or 4)),
+            "--parallel", str(config.get("parallel", 1)),
         ])
 
     return args
@@ -214,7 +247,7 @@ async def _register_in_engine(deployment_id: str, model_path: str, endpoint_url:
                 f"{engine_url}/v1/models",
                 json={
                     "model_id": deployment_id,
-                    "provider": "vllm",
+                    "provider": "llama_cpp",
                     "endpoint": endpoint_url,
                 },
             )

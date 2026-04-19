@@ -212,7 +212,7 @@ export function DeploymentDetailsModal({
   const [deleteStatus, setDeleteStatus] = useState<string | null>(null);
 
   const model = models.find((m) => m.id === deployment.selectedModel);
-  const instance = instances.find((i) => i.id === deployment.selectedInstance);
+  void instances; // kept for compatibility, no longer rendered
   const isActive = deployment.status === 'in_service' || deployment.status === 'active';
   const isDeletable = DELETABLE_STATUSES.includes(deployment.status);
 
@@ -388,27 +388,59 @@ export function DeploymentDetailsModal({
                     )}
                   </FieldSet>
 
-                  {/* Instance */}
+                  {/* Local runtime */}
                   <FieldSet className="gap-2">
-                    <FieldLegend>Infrastructure</FieldLegend>
+                    <FieldLegend>Runtime</FieldLegend>
                     <Item variant="outline">
                       <ItemMedia variant="icon">
-                        <Server className="text-violet-500" />
+                        <Cpu className="text-violet-500" />
                       </ItemMedia>
                       <ItemContent>
-                        <ItemTitle>Instance type</ItemTitle>
+                        <ItemTitle>Engine</ItemTitle>
                         <ItemDescription>
-                          <span className="font-mono text-xs">
-                            {instance?.name ?? deployment.selectedInstance}
-                          </span>
+                          <code className="font-mono text-xs">llama.cpp (llama-server)</code>
                         </ItemDescription>
-                        {instance && (
-                          <ItemDescription className="text-xs">
-                            {instance.gpus} — {instance.memory}
-                          </ItemDescription>
-                        )}
+                        <ItemDescription className="text-xs">
+                          Persistent local server, OpenAI-compatible API
+                        </ItemDescription>
                       </ItemContent>
                     </Item>
+
+                    {deployment.endpoint_url && (
+                      <Item variant="outline">
+                        <ItemContent>
+                          <div className="flex items-center justify-between gap-3">
+                            <ItemTitle>Local endpoint</ItemTitle>
+                            <CopyButton value={deployment.endpoint_url} />
+                          </div>
+                          <ItemDescription>
+                            <code className="font-mono text-xs">{deployment.endpoint_url}</code>
+                          </ItemDescription>
+                        </ItemContent>
+                      </Item>
+                    )}
+
+                    {deployment.deployment_id && (
+                      <Item variant="outline">
+                        <ItemContent>
+                          <div className="flex items-center justify-between gap-3">
+                            <ItemTitle>Inference URL (proxied + traced)</ItemTitle>
+                            <CopyButton
+                              value={`${window.location.origin}/api/v1/deployments/${deployment.deployment_id}/v1/chat/completions`}
+                            />
+                          </div>
+                          <ItemDescription>
+                            <code className="font-mono text-xs break-all">
+                              POST {window.location.origin}/api/v1/deployments/
+                              {deployment.deployment_id}/v1/chat/completions
+                            </code>
+                          </ItemDescription>
+                          <ItemDescription className="text-xs">
+                            Calling this URL records latency, tokens, and errors to ClickHouse.
+                          </ItemDescription>
+                        </ItemContent>
+                      </Item>
+                    )}
 
                     {deployment.deployment_id && (
                       <Item variant="outline">

@@ -22,6 +22,7 @@ export interface DeploymentResponse {
   scaling?: { min: number; max: number };
   error_message?: string;
   error_code?: string;
+  endpoint_url?: string;
 }
 
 // Internal helpers
@@ -113,10 +114,10 @@ export async function listDeploymentsApi(
   accessToken: string,
   statuses?: string[]
 ): Promise<DeploymentResponse[]> {
-  const url = new URL(`${API_BASE}/v1/deployments`);
-  if (statuses?.length) url.searchParams.set('statuses', statuses.join(','));
-
-  const res = await fetch(url.toString(), { headers: authHeaders(accessToken) });
+  const qs = statuses?.length ? `?statuses=${encodeURIComponent(statuses.join(','))}` : '';
+  const res = await fetch(`${API_BASE}/v1/deployments${qs}`, {
+    headers: authHeaders(accessToken),
+  });
 
   if (!res.ok) {
     throw new Error(`Failed to fetch deployments: ${res.status} ${res.statusText}`);

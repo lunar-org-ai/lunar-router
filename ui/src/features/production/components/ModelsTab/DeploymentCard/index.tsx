@@ -67,7 +67,24 @@ export const DeploymentCard = ({
 
       <CardContent className="space-y-2">
         <InfoRow label="Model" value={model?.name ?? deployment.selectedModel} />
-        <InfoRow label="Instance" value={instance?.name ?? deployment.selectedInstance} />
+        <InfoRow label="Engine" value="llama.cpp" />
+        {deployment.endpoint_url && (
+          <InfoRow
+            label="Endpoint"
+            value={
+              <code className="text-xs font-mono">
+                {(() => {
+                  try {
+                    const u = new URL(deployment.endpoint_url);
+                    return `${u.hostname}:${u.port || '80'}`;
+                  } catch {
+                    return deployment.endpoint_url;
+                  }
+                })()}
+              </code>
+            }
+          />
+        )}
 
         {deployment.deployment_id && (
           <div className="flex items-center justify-between gap-2">

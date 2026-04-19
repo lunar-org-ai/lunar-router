@@ -22,6 +22,7 @@ interface DeployProgressDialogProps {
   error?: DeploymentError;
   selectedInstanceId?: string;
   availableInstanceIds?: string[];
+  alreadyDeployed?: boolean;
   onRetry?: () => void;
   onSelectAlternative?: (instanceId: string) => void;
   onChangeInstance?: () => void;
@@ -34,6 +35,7 @@ export function DeployProgressDialog({
   error,
   selectedInstanceId,
   availableInstanceIds = [],
+  alreadyDeployed,
   onRetry,
   onSelectAlternative,
   onChangeInstance,
@@ -63,7 +65,13 @@ export function DeployProgressDialog({
       case 'creating':
         return <CreatingScreen />;
       case 'success':
-        return <SuccessScreen onClose={onClose} autoCloseMs={AUTO_CLOSE_DELAY} />;
+        return (
+          <SuccessScreen
+            onClose={onClose}
+            autoCloseMs={AUTO_CLOSE_DELAY}
+            alreadyDeployed={alreadyDeployed}
+          />
+        );
       case 'error':
         if (!error) {
           return (
