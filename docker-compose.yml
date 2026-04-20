@@ -48,7 +48,15 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # Override the Dockerfile's default `--gateway` mode so the engine
+    # actually loads routing weights. Without this it runs as a dumb proxy
+    # and `model="auto"` returns 400.
+    command: ["--weights", "/weights/bootstrap", "--host", "0.0.0.0", "--port", "8080"]
     environment:
+      # ONNX Runtime library is dlopen'd at startup to run the MiniLM
+      # embedder for semantic routing. Point at the copy seeded in the
+      # bootstrap weights pack.
+      ONNXRUNTIME_LIB_PATH: /weights/bootstrap/libonnxruntime.so.1.24.4
       OPENTRACY_CH_ENABLED: "true"
       OPENTRACY_CH_HOST: clickhouse
       OPENTRACY_CH_PORT: "9000"

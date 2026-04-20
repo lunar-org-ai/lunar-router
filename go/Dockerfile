@@ -7,9 +7,13 @@
 # ============================================================================
 
 # --- Stage 1: Build ---
-FROM golang:1-alpine AS builder
+# Debian-based so the built binary is glibc — matches the debian-slim runtime
+# stage below. An alpine (musl) binary fails with "no such file or directory"
+# when exec'd on glibc at runtime.
+FROM golang:1-bookworm AS builder
 
-RUN apk add --no-cache git gcc musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends git gcc \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -21,9 +25,14 @@ RUN CGO_ENABLED=1 GOOS=linux go build \
     -o /opentracy-engine ./cmd/opentracy-engine
 
 # --- Stage 2: Runtime ---
-FROM alpine:3.20
+# glibc-based so we can dlopen the official onnxruntime binary (needed for
+# MiniLM embeddings / semantic routing). Alpine/musl is incompatible with
+# upstream libonnxruntime.so — _chk symbols aren't exported even via gcompat.
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache ca-certificates libstdc++
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /opentracy-engine /usr/local/bin/opentracy-engine
 
