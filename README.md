@@ -8,6 +8,21 @@
 
 Drop-in OpenAI-compatible SDK. Every request becomes a trace; traces become datasets; datasets become distilled custom models; the routing layer swaps those models in under your app via aliases — so your cost curve goes down over time **without code changes**.
 
+## Try it in Colab (no install)
+
+Each notebook runs end-to-end on a free Colab runtime — bring your own OpenAI key, optionally Anthropic / Groq.
+
+| # | Notebook | One-line pitch | Colab |
+|---|---|---|---|
+| 01 | [Quickstart](notebooks/01_quickstart.ipynb) | First `completion()` call, see `_cost` + `_latency_ms`, swap providers | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/01_quickstart.ipynb) |
+| 02 | [Drop in over the OpenAI SDK](notebooks/02_drop_in_openai.ipynb) | Keep `from openai import OpenAI`, change only `base_url` | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/02_drop_in_openai.ipynb) |
+| 03 | [Semantic auto-routing](notebooks/03_semantic_routing.ipynb) | One prompt, the right model of 13 — learned, not rule-based | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/03_semantic_routing.ipynb) |
+| 04 | [Ticket classifier (real app)](notebooks/04_ticket_classifier.ipynb) | End-to-end support-ticket classifier with cost breakdown | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/04_ticket_classifier.ipynb) |
+| 05 | [Distillation — train your student](notebooks/05_distillation.ipynb) | Turn trace history into a distilled tiny model | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/05_distillation.ipynb) |
+| 06 | [Serve your distilled model](notebooks/06_distilled_inference.ipynb) | Four serving paths from load-the-adapter to alias swap | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/06_distilled_inference.ipynb) |
+
+> **Colab heads-up** — traces only show up in the dashboard if you set `OPENTRACY_ENGINE_URL` before `import opentracy`. Every notebook has a commented-out cell at the top with the two lines you need.
+
 ## Install
 
 ```bash
