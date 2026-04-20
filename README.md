@@ -5,6 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![PyPI](https://img.shields.io/pypi/v/opentracy.svg)](https://pypi.org/project/opentracy/)
+[![Docs](https://img.shields.io/badge/docs-opentracy.mintlify.app-10B981?logo=readthedocs&logoColor=white)](https://opentracy.mintlify.app)
+[![Open in Colab](https://img.shields.io/badge/Colab-run_the_notebooks-F9AB00?logo=googlecolab&logoColor=white)](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/01_quickstart.ipynb)
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/a8G5pQEN)
+
+📚 **Docs:** <https://opentracy.mintlify.app> &nbsp;•&nbsp; 💬 **Discord:** <https://discord.gg/a8G5pQEN> &nbsp;•&nbsp; 🚀 **Colab:** [run the first notebook](https://colab.research.google.com/github/OpenTracy/OpenTracy/blob/main/notebooks/01_quickstart.ipynb)
 
 Drop-in OpenAI-compatible SDK. Every request becomes a trace; traces become datasets; datasets become distilled custom models; the routing layer swaps those models in under your app via aliases — so your cost curve goes down over time **without code changes**.
 
