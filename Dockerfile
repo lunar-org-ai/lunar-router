@@ -39,10 +39,7 @@ RUN pip install --no-cache-dir torch torchvision torchaudio --index-url https://
     pip install --no-cache-dir -e ".[server]" 2>/dev/null || \
     pip install --no-cache-dir fastapi uvicorn pydantic clickhouse-connect numpy tqdm httpx openai mcp
 
-# Copy source (includes the `lunar_router` backwards-compat shim so containers
-# running user code that still imports the old name keep working).
 COPY opentracy/ opentracy/
-COPY lunar_router/ lunar_router/
 COPY clickhouse/ clickhouse/
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir --no-deps -e "."
