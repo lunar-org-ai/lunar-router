@@ -141,7 +141,10 @@ func TestSessionStoreConcurrentSetGetDelete(t *testing.T) {
 				s := &ToolCallSession{CreatedAt: time.Now(), LastTouchAt: time.Now()}
 				store.Set(id, s)
 				if got := store.Get(id); got == nil {
-					t.Fatalf("store.Get(%q) = nil, want session", id)
+					// t.Fatalf is illegal from a non-test goroutine; use t.Errorf
+					// + return to fail the test without goroutine-unsafe FailNow.
+					t.Errorf("store.Get(%q) = nil, want session", id)
+					return
 				}
 				store.Delete(id)
 			}
