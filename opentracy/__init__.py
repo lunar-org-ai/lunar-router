@@ -40,7 +40,7 @@ Providers (13):
     Cerebras, Sambanova, Perplexity, Cohere, Bedrock.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 # ---------------------------------------------------------------------------
 # Public SDK — eager imports only. Everything here must be cheap to load.
@@ -90,6 +90,19 @@ __all__ = [
 # shims exist so existing notebooks and docs don't break.
 # ---------------------------------------------------------------------------
 _LAZY: dict[str, tuple[str, str | None]] = {
+    # student (local inference on trained adapters / GGUF)
+    "Student": ("opentracy.student", None),
+    "load_student": ("opentracy.student", None),
+    "StudentError": ("opentracy.student", None),
+    # distill (one-call training → Student)
+    "distill": ("opentracy._distill", None),
+    "DistillError": ("opentracy._distill", None),
+    # aliases (file-based registry powering the alias swap)
+    "list_aliases": ("opentracy.aliases", None),
+    "get_alias": ("opentracy.aliases", None),
+    "set_alias": ("opentracy.aliases", None),
+    "unset_alias": ("opentracy.aliases", None),
+    "AliasError": ("opentracy.aliases", None),
     # core
     "PromptEmbedder": ("opentracy.core.embeddings", None),
     "SentenceTransformerProvider": ("opentracy.core.embeddings", None),

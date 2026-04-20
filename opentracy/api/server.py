@@ -5174,7 +5174,7 @@ async def list_distillation_jobs(
     offset: int = Query(0, ge=0),
 ):
     from ..distillation import repository as dist_repo
-    from ..distillation.router import _serialize_job
+    from ..distillation.serialization import serialize_job as _serialize_job
 
     tid = tenant_id or "default"
     jobs, total = dist_repo.list_jobs(tid, status=status, limit=limit, offset=offset)
@@ -5185,7 +5185,7 @@ async def list_distillation_jobs(
 async def create_distillation_job(body: dict):
     from ..distillation import repository as dist_repo
     from ..distillation.schemas import DistillationConfig
-    from ..distillation.router import _serialize_job
+    from ..distillation.serialization import serialize_job as _serialize_job
 
     tid = body.get("tenant_id") or "default"
     name = body.get("name", "Untitled")
@@ -5270,7 +5270,7 @@ async def list_student_models():
 @app.get("/v1/distillation/{job_id}", tags=["distillation"])
 async def get_distillation_job(job_id: str, tenant_id: str = Query("default")):
     from ..distillation import repository as dist_repo
-    from ..distillation.router import _serialize_job
+    from ..distillation.serialization import serialize_job as _serialize_job
 
     tid = tenant_id or "default"
     job = dist_repo.get_job(tid, job_id)
@@ -5297,7 +5297,7 @@ async def delete_distillation_job(job_id: str, tenant_id: str = Query("default")
 async def cancel_distillation_job(job_id: str, tenant_id: str = Query("default")):
     from ..distillation import repository as dist_repo
     from ..distillation.pipeline import cancel_pipeline
-    from ..distillation.router import _serialize_job
+    from ..distillation.serialization import serialize_job as _serialize_job
 
     tid = tenant_id or "default"
     job = dist_repo.get_job(tid, job_id)

@@ -40,7 +40,7 @@ def test_distillation_subpackage_imports_cleanly() -> None:
         "opentracy.distillation",
         "opentracy.distillation.client",
         "opentracy.distillation.schemas",
-        "opentracy.distillation.router",
+        "opentracy.distillation.serialization",
         "opentracy.distillation.repository",
         "opentracy.distillation.pipeline",
         "opentracy.distillation.export",

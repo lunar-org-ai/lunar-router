@@ -3,10 +3,10 @@
 Local-first model distillation: data generation → curation → training → export.
 All state persisted to ClickHouse; artifacts stored on local filesystem.
 
-The SDK client (``Distiller``) is cheap to import. The FastAPI router
-(``opentracy.distillation.router``) is NOT re-exported here — it pulls
-FastAPI / uvicorn / rich / click and only the API server needs it.
-Import it explicitly: ``from opentracy.distillation.router import router``.
+The SDK client (``Distiller``) is cheap to import; the live FastAPI
+endpoints for /v1/distillation/* are registered inline in
+``opentracy/api/server.py``. The response serializer shared by those
+handlers lives at ``opentracy.distillation.serialization.serialize_job``.
 """
 from .client import Distiller, TrainingClient, DistillerError
 

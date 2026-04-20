@@ -1,0 +1,143 @@
+name: ci
+
+# Runs on every PR and every push to main / release branches. Each job
+# covers one of the three language surfaces the rebrand touched so a
+# regression in Python, Go, or the UI surfaces before merge rather than
+# in production.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'rebrand/**'
+      - 'release/**'
+
+# Give each workflow run a group keyed by ref so a fresh push cancels an
+# in-flight run on the same PR — saves CI minutes when the user pushes
+# fixups quickly.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Python SDK, shim, and FastAPI route-surface checks
+  # -------------------------------------------------------------------------
+  python:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package + test deps
+        # Editable install so the `opentracy` import graph (including the
+        # `lunar_router` backcompat shim) resolves exactly like it will for
+        # end users after `pip install opentracy`.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[server]" pytest pytest-asyncio
+
+      - name: Parse every .py in the package tree
+        # Cheap sanity check that catches the class of bug that broke
+        # /v1/datasets on commit 9512b5e (a stray SyntaxError from the
+        # env-migration script).
+        run: |
+          python -c "
+          import ast, os, sys
+          bad = []
+          for base in ['opentracy', 'lunar_router', 'tests']:
+              for root, _, files in os.walk(base):
+                  for f in files:
+                      if f.endswith('.py'):
+                          try: ast.parse(open(os.path.join(root, f)).read())
+                          except SyntaxError as e: bad.append(f'{root}/{f}:{e.lineno}: {e.msg}')
+          if bad:
+              print('\n'.join(bad)); sys.exit(1)
+          print('all .py files parse cleanly')
+          "
+
+      - name: Run pytest
+        run: pytest tests/ -q --tb=short
+
+      - name: Verify backcompat shim still imports
+        # Explicit smoke: the 8 rebrand commits are worthless if
+        # `import lunar_router` breaks for users pinned to the old name.
+        run: |
+          python -W error::DeprecationWarning -c "
+          import warnings; warnings.simplefilter('default')
+          import lunar_router
+          from lunar_router.storage import secrets  # submodule via MetaPathFinder
+          import opentracy
+          assert lunar_router.completion is opentracy.completion
+          "
+
+  # -------------------------------------------------------------------------
+  # Go engine — build + tests with -race
+  # -------------------------------------------------------------------------
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        # -short skips the ClickHouse integration test that wants a live DB.
+        # -race catches data races in concurrent code (session store,
+        # envfallback.Get, etc.) that single-threaded tests miss.
+        run: go test -race -short -count=1 ./...
+
+  # -------------------------------------------------------------------------
+  # UI — package manifest + TypeScript type check
+  # -------------------------------------------------------------------------
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: npm ci
+        run: npm ci --no-audit --no-fund
+
+      - name: tsc --noEmit
+        # `npm run build` pulls in 36 pre-existing TS errors that aren't
+        # rebrand-related (missing Amplify generated types, etc.). Run the
+        # strict type-check instead, which is clean on this branch. The
+        # full build stays in the release workflow where those missing
+        # types are provided by the Amplify pipeline.
+        run: npm run type-check
