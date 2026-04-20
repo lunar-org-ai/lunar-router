@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Default routing weights bundled in the wheel** (`weights-mmlu-v1`, 288 KB,
+  100 clusters, 10 profiled models). `pip install opentracy` now carries the
+  weights directly — `engine.start()` and `ot.load_router()` work offline on
+  first run, no HuggingFace download, no API keys, no auth. `_find_weights()`
+  checks `opentracy/_bundled_weights/weights-mmlu-v1/` before falling back to
+  user data dirs / hub download, so a pre-installed newer weights pack still
+  wins over the bundled default.
+
+### Changed
+
+- **`huggingface_hub` is now a core dependency.** Previously lived in the
+  `[research]` extra, which meant `pip install opentracy` → `ot.load_router()`
+  failed with `ModuleNotFoundError` the first time it reached for weights.
+  Moving it to `dependencies` makes the default semantic-routing path work
+  out of the box (the hub code still carries a stdlib `urllib` fallback as
+  belt-and-suspenders for stripped-down installs).
+- **Engine always emits `X-OpenTracy-Selected-Model` + `X-OpenTracy-Routing-Ms`
+  response headers** on `/v1/chat/completions`, not only when `model="auto"`
+  routes the request. Explicit `model="openai/gpt-4o-mini"` calls now also
+  expose the effective model (useful for the SDK / notebook inspection flow);
+  `X-OpenTracy-Routing-Ms` is `0.00` when no routing happened. `Cluster-ID` and
+  `Expected-Error` stay scoped to actual routing decisions.
+- **`engine.start()` auto-downloads weights on first run.** Previously, calling
+  `GoEngine().start()` with no local weights raised `FileNotFoundError` and
+  asked the user to run `opentracy download weights-mmlu-v1` manually. Now the
+  default pack is fetched transparently from the hub on first start, so
+  `pip install opentracy` → notebook works end-to-end with no extra step. Opt
+  out with `OPENTRACY_NO_AUTO_DOWNLOAD=1` for CI / offline environments that
+  pre-stage weights.
+
+### Removed
+
+- **`lunar_router` backwards-compat shim**: the PEP 451 `MetaPathFinder` that
+  redirected `lunar_router.*` imports to `opentracy.*` is gone. Users still
+  pinned to the old name must update their imports to `opentracy` — there is
+  no longer a transparent alias. The Docker image, wheel, and CI no longer
+  ship or test the shim, and `clickhouse/init.sql` creates only the
+  `opentracy` database (pre-rebrand deployments still needing the
+  `lunar_router` database should follow the 0.3.0 migration SQL below before
+  upgrading).
+
 ## [0.3.0] — Rebrand: `lunar_router` → `opentracy`
 
 ### Changed
