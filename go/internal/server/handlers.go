@@ -856,6 +856,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Always emit the effective model and routing time, even for explicit
+	// model= requests (routingMs is 0.00 when no routing happened). This gives
+	// notebook/SDK users a consistent header surface to inspect.
+	if w.Header().Get("X-OpenTracy-Selected-Model") == "" {
+		w.Header().Set("X-OpenTracy-Selected-Model", selectedModel)
+		w.Header().Set("X-OpenTracy-Routing-Ms", fmt.Sprintf("%.2f", routingMs))
+	}
+
 	// Strip "provider/" prefix so upstream API gets the bare model name
 	if idx := strings.IndexByte(req.Model, '/'); idx > 0 {
 		req.Model = req.Model[idx+1:]
