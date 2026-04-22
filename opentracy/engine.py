@@ -77,6 +77,11 @@ class GoEngine:
         return self._base_url
 
     @property
+    def url(self) -> str:
+        """Alias for :attr:`base_url` — matches how notebooks refer to it."""
+        return self._base_url
+
+    @property
     def is_running(self) -> bool:
         """Check if the engine process is running."""
         return self._process is not None and self._process.poll() is None

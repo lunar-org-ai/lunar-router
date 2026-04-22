@@ -23,7 +23,12 @@ from opentracy._env import env
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(env("DATA_DIR", "data"))
+def _data_dir() -> Path:
+    """Resolve the data dir at call time — ``ot.distill()`` sets
+    OPENTRACY_DATA_DIR via a context manager AFTER this module has already
+    been imported, so capturing at import-time freezes the stale default.
+    """
+    return Path(env("DATA_DIR", "data"))
 
 
 async def start_training(
@@ -46,7 +51,7 @@ async def start_training(
     """
     import asyncio
 
-    job_dir = DATA_DIR / "distillation" / job_id
+    job_dir = _data_dir() / "distillation" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     output_dir = job_dir / "adapter"
@@ -96,8 +101,12 @@ async def start_training(
 
     logger.info("Launching training subprocess for job %s", job_id)
 
-    # Inherit env + skip TensorFlow imports (we only use PyTorch)
-    env = {
+    # Inherit env + skip TensorFlow imports (we only use PyTorch).
+    # NOTE: deliberately NOT named ``env`` — that shadows the module-level
+    # ``env()`` import above and makes any earlier lookup (``env("CH_HOST")``)
+    # raise ``UnboundLocalError`` because Python scopes ``env`` as local for
+    # the whole function as soon as it sees an assignment anywhere in it.
+    proc_env = {
         **os.environ,
         "TRANSFORMERS_NO_TF": "1",
         "TF_CPP_MIN_LOG_LEVEL": "3",
@@ -109,8 +118,8 @@ async def start_training(
         from ..storage.secrets import get_secret
         hf_token = get_secret("huggingface")
         if hf_token:
-            env["HF_TOKEN"] = hf_token
-            env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            proc_env["HF_TOKEN"] = hf_token
+            proc_env["HUGGING_FACE_HUB_TOKEN"] = hf_token
     except Exception:
         pass
 
@@ -120,7 +129,7 @@ async def start_training(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(Path(__file__).resolve().parents[2]),
-        env=env,
+        env=proc_env,
     )
 
     # Stream output

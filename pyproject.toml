@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentracy"
-version = "0.3.1"
+version = "0.3.2"
 description = "Auto-distillation layer for your LLM calls — drop-in OpenAI-compatible SDK that turns every request into training data for cheaper custom models."
 readme = "README.md"
 license = {text = "MIT"}
@@ -51,7 +51,13 @@ groq      = ["groq>=0.4.0"]
 
 # ── The wedge: automated distillation ───────────────────────────────
 # Train custom student models from your trace data. Pulls GPU/training deps.
+# NOTE: torch is listed explicitly even though unsloth/trl/peft depend on it —
+# a silent failure in any of those leaves the user with a half-installed env
+# that spends money on teacher+judge calls and then dies on `import torch`
+# in the training subprocess. Listing it keeps `pip install opentracy[distill]`
+# honest: if torch can't install, the install itself fails.
 distill = [
+    "torch>=2.1.0",
     "datasets>=2.14.0",
     "trl>=0.7.0",
     "peft>=0.6.0",

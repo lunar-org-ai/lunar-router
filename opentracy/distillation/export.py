@@ -26,7 +26,10 @@ from opentracy._env import env
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(env("DATA_DIR", "data"))
+def _data_dir() -> Path:
+    """Resolve at call time, not import time — ``ot.distill()`` overrides
+    the env var AFTER this module has already been imported."""
+    return Path(env("DATA_DIR", "data"))
 
 
 async def start_export(
@@ -43,7 +46,7 @@ async def start_export(
     """
     import asyncio
 
-    job_dir = DATA_DIR / "distillation" / job_id
+    job_dir = _data_dir() / "distillation" / job_id
     output_dir = job_dir / "gguf"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -65,7 +68,11 @@ async def start_export(
 
     logger.info("Launching export subprocess for job %s", job_id)
 
-    env = {
+    # NOTE: deliberately NOT named ``env`` — that shadows the module-level
+    # ``env()`` import and makes any earlier ``env("CH_HOST")`` raise
+    # UnboundLocalError (Python scopes ``env`` as local for the whole
+    # function as soon as it sees an assignment anywhere in it).
+    proc_env = {
         **os.environ,
         "TRANSFORMERS_NO_TF": "1",
         "TF_CPP_MIN_LOG_LEVEL": "3",
@@ -78,8 +85,8 @@ async def start_export(
         from ..storage.secrets import get_secret
         hf_token = get_secret("huggingface")
         if hf_token:
-            env["HF_TOKEN"] = hf_token
-            env["HUGGING_FACE_HUB_TOKEN"] = hf_token
+            proc_env["HF_TOKEN"] = hf_token
+            proc_env["HUGGING_FACE_HUB_TOKEN"] = hf_token
     except Exception:
         pass
 
@@ -89,7 +96,7 @@ async def start_export(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         cwd=str(Path(__file__).resolve().parents[2]),
-        env=env,
+        env=proc_env,
     )
 
     output_lines: list[str] = []
@@ -317,10 +324,14 @@ def _run_export(config_path: str) -> None:
     _update_export_progress(tenant_id, job_id, 90, "computing_results")
     _write_results(tenant_id, job_id, artifacts)
 
-    # 5. Update artifacts in job record
+    # 5. Update artifacts in job record — MERGE with whatever the pipeline
+    # already recorded (``adapter_path`` from the training phase) so callers
+    # that fall back to the PEFT adapter on GGUF failure can still find it.
     try:
         from . import repository as _repo
-        _repo.update_job(tenant_id, job_id, {"artifacts": {"gguf": artifacts}})
+        existing = (_repo.get_job(tenant_id, job_id) or {}).get("artifacts") or {}
+        merged = {**existing, "gguf_paths": artifacts, "gguf": artifacts}
+        _repo.update_job(tenant_id, job_id, {"artifacts": merged})
     except Exception as e:
         print(f"[EXPORT] WARN: Failed to update artifacts: {e}")
 
@@ -695,7 +706,7 @@ def _write_results(tenant_id: str, job_id: str, artifacts: dict[str, str]) -> No
 
         # Build sample comparisons from curated data
         sample_comparisons = []
-        curated_path = Path(DATA_DIR) / "distillation" / job_id / "curated.jsonl"
+        curated_path = _data_dir() / "distillation" / job_id / "curated.jsonl"
         if curated_path.exists():
             with open(curated_path) as f:
                 for i, line in enumerate(f):

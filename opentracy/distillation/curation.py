@@ -50,7 +50,10 @@ Respond ONLY with valid JSON in this exact format:
 
 WEIGHTS = {"coherence": 0.25, "helpfulness": 0.30, "correctness": 0.30, "format": 0.15}
 
-DATA_DIR = Path(env("DATA_DIR", "data"))
+def _data_dir() -> Path:
+    """Resolve at call time, not import time — ``ot.distill()`` overrides
+    the env var AFTER this module has already been imported."""
+    return Path(env("DATA_DIR", "data"))
 
 
 async def curate_candidates(
@@ -145,7 +148,7 @@ async def curate_candidates(
             })
 
     # Write curated JSONL to local filesystem
-    job_dir = DATA_DIR / "distillation" / job_id
+    job_dir = _data_dir() / "distillation" / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
     curated_path = job_dir / "curated.jsonl"
 
