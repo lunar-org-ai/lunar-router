@@ -49,6 +49,15 @@ def _fake_engine_ctx(engine_url=None):
     yield engine_url or "http://fake-engine:8080"
 
 
+@pytest.fixture(autouse=True)
+def _skip_distill_preflight(monkeypatch):
+    """CI runs these tests without torch installed. The production preflight
+    check in ``distill()`` would raise DistillError before the mocked pipeline
+    ever runs, hiding the real assertions each test wants to make. The escape
+    hatch is an env var the SDK honours."""
+    monkeypatch.setenv("OPENTRACY_SKIP_DISTILL_PREFLIGHT", "1")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

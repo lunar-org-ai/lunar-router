@@ -135,11 +135,21 @@ def distill(
             "Install with: pip install opentracy[distill]"
         ) from e
 
+    # Normalize + validate dataset BEFORE preflight so "empty dataset" surfaces
+    # as a tidy DistillError even in test envs that don't have torch installed.
     prompts = _normalize_dataset(dataset)
     if num_prompts is not None:
         prompts = prompts[: max(1, int(num_prompts))]
     if not prompts:
         raise DistillError("Dataset is empty — distill() needs at least one prompt.")
+
+    # Preflight: the training subprocess imports torch. If it's missing we'd
+    # blow through the teacher + judge phases (real OpenAI spend) and fail
+    # at phase 3 anyway. Fail fast before spending any money.
+    # Skip-hook: tests that monkey-patch the pipeline don't actually touch
+    # torch, so they can set `OPENTRACY_SKIP_DISTILL_PREFLIGHT=1` to bypass.
+    if not env("SKIP_DISTILL_PREFLIGHT"):
+        _preflight_training_env()
 
     quant_list = _normalize_quant(quantize)
     export_gguf = bool(quant_list)
@@ -178,22 +188,124 @@ def distill(
         repo_state.seed_job(job_id, tenant_id, config)
 
         try:
-            asyncio.run(
-                _pipeline_mod._run_pipeline(job_id, tenant_id, config)
+            _run_coro_sync(
+                lambda: _pipeline_mod._run_pipeline(job_id, tenant_id, config)
             )
         except Exception as e:  # pragma: no cover - pipeline wraps its own errors
             raise DistillError(f"distillation failed: {e}") from e
 
         job = repo_state.jobs[(tenant_id, job_id)]
+        artifacts = job.get("artifacts") or {}
+
         if job["status"] != "completed":
+            # Export can fail (missing llama.cpp, OOM, etc.) after the
+            # adapter is already trained and saved to disk. That's still a
+            # usable result — return a PEFT-backed Student. The caller
+            # didn't get GGUF, but they got a working model.
+            adapter_path = artifacts.get("adapter_path") if isinstance(artifacts, dict) else None
+            if adapter_path and Path(adapter_path).exists():
+                logger.warning(
+                    "opentracy.distill: pipeline status=%s but adapter exists at %s — "
+                    "returning PEFT Student (GGUF export skipped: %s)",
+                    job["status"], adapter_path, job.get("error", "<no error>"),
+                )
+                return Student(
+                    backend="peft",
+                    model_path=str(Path(adapter_path).resolve()),
+                    base_model=base_model,
+                )
             err = job.get("error") or f"pipeline finished with status={job['status']}"
             raise DistillError(err)
-
-        artifacts = job.get("artifacts") or {}
 
     return _student_from_artifacts(
         artifacts, base_model=base_model, prefer_gguf=export_gguf, quant=quant_list,
     )
+
+
+# ---------------------------------------------------------------------- #
+# Preflight
+# ---------------------------------------------------------------------- #
+
+
+def _preflight_training_env() -> None:
+    """Fail fast if the training subprocess will crash on torch / GPU.
+
+    The pipeline spends real money on teacher + judge API calls BEFORE the
+    training subprocess starts. Catching missing torch / no-CUDA up front
+    avoids dead-in-the-water runs that already cost the user $$$.
+    """
+    try:
+        import torch  # noqa: F401
+    except ImportError as e:
+        raise DistillError(
+            "Training needs PyTorch, but `import torch` failed. "
+            "Reinstall the distill extras with a CUDA-enabled environment: "
+            "`pip install --upgrade opentracy[distill]`. "
+            "For quick prototyping on Colab: Runtime \u2192 Change runtime type \u2192 T4 GPU."
+        ) from e
+
+    try:
+        cuda_ok = bool(torch.cuda.is_available())
+    except Exception:
+        cuda_ok = False
+    if not cuda_ok:
+        raise DistillError(
+            "No CUDA GPU is visible to PyTorch. The training phase uses "
+            "unsloth which is CUDA-only, so this pipeline cannot complete "
+            "on a CPU-only host. On Colab: Runtime \u2192 Change runtime type \u2192 T4 GPU. "
+            "On your own infra: run the notebook on a machine with an NVIDIA "
+            "GPU + matching PyTorch build."
+        )
+
+
+# ---------------------------------------------------------------------- #
+# Async pipeline dispatch
+# ---------------------------------------------------------------------- #
+
+
+def _run_coro_sync(coro_factory: Callable[[], Any]) -> Any:
+    """Run an async coroutine synchronously, robust to Jupyter/IPython.
+
+    ``asyncio.run()`` raises ``RuntimeError`` when invoked from a thread
+    that already has a running event loop — which is exactly what the
+    IPython/Jupyter kernel gives us. When that happens, we spin a
+    dedicated worker thread with a fresh loop and block on it. Outside
+    a running loop we use ``asyncio.run()`` directly so behaviour is
+    unchanged for regular scripts.
+
+    Args:
+        coro_factory: Zero-arg callable returning a fresh coroutine.
+            Taking a factory (rather than a pre-built coroutine) lets
+            us defer creation until we're inside the target loop's
+            thread, keeping the coroutine's binding tidy.
+    """
+    try:
+        asyncio.get_running_loop()
+        inside_loop = True
+    except RuntimeError:
+        inside_loop = False
+
+    if not inside_loop:
+        return asyncio.run(coro_factory())
+
+    holder: dict[str, Any] = {}
+
+    def _worker() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            holder["value"] = loop.run_until_complete(coro_factory())
+        except BaseException as exc:  # propagate back to the caller
+            holder["error"] = exc
+        finally:
+            loop.close()
+
+    t = threading.Thread(target=_worker, name="opentracy-distill", daemon=False)
+    t.start()
+    t.join()
+    if "error" in holder:
+        raise holder["error"]
+    return holder.get("value")
 
 
 # ---------------------------------------------------------------------- #
@@ -274,16 +386,24 @@ class _InMemoryRepo:
     """Minimal in-memory stand-in for ``opentracy.distillation.repository``.
 
     Implements the subset of functions the pipeline touches:
-      - ``update_job_status(tenant_id, job_id, *, status=None, phase=None, error=None)``
-      - ``append_log(tenant_id, job_id, line)``
-      - ``update_job(tenant_id, job_id, patch: dict)``
-      - ``get_job(tenant_id, job_id) -> dict | None``
-      - ``append_candidates(...)``, ``record_metrics(...)`` — no-ops, metrics
-        are optional and the pipeline treats missing rows gracefully.
+      - Jobs: ``update_job_status``, ``append_log``, ``update_job``,
+        ``get_job``.
+      - Candidates: ``insert_candidates`` (batch from data_gen),
+        ``insert_candidate`` (single upsert from curation),
+        ``get_candidates`` (read-back for the judge phase).
+      - Metrics: ``record_training_metric`` + ``get_latest_metric`` +
+        ``list_metrics``. The pipeline tolerates missing rows, so
+        these are cheap — metrics land in a list keyed by ``job_id``.
     """
 
     def __init__(self, *, on_progress: Optional[ProgressFn]) -> None:
         self.jobs: dict[tuple[str, str], dict[str, Any]] = {}
+        # Candidates are keyed by (tenant_id, job_id). Curation reads them
+        # back via get_candidates(job_id, limit=N), so we also index by
+        # candidate_id to let insert_candidate() upsert scores.
+        self.candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._candidate_idx: dict[str, tuple[tuple[str, str], int]] = {}
+        self.metrics: dict[str, list[dict[str, Any]]] = {}
         self._lock = threading.RLock()
         self._on_progress = on_progress
 
@@ -359,22 +479,130 @@ class _InMemoryRepo:
             job = self.jobs.get((tenant_id, job_id))
             return dict(job) if job else None
 
-    # The pipeline's sub-phases occasionally record candidates / metrics
-    # — we accept the calls and throw the data away to keep things simple.
-    def append_candidates(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    # ---- Candidates ---------------------------------------------------- #
+    # Shape matches ``opentracy.distillation.repository`` — each candidate is
+    # a dict with at least candidate_id / job_id / tenant_id / prompt_id /
+    # prompt / response / score / selected.
 
-    def record_metrics(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def insert_candidates(self, candidates: list[dict[str, Any]]) -> None:
+        """Batch insert. Called once per prompt-batch by data_gen."""
+        if not candidates:
+            return
+        with self._lock:
+            for c in candidates:
+                key = (c.get("tenant_id", "local"), c.get("job_id", ""))
+                bucket = self.candidates.setdefault(key, [])
+                bucket.append(dict(c))
+                cid = c.get("candidate_id")
+                if cid:
+                    self._candidate_idx[cid] = (key, len(bucket) - 1)
 
-    def record_training_metric(self, *args: Any, **kwargs: Any) -> None:
-        pass
+    def insert_candidate(self, candidate: dict[str, Any]) -> None:
+        """Upsert a single candidate. Curation uses this to write the score
+        back onto a row that data_gen already inserted.
+        """
+        cid = candidate.get("candidate_id")
+        with self._lock:
+            if cid and cid in self._candidate_idx:
+                key, pos = self._candidate_idx[cid]
+                self.candidates[key][pos].update(candidate)
+                return
+            # Fall through: treat as a new row.
+            key = (candidate.get("tenant_id", "local"), candidate.get("job_id", ""))
+            bucket = self.candidates.setdefault(key, [])
+            bucket.append(dict(candidate))
+            if cid:
+                self._candidate_idx[cid] = (key, len(bucket) - 1)
 
-    def list_metrics(self, *args: Any, **kwargs: Any) -> list:
-        return []
+    def get_candidates(
+        self,
+        job_id: str,
+        limit: int = 100_000,
+        tenant_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Return candidates for a job. ``tenant_id`` defaults to the only
+        tenant we seeded when ``get_candidates(job_id)`` is called without it.
+        """
+        with self._lock:
+            if tenant_id is not None:
+                return list(self.candidates.get((tenant_id, job_id), []))[:limit]
+            # No tenant filter: concat across whichever buckets match job_id.
+            out: list[dict[str, Any]] = []
+            for (t, j), bucket in self.candidates.items():
+                if j == job_id:
+                    out.extend(bucket)
+                    if len(out) >= limit:
+                        return out[:limit]
+            return out
 
-    def list_candidates(self, *args: Any, **kwargs: Any) -> list:
-        return []
+    # Kept as a lenient alias for older call-sites. Accepts the empty/no-arg
+    # form so legacy no-op tests (which predate the plural insert_candidates
+    # rename) keep passing.
+    def append_candidates(
+        self,
+        candidates: Optional[list[dict[str, Any]]] = None,
+    ) -> None:
+        if candidates:
+            self.insert_candidates(candidates)
+
+    def list_candidates(
+        self,
+        job_id: Optional[str] = None,
+        limit: int = 100,
+        tenant_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        if job_id is None:
+            return []
+        return self.get_candidates(job_id, limit=limit, tenant_id=tenant_id)
+
+    # ---- Metrics ------------------------------------------------------- #
+
+    def record_training_metric(
+        self,
+        job_id: Optional[str] = None,
+        metric: Optional[dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
+    ) -> None:
+        """Append a training metric row. Pipeline writes one per optimizer
+        step; we keep them in order of insertion which is also step order.
+
+        Args are nominally required, but defaults are permitted so the legacy
+        no-op test shape ``r.record_training_metric()`` still works.
+        """
+        if job_id is None or metric is None:
+            return
+        row = dict(metric)
+        row.setdefault("job_id", job_id)
+        if tenant_id is not None:
+            row.setdefault("tenant_id", tenant_id)
+        with self._lock:
+            self.metrics.setdefault(job_id, []).append(row)
+
+    # Alias for the REST-style name used by some callers.
+    def record_metrics(
+        self,
+        job_id: Optional[str] = None,
+        metric: Optional[dict[str, Any]] = None,
+        tenant_id: Optional[str] = None,
+    ) -> None:
+        if job_id is None or metric is None:
+            return
+        self.record_training_metric(job_id, metric, tenant_id=tenant_id)
+
+    def list_metrics(
+        self,
+        job_id: Optional[str] = None,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        if job_id is None:
+            return []
+        with self._lock:
+            return list(self.metrics.get(job_id, []))[-limit:]
+
+    def get_latest_metric(self, job_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            rows = self.metrics.get(job_id)
+            return dict(rows[-1]) if rows else None
 
     # ---- Internal --------------------------------------------------- #
 

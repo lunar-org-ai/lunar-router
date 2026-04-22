@@ -24,6 +24,7 @@ loaded or called.
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,6 +106,27 @@ class Student:
                 "PEFT backend needs torch + transformers + peft. "
                 "Install with: pip install opentracy[distill]"
             ) from e
+
+        # apply_chat_template needs jinja2>=3.1. Old envs (especially stale
+        # system Pythons picked up by a `uvicorn` on PATH) can have 3.0.x
+        # sitting around and the transformers ImportError that surfaces from
+        # inside a generate() call is impossible to diagnose without reading
+        # the traceback. Fail loudly at load time instead.
+        try:
+            import jinja2
+            parts = tuple(int(p) for p in jinja2.__version__.split(".")[:2] if p.isdigit())
+            if parts and parts < (3, 1):
+                raise StudentError(
+                    f"jinja2 is too old for transformers.apply_chat_template "
+                    f"(found {jinja2.__version__}, need >=3.1). "
+                    f"Upgrade in the same interpreter you're running: "
+                    f"`{sys.executable} -m pip install -U 'jinja2>=3.1'`."
+                )
+        except ImportError:
+            raise StudentError(
+                f"jinja2 is not installed (transformers.apply_chat_template needs it). "
+                f"Install with: `{sys.executable} -m pip install 'jinja2>=3.1'`."
+            )
 
         if not self.base_model:
             raise StudentError(

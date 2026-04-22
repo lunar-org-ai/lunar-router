@@ -22,6 +22,13 @@ _WEIGHTS_ALIASES = {
     "mmlu-v1": "weights-mmlu-v1",
 }
 
+# Package IDs that resolve to the same bundled weights directory.
+_BUNDLED_PACKAGE_ALIASES = {
+    "weights-default": "weights-mmlu-v1",
+}
+
+_BUNDLED_WEIGHTS_ROOT = Path(__file__).parent / "_bundled_weights"
+
 
 def _resolve_package_id(name: str) -> str:
     """Resolve a weights name to a hub package ID."""
@@ -32,6 +39,15 @@ def _resolve_package_id(name: str) -> str:
         return name
     # Try prefixing with "weights-"
     return f"weights-{name}"
+
+
+def _bundled_path(package_id: str) -> Optional[Path]:
+    """Return the bundled weights path for a package, if shipped in the wheel."""
+    candidate = _BUNDLED_PACKAGE_ALIASES.get(package_id, package_id)
+    path = _BUNDLED_WEIGHTS_ROOT / candidate
+    if path.exists() and (path / "clusters").exists():
+        return path
+    return None
 
 
 @dataclass
@@ -107,6 +123,15 @@ def download_weights(
         >>> print(path)
     """
     package_id = _resolve_package_id(name)
+
+    # Prefer bundled weights shipped in the wheel — zero network, zero auth.
+    if not force:
+        bundled = _bundled_path(package_id)
+        if bundled is not None:
+            if verbose:
+                print(f"Using bundled weights at {bundled}")
+            return bundled
+
     return hub_download(package_id, force=force, quiet=not verbose)
 
 
@@ -223,6 +248,9 @@ def get_weights_path(name: str = "default") -> Path:
         Path to the weights directory (may not exist if not downloaded).
     """
     package_id = _resolve_package_id(name)
+    bundled = _bundled_path(package_id)
+    if bundled is not None:
+        return bundled
     return hub_path(package_id)
 
 

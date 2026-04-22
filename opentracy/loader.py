@@ -238,6 +238,35 @@ def _load_python_router(
     return router
 
 
+class _GoRegistryView:
+    """Minimal registry shim over the Go engine's /v1/models endpoint.
+
+    Mirrors the subset of :class:`LLMRegistry` that user-facing code reads —
+    ``get_model_ids()`` and ``len()`` — so snippets written against the Python
+    backend work unchanged when ``engine='go'``. Model list is fetched lazily
+    and cached; call :meth:`refresh` to refetch.
+    """
+
+    def __init__(self, engine):
+        self._engine = engine
+        self._model_ids: Optional[List[str]] = None
+
+    def _load(self) -> List[str]:
+        if self._model_ids is None:
+            resp = self._engine.models()
+            self._model_ids = [m["model_id"] for m in resp.get("models", [])]
+        return self._model_ids
+
+    def refresh(self) -> None:
+        self._model_ids = None
+
+    def get_model_ids(self) -> List[str]:
+        return list(self._load())
+
+    def __len__(self) -> int:
+        return len(self._load())
+
+
 class GoBackedRouter:
     """
     Router backed by the Go engine.
@@ -256,11 +285,25 @@ class GoBackedRouter:
         self.cost_weight = cost_weight
         self.allowed_models = allowed_models
         self._stats = RoutingStats()
+        self._registry_cache: Optional["_GoRegistryView"] = None
 
     @property
     def stats(self) -> RoutingStats:
         """Return routing statistics."""
         return self._stats
+
+    @property
+    def registry(self) -> "_GoRegistryView":
+        """Return a registry-like view so code written for the Python backend
+        (``router.registry.get_model_ids()``) keeps working on the Go backend.
+        """
+        if self._registry_cache is None:
+            self._registry_cache = _GoRegistryView(self._engine)
+        return self._registry_cache
+
+    def get_model_ids(self) -> List[str]:
+        """Return all model IDs the engine has profiles for."""
+        return self.registry.get_model_ids()
 
     def reset_stats(self) -> None:
         """Reset routing statistics."""

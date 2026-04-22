@@ -148,6 +148,14 @@ async def _run_pipeline(
 
         repo.append_log(tenant_id, job_id, "Phase 3 complete: adapter saved")
 
+        # Record the adapter path BEFORE attempting GGUF export — if export
+        # fails (missing llama.cpp, OOM, etc.) the adapter is still usable
+        # and callers like ``ot.distill()`` can fall back to it.
+        repo.update_job(
+            tenant_id, job_id,
+            {"artifacts": {"adapter_path": adapter_dir}},
+        )
+
         if config.export_gguf:
             repo.update_job_status(tenant_id, job_id, phase="export")
             repo.append_log(tenant_id, job_id, "Phase 4/4: Export (subprocess)")

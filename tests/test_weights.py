@@ -81,15 +81,22 @@ class TestGetWeightsPath:
 
 
 class TestDownloadWeights:
+    @patch("opentracy.weights._bundled_path", return_value=None)
     @patch("opentracy.weights.hub_download")
-    def test_calls_hub_download(self, mock_download):
+    def test_calls_hub_download(self, mock_download, _mock_bundled):
         mock_download.return_value = Path("/fake/path")
         result = download_weights("default", verbose=True)
         mock_download.assert_called_once_with("weights-default", force=False, quiet=False)
         assert result == Path("/fake/path")
 
+    @patch("opentracy.weights._bundled_path", return_value=None)
     @patch("opentracy.weights.hub_download")
-    def test_force_redownload(self, mock_download):
+    def test_force_redownload(self, mock_download, _mock_bundled):
         mock_download.return_value = Path("/fake/path")
         download_weights("mmlu-v1", force=True)
         mock_download.assert_called_once_with("weights-mmlu-v1", force=True, quiet=False)
+
+    def test_returns_bundled_path_when_available(self):
+        path = download_weights("default", verbose=False)
+        assert path.exists()
+        assert (path / "clusters").exists()

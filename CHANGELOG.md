@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-22
+
+### Fixed
+
+- **`ot.load_router()` no longer hits HuggingFace for the default pack.**
+  `opentracy/weights.py` now resolves the wheel-bundled
+  `weights-mmlu-v1/` directory before falling back to the hub, closing the
+  `401 Unauthorized` / `Repository Not Found` loop users hit when the
+  private `diogovieira/opentracy-weights` repo wasn't reachable.
+- **`GoBackedRouter.registry` is no longer missing.** Added a
+  `_GoRegistryView` shim over the engine's `/v1/models` endpoint so
+  snippets written for the Python backend (e.g.
+  `router.registry.get_model_ids()`) work unchanged on the Go default.
+- **`GoEngine.url` alias** added — notebooks were calling
+  `engine.url` but the class only exposed `base_url`, 500'ing at
+  notebook-02's inline-engine cell.
+- **`ot.distill()` works inside Jupyter.** `_run_coro_sync()` helper spins
+  a worker thread with a fresh event loop when called from a running loop
+  (IPython kernel) and uses `asyncio.run()` otherwise. The old direct
+  `asyncio.run(...)` call inside `distill()` raised
+  `RuntimeError: asyncio.run() cannot be called from a running event loop`
+  in any notebook.
+- **`_InMemoryRepo` covers the pipeline's full surface** — `insert_candidates`,
+  `insert_candidate` (upsert), `get_candidates`, `record_training_metric`,
+  `get_latest_metric`, `list_metrics`, `list_candidates`. The shim used to
+  be no-op-only; curation read back zero candidates and phase 2 crashed.
+- **`trainer.py` / `export.py` `env` shadowing fixed.** A local
+  `env = {...}` dict (subprocess env) hid the module-level
+  `env()` lookup, raising
+  `UnboundLocalError: cannot access local variable 'env'` before the
+  training subprocess ever started. Renamed to `proc_env`.
+- **`DATA_DIR` is resolved at call time, not import time** in `trainer.py`,
+  `curation.py`, and `export.py`. Previously `ot.distill()` overrode
+  `OPENTRACY_DATA_DIR` via a context manager *after* these modules were
+  imported, so `DATA_DIR` stayed frozen at its default `Path("data")`
+  and the training subprocess tried to read
+  `data/distillation/<job>/train_config.json` that didn't exist.
+- **Graceful GGUF-export fallback.** If phase 4 (`llama.cpp` conversion)
+  fails but the adapter was trained successfully, `ot.distill()` returns
+  a PEFT-backed `Student` instead of raising `DistillError`. Adapter
+  lives on disk at `{out_dir}/distillation/{job_id}/adapter/` and is
+  recorded in `artifacts["adapter_path"]` before export is attempted.
+- **`Student._load_peft()` preflight for `jinja2>=3.1`.** A stale
+  `jinja2==3.0.x` in the active interpreter (common when a `uvicorn` on
+  PATH picks up a different Python than the one that has `opentracy`
+  installed) used to surface as an unreadable stacktrace deep inside
+  `transformers.apply_chat_template`. Now raises a `StudentError` with
+  the exact `pip install` command for the correct interpreter.
+
+### Added
+
+- **`ot.distill()` preflight** — verifies `torch` + CUDA visibility
+  before running data-generation / curation, so a misconfigured env
+  fails fast instead of burning teacher / judge API spend and then
+  dying in phase 3.
+- **`torch>=2.1.0` pinned explicitly in `[distill]` extras** (was a
+  transitive dep via unsloth/trl/peft). Silent install failures in any
+  of those used to leave users with a half-installed env; now
+  `pip install opentracy[distill]` fails loudly if torch can't install.
+
+### Changed
+
+- **Notebook `03_semantic_routing.ipynb` cell-4**: engine URL example
+  corrected from `:3000` (dashboard nginx, returns 405 on POST
+  `/v1/chat/completions`) to `:8080` (engine API), with an explicit
+  comment about the distinction.
+- **Notebooks 01 / 02 / 06** — consistent `:8080` vs `:3000`
+  explanatory comments; `01_quickstart`'s
+  `OPENTRACY_ENGINE_URL=http://localhost:8080` re-commented to match
+  the notebook's "no server, no Docker" narrative.
+- **Notebook `05_distillation.ipynb` rewritten** — replaces the old
+  `Distiller` HTTP-client flow (which called non-existent methods like
+  `upload_dataset()` and `register_model()` and spawned `uvicorn
+  opentracy.api.server:app`) with the one-call `ot.distill()` + 
+  `student.deploy()` path. ~19 cells vs. the previous 26. Progress
+  callback emits phase transitions + log lines.
+- **Notebook `06_distilled_inference.ipynb` rewritten** around
+  `opentracy.Student`, `ot.set_alias` / `student.deploy`,
+  `ot.completion(model=alias)` dispatch. Removed references to the
+  non-existent `OpenTracy/demo-ticket-classifier-v1` HF repo. Added
+  a **serve-via-FastAPI** section that writes a minimal
+  OpenAI-compatible endpoint to `serve.py` and prints a copy-paste-safe
+  launch + curl command (single-line, uses `sys.executable -m uvicorn`
+  to avoid Python-version drift).
+
+## [0.3.1] - 2026-03-XX
+
 ### Added
 
 - **Default routing weights bundled in the wheel** (`weights-mmlu-v1`, 288 KB,

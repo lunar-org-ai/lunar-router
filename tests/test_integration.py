@@ -348,13 +348,16 @@ class TestHubIntegration:
         assert not pkg_dir.exists()
 
     def test_weights_path_consistency(self):
-        """get_weights_path aliases should resolve to hub paths."""
+        """get_weights_path aliases should resolve — with bundled weights
+        shipped in the wheel, ``default`` is an alias for ``mmlu-v1`` and
+        both land on the same on-disk bundle."""
         path_default = get_weights_path("default")
         path_mmlu = get_weights_path("mmlu-v1")
 
-        assert "weights-default" in str(path_default)
+        # Both aliases must resolve to the bundled weights-mmlu-v1 directory.
+        assert "weights-mmlu-v1" in str(path_default)
         assert "weights-mmlu-v1" in str(path_mmlu)
-        assert path_default != path_mmlu
+        assert path_default == path_mmlu
 
 
 # ── Real SentenceTransformers (skipped if not installed) ──────────────────────
