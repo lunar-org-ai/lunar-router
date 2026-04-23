@@ -45,7 +45,15 @@ def build_server() -> FastMCP:
     Kept as a function (not module-level execution) so tests and both
     transport entry points use the exact same server configuration.
     """
-    server = FastMCP(SERVER_NAME, instructions=SERVER_INSTRUCTIONS)
+    # `streamable_http_path="/"` is important: FastMCP defaults this to
+    # `/mcp`, which combined with the FastAPI `app.mount("/mcp", ...)`
+    # would produce an external URL of `/mcp/mcp`. Override to `/` so
+    # clients can connect at the expected `http://host/mcp/`.
+    server = FastMCP(
+        SERVER_NAME,
+        instructions=SERVER_INSTRUCTIONS,
+        streamable_http_path="/",
+    )
     _register_objective_tools(server)
     _register_ledger_tools(server)
     _register_catalog_tools(server)
