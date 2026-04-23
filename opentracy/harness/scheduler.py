@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .memory_store import MemoryEntry, MemoryStore, get_memory_store
+from .ledger import get_ledger_store
 from .trace_scanner import TraceScanner
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,7 @@ class ScanScheduler:
         scanner = TraceScanner(
             engine_url=self.engine_url,
             memory_store=self.memory_store,
+            ledger=get_ledger_store(),
         )
 
         logger.info(f"Scheduled scan {scan_id} starting...")

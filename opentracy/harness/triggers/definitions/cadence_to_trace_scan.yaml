@@ -1,0 +1,14 @@
+id: cadence_to_trace_scan
+description: >
+  Periodic heartbeat: when the cadence sensor fires for any objective,
+  run the trace_scan_and_evaluate recipe. This is the canonical Step 3
+  end-to-end flow from the harness redesign plan.
+
+match:
+  signal_tags: [cadence]
+
+dispatch:
+  recipe: trace_scan_and_evaluate
+
+budget:
+  max_per_day: 6

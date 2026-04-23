@@ -1,0 +1,19 @@
+id: cluster_and_label
+description: >
+  Triggered when the new-traces threshold is crossed. Runs the
+  clustering pipeline, which internally calls cluster_labeler,
+  coherence_scorer, and outlier_detector agents per cluster as part of
+  the pipeline's inline flow. The action wrapper reports cluster
+  counts and silhouette back to the ledger for the dashboard.
+
+budget:
+  # Clustering embeds + labels N clusters via LLM. Cap per-invocation
+  # cost generously — the per-day cap on the policy is the real
+  # rate-limiter.
+  max_cost_usd: 5.0
+
+steps:
+  - id: cluster
+    type: action
+    action: run_clustering
+    input: "auto"

@@ -1,0 +1,17 @@
+id: latency_drift_to_trace_scanner
+description: >
+  When p95 latency regresses past its guardrail, kick off a trace scan
+  to isolate which model/request pattern is dragging the tail.
+
+match:
+  signal_tags: [objective_regression]
+  objective_id: p95_latency_ms
+
+dispatch:
+  agent: trace_scanner
+  parameters:
+    days: 1
+    limit: 200
+
+budget:
+  max_per_day: 6

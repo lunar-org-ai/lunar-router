@@ -14,6 +14,7 @@ const DatasetDetail = lazy(
 );
 const Evaluations = lazy(() => import('@/features/evaluations'));
 const DistillJobs = lazy(() => import('@/views/DistillJobs'));
+const Harness = lazy(() => import('@/features/harness/HarnessPage'));
 const NewDistillationJob = lazy(() => import('@/views/NewDistillationJob'));
 const DistillationJobView = lazy(() => import('@/views/DistillationJobView'));
 const DistillationResults = lazy(() => import('@/views/DistillationResults'));
@@ -22,7 +23,7 @@ export function AppRoutes() {
   return (
     <Suspense fallback={<FullScreenSpinner />}>
       <Routes>
-        <Route index element={<Navigate to="traces" replace />} />
+        <Route index element={<Navigate to="/traces" replace />} />
 
         <Route element={<AppLayout />}>
           <Route path="traces" element={<Traces />} />
@@ -40,9 +41,10 @@ export function AppRoutes() {
           <Route path="distill-metrics" element={<Evaluations />} />
           <Route path="production" element={<Production />} />
           <Route path="deployments" element={<Navigate to="/production" replace />} />
+          <Route path="harness" element={<Harness />} />
         </Route>
 
-        <Route path="*" element={<Navigate to="traces" replace />} />
+        <Route path="*" element={<Navigate to="/traces" replace />} />
       </Routes>
     </Suspense>
   );

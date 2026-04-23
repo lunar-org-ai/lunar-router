@@ -1,0 +1,18 @@
+id: domain_coverage_ratio
+description: >
+  Fraction of traces assigned to a known cluster (cluster_id != -1) over the
+  trailing window. Proxy for clustering pipeline coverage — drops signal that
+  new domains have appeared and clustering needs to re-run.
+compute_fn: opentracy.harness.objectives.compute:domain_coverage_ratio
+unit: ratio
+direction: higher_is_better
+baseline: null
+target: 0.85
+window_hours: 168       # 7d
+update_cadence: daily
+dimensions: []
+owner_agents:
+  - cluster_labeler
+guardrails:
+  - type: min_sample_size
+    min_n: 500

@@ -1,4 +1,14 @@
-import { Activity, Brain, Database, Layers, Route, BookOpen, Rocket, Sparkles } from 'lucide-react';
+import {
+  Activity,
+  Brain,
+  Database,
+  Layers,
+  Radar,
+  Route,
+  BookOpen,
+  Rocket,
+  Sparkles,
+} from 'lucide-react';
 import type { TabKey } from '../../types/tabs';
 
 export interface MenuItem {
@@ -91,6 +101,13 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/traces',
         icon: <Route size={20} />,
         description: 'View routing & inference traces',
+      },
+      {
+        label: 'Harness',
+        value: 'harness',
+        path: '/harness',
+        icon: <Radar size={20} />,
+        description: 'Objectives, causal ledger & agents',
       },
     ],
   },

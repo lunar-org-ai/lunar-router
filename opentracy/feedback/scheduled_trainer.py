@@ -87,8 +87,12 @@ class ScheduledTrainer:
         self._advisor = None
         if config.use_advisor:
             try:
+                from ..harness.ledger import get_ledger_store
                 from ..harness.training_advisor import TrainingAdvisor
-                self._advisor = TrainingAdvisor(engine_url=config.engine_url)
+                self._advisor = TrainingAdvisor(
+                    engine_url=config.engine_url,
+                    ledger=get_ledger_store(),
+                )
             except Exception as e:
                 logger.warning(f"Could not initialize TrainingAdvisor: {e}")
 

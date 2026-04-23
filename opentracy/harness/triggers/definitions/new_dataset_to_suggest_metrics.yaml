@@ -1,0 +1,16 @@
+id: new_dataset_to_suggest_metrics
+description: >
+  When a new clustering run lands, propose evaluation metrics for the
+  freshly-discovered domain datasets. Matches the plan's
+  `new_dataset → suggest_metrics` policy.
+
+match:
+  signal_tags: [new_dataset]
+
+dispatch:
+  recipe: suggest_metrics
+
+budget:
+  # One suggestion pass per clustering run is typical — clustering
+  # runs are already rate-limited to daily, so 2/day covers reruns.
+  max_per_day: 2

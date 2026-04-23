@@ -1,0 +1,17 @@
+id: new_traces_to_cluster_and_label
+description: >
+  When enough fresh traces have accumulated since the last clustering
+  run, re-cluster so domain coverage stays current. Tied to the
+  domain_coverage_ratio objective — new traffic patterns that aren't
+  captured in existing clusters reduce coverage.
+
+match:
+  signal_tags: [new_traces_threshold]
+
+dispatch:
+  recipe: cluster_and_label
+
+budget:
+  # Clustering is expensive and idempotent within a short window.
+  # Once per day is enough for Phase 1; can be relaxed later.
+  max_per_day: 1

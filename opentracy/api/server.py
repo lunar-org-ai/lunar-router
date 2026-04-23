@@ -147,6 +147,30 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"TrainingManager init failed: {e}")
 
+    # Start trigger engine loop if enabled. This is the Step 3 end-to-end
+    # driver: periodic cadence sensors → policies → recipes → ledger
+    # entries. Gated so dev/test environments don't accidentally incur
+    # LLM costs on every FastAPI reload.
+    trigger_loop = None
+    if os.getenv("OPENTRACY_TRIGGER_ENGINE_ENABLED", "false").lower() == "true":
+        try:
+            from ..harness.runner import AgentRunner
+            from ..harness.triggers import TriggerEngineLoop
+
+            interval = float(os.getenv("OPENTRACY_TRIGGER_ENGINE_INTERVAL_SECONDS", "60"))
+            trigger_loop = TriggerEngineLoop(
+                agent_runner=AgentRunner(record_memory=False),
+                interval_seconds=interval,
+            )
+            await trigger_loop.start()
+            logger.info(
+                "TriggerEngineLoop started on lifespan "
+                f"(OPENTRACY_TRIGGER_ENGINE_ENABLED=true, interval={interval}s)"
+            )
+        except Exception as e:
+            logger.warning(f"TriggerEngineLoop start failed: {e}")
+            trigger_loop = None
+
     # Cleanup stale vLLM deployments from previous runs
     try:
         from ..deployment.manager import cleanup_stale_deployments
@@ -169,6 +193,11 @@ async def lifespan(app: FastAPI):
             training_manager.stop_scheduled()
         except Exception as e:
             logger.debug(f"TrainingManager stop error: {e}")
+    if trigger_loop is not None:
+        try:
+            await trigger_loop.stop()
+        except Exception as e:
+            logger.debug(f"TriggerEngineLoop stop error: {e}")
     logger.info("UniRoute API shutting down...")
 
 
@@ -312,6 +341,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Mount the harness MCP server under /mcp when explicitly enabled.
+# Same `build_server()` used by the stdio entry point drives this, so
+# production ops + contributor local dev share one tool surface.
+if os.getenv("OPENTRACY_MCP_HTTP_ENABLED", "false").lower() == "true":
+    try:
+        from ..harness.mcp_server import build_server as _build_mcp_server
+
+        _mcp_server = _build_mcp_server()
+        app.mount("/mcp", _mcp_server.streamable_http_app())
+        logger.info(
+            "MCP HTTP transport mounted at /mcp "
+            "(OPENTRACY_MCP_HTTP_ENABLED=true)"
+        )
+    except Exception as e:
+        logger.warning(f"MCP HTTP mount failed: {e}")
 
 
 @app.exception_handler(Exception)
@@ -655,6 +701,144 @@ async def delete_memory_entry(entry_id: str):
     if not store.delete(entry_id):
         raise HTTPException(status_code=404, detail=f"Memory entry '{entry_id}' not found")
     return {"deleted": True, "id": entry_id}
+
+
+# --- Harness Objectives + Ledger (dashboard read-side) ---
+#
+# These endpoints exist so the HarnessPage UI can answer one question:
+# "why did objective X move?" Everything here reads; nothing mutates.
+# Writes happen via the trigger engine and the schedulers.
+
+
+@app.get("/v1/harness/objectives", tags=["harness"])
+async def list_harness_objectives():
+    """List all user-declared objectives with their YAML definitions."""
+    from ..harness.objectives.loader import load_all
+
+    objectives = load_all()
+    return {
+        "objectives": [o.model_dump() for o in objectives],
+        "count": len(objectives),
+    }
+
+
+@app.get("/v1/harness/objectives/{objective_id}/time-series", tags=["harness"])
+async def get_objective_time_series(objective_id: str, hours: int = 168):
+    """Return measurements + action markers for one objective in a
+    trailing window. Split the result client-side: `measurements` is
+    the line on the plot; `markers` are the clickable dots on the
+    x-axis (signals, decisions, actions — events worth drawing
+    attention to).
+
+    `hours` default is 168 (7 days). Capped at a month so a bad caller
+    can't pull the whole ledger.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from ..harness.ledger import get_ledger_store
+
+    hours_capped = max(1, min(hours, 24 * 30))
+    start_iso = (datetime.now(timezone.utc) - timedelta(hours=hours_capped)).isoformat()
+
+    store = get_ledger_store()
+    window_entries = store.time_series(objective_id, start=start_iso, limit=5000)
+
+    measurements = []
+    markers = []
+    for entry in window_entries:
+        if entry.type == "observation" and "measurement" in entry.tags:
+            value = entry.data.get("value")
+            if value is None:
+                continue
+            measurements.append({
+                "ts": entry.ts,
+                "value": value,
+                "sample_size": entry.data.get("sample_size"),
+                "id": entry.id,
+            })
+        elif entry.type in {"signal", "decision", "action"}:
+            # These are the events the user cares to drill into. Runs
+            # and non-measurement observations are omitted to keep
+            # markers meaningful — too many dots erases the signal.
+            markers.append(entry.model_dump())
+
+    return {
+        "objective_id": objective_id,
+        "window_hours": hours_capped,
+        "measurements": measurements,
+        "markers": markers,
+    }
+
+
+@app.get("/v1/harness/ledger", tags=["harness"])
+async def list_ledger_entries(
+    type: str = "",
+    objective_id: str = "",
+    agent: str = "",
+    limit: int = 100,
+):
+    """List recent ledger entries, newest first. Filters compose with
+    AND; empty strings are wildcards. `limit` caps at 1000 so a bad
+    caller can't spin up a giant response."""
+    from ..harness.ledger import get_ledger_store
+
+    capped = max(1, min(limit, 1000))
+    store = get_ledger_store()
+    # Pull a superset so post-filtering has material to work with.
+    # 10x is a crude but effective safeguard against filter-heavy
+    # queries silently returning fewer rows than requested.
+    raw = store.recent(limit=capped * 10)
+    filtered = []
+    for e in raw:
+        if type and e.type != type:
+            continue
+        if objective_id and e.objective_id != objective_id:
+            continue
+        if agent and e.agent != agent:
+            continue
+        filtered.append(e)
+        if len(filtered) >= capped:
+            break
+    return {
+        "entries": [e.model_dump() for e in filtered],
+        "count": len(filtered),
+    }
+
+
+@app.get("/v1/harness/ledger/{entry_id}/chain", tags=["harness"])
+async def get_ledger_chain(entry_id: str):
+    """Return the full causal chain rooted at `entry_id`, in BFS order.
+    This is the primary drill-down the dashboard uses when the user
+    clicks an action marker on the objective plot."""
+    from ..harness.ledger import get_ledger_store
+
+    store = get_ledger_store()
+    root = store.get(entry_id)
+    if root is None:
+        raise HTTPException(
+            status_code=404, detail=f"Ledger entry '{entry_id}' not found"
+        )
+    chain = store.chain(entry_id)
+    return {
+        "root_id": entry_id,
+        "entries": [e.model_dump() for e in chain],
+        "count": len(chain),
+    }
+
+
+@app.get("/v1/harness/ledger/{entry_id}", tags=["harness"])
+async def get_ledger_entry(entry_id: str):
+    """Get a single ledger entry by id. Declared AFTER the /chain route
+    so FastAPI's path resolution prefers the more specific prefix."""
+    from ..harness.ledger import get_ledger_store
+
+    store = get_ledger_store()
+    entry = store.get(entry_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail=f"Ledger entry '{entry_id}' not found"
+        )
+    return entry.model_dump()
 
 
 # --- Trace Issues (Scan Now) ---

@@ -1,0 +1,21 @@
+id: cost_per_successful_completion
+description: >
+  Average USD cost per non-error completion over the trailing window.
+  Per-model breakdown. Drives student-distillation decisions.
+compute_fn: opentracy.harness.objectives.compute:cost_per_successful_completion
+unit: USD
+direction: lower_is_better
+baseline: null          # frozen on first compute, then stored by the loader
+target: 0.003
+window_hours: 168       # 7d
+update_cadence: hourly
+dimensions:
+  - selected_model
+owner_agents:
+  - training_advisor
+  - metrics_suggester
+guardrails:
+  - type: no_regression_worse_than_pct
+    threshold: 5
+  - type: min_sample_size
+    min_n: 200
