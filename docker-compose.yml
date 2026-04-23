@@ -102,6 +102,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       AUTO_OPERATOR: ${AUTO_OPERATOR:-false}
       AUTO_TRAINER: ${AUTO_TRAINER:-false}
+      # Phase 1 + 1.5 harness redesign — drives the trigger engine
+      # that populates the ledger, and exposes /mcp for Claude Code ops.
+      OPENTRACY_TRIGGER_ENGINE_ENABLED: ${OPENTRACY_TRIGGER_ENGINE_ENABLED:-true}
+      OPENTRACY_TRIGGER_ENGINE_INTERVAL_SECONDS: ${OPENTRACY_TRIGGER_ENGINE_INTERVAL_SECONDS:-60}
+      OPENTRACY_MCP_HTTP_ENABLED: ${OPENTRACY_MCP_HTTP_ENABLED:-true}
     volumes:
       - weights-data:/app/weights
       - opentracy-secrets:/root/.opentracy
