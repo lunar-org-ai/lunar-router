@@ -29,6 +29,14 @@
 
 Drop-in OpenAI-compatible SDK. Every request becomes a trace; traces become datasets; datasets become distilled custom models; the routing layer swaps those models in under your app via aliases — so your cost curve goes down over time **without code changes**.
 
+## Sponsors
+
+<p align="center">
+  <a href="https://sharpi.com">
+    <img src="assets/sponsors/sharpi.png" alt="Sharpi" height="80">
+  </a>
+</p>
+
 ## Try it in Colab (no install)
 
 Each notebook runs end-to-end on a free Colab runtime — bring your own OpenAI key, optionally Anthropic / Groq.
