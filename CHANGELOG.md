@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Azure OpenAI provider — Python SDK.** `ot.completion(model="azure/<deployment>", ...)`
+  and `ot.distill(teacher="azure/<deployment>", ...)` now route natively
+  through `openai.AzureOpenAI` / `openai.AsyncAzureOpenAI`. The endpoint is
+  read from `AZURE_OPENAI_ENDPOINT` (per-resource), the key from
+  `AZURE_OPENAI_API_KEY`, and the API version from
+  `AZURE_OPENAI_API_VERSION` (default `2024-10-21`). On Azure the model
+  string after `azure/` is the *deployment name* (whatever the user named
+  it in their resource), not the underlying model.
+- **Azure OpenAI provider — Go engine.** `go/internal/provider/azure.go`
+  implements `AzureProvider`: builds the per-deployment URL
+  (`{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}`),
+  uses the `api-key` header instead of `Authorization: Bearer`, and reuses
+  `OpenAIProvider.buildBody` since Azure accepts the same request schema.
+  Registered in `DefaultProviders()` and dispatched via `Format: "azure"`
+  in the registry. This is what makes `ot.distill` work end-to-end with
+  Azure (the teacher calls during distillation flow through the Go engine).
+- **Azure OpenAI in the integrations UI.** New entry in
+  `ui/src/constants/integrationModels.ts` so users can register an Azure
+  resource alongside the other providers (icon: `Azure` from
+  `@lobehub/icons`).
+
 ## [0.3.2] - 2026-04-22
 
 ### Fixed

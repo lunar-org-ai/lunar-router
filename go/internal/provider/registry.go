@@ -10,6 +10,10 @@ import (
 func DefaultProviders() []ProviderConfig {
 	return []ProviderConfig{
 		{Name: "openai", BaseURL: "https://api.openai.com/v1", APIKeyEnv: "OPENAI_API_KEY", Format: "openai"},
+		// Azure OpenAI: per-resource endpoint lives in AZURE_OPENAI_ENDPOINT (read
+		// at provider construction). BaseURL stays empty by default to make that
+		// explicit. Format "azure" routes to AzureProvider.
+		{Name: "azure", BaseURL: "", APIKeyEnv: "AZURE_OPENAI_API_KEY", Format: "azure"},
 		{Name: "anthropic", BaseURL: "https://api.anthropic.com", APIKeyEnv: "ANTHROPIC_API_KEY", Format: "anthropic"},
 		{Name: "groq", BaseURL: "https://api.groq.com/openai/v1", APIKeyEnv: "GROQ_API_KEY", Format: "openai"},
 		{Name: "mistral", BaseURL: "https://api.mistral.ai/v1", APIKeyEnv: "MISTRAL_API_KEY", Format: "openai"},
@@ -83,6 +87,8 @@ func NewRegistry(configs []ProviderConfig) *Registry {
 		switch cfg.Format {
 		case "anthropic":
 			p = NewAnthropicProvider(cfg)
+		case "azure":
+			p = NewAzureProvider(cfg)
 		case "bedrock":
 			p = NewBedrockProvider(cfg)
 		default:

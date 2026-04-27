@@ -1,6 +1,7 @@
 import {
   OpenAI,
   Anthropic,
+  Azure,
   DeepSeek,
   Mistral,
   Perplexity,
@@ -23,6 +24,7 @@ export type ProviderModel = {
 export const INTEGRATION_MODELS: ProviderModel[] = [
   { name: 'Anthropic', key: 'anthropic_api_key', icon: Anthropic },
   { name: 'AWS Bedrock', key: 'bedrock_api_key', icon: Bedrock },
+  { name: 'Azure OpenAI', key: 'azure_api_key', icon: Azure },
   { name: 'Cerebras', key: 'cerebras_api_key', icon: Cerebras },
   { name: 'Cohere', key: 'cohere_api_key', icon: Cohere },
   { name: 'DeepSeek', key: 'deepseek_api_key', icon: DeepSeek },

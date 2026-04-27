@@ -59,6 +59,10 @@ from opentracy._env import env, env_in_environ
 
 PROVIDERS: dict[str, dict[str, str]] = {
     "openai": {"base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY"},
+    # Azure OpenAI: endpoint is per-resource (lives in AZURE_OPENAI_ENDPOINT) and
+    # the request shape goes through the AzureOpenAI SDK client, not raw base_url.
+    # Resolved by _resolve_target / _send_via_azure_sdk below.
+    "azure": {"base_url": "", "api_key_env": "AZURE_OPENAI_API_KEY", "format": "azure"},
     "anthropic": {"base_url": "https://api.anthropic.com", "api_key_env": "ANTHROPIC_API_KEY", "format": "anthropic"},
     "groq": {"base_url": "https://api.groq.com/openai/v1", "api_key_env": "GROQ_API_KEY"},
     "mistral": {"base_url": "https://api.mistral.ai/v1", "api_key_env": "MISTRAL_API_KEY"},
@@ -415,7 +419,7 @@ async def acompletion(
     pass-through behave identically.
     """
     try:
-        from openai import AsyncOpenAI
+        from openai import AsyncOpenAI, AsyncAzureOpenAI
     except ImportError:
         raise ImportError("openai package required for async. Install: pip install openai")
 
@@ -434,7 +438,16 @@ async def acompletion(
                     extra=kwargs,
                 )
 
-                client = AsyncOpenAI(api_key=key, base_url=base_url, timeout=timeout)
+                if provider_name == "azure":
+                    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+                    client = AsyncAzureOpenAI(
+                        api_key=key,
+                        azure_endpoint=base_url,
+                        api_version=api_version,
+                        timeout=timeout,
+                    )
+                else:
+                    client = AsyncOpenAI(api_key=key, base_url=base_url, timeout=timeout)
                 start = time.time()
                 resp = await client.chat.completions.create(**body)
                 latency_ms = (time.time() - start) * 1000
@@ -487,6 +500,24 @@ def _resolve_target(
             "set LUNAR_ENGINE_URL to route via the OpenTracy engine, "
             "or pass force_engine=True."
         )
+
+    # Azure OpenAI is per-resource: the endpoint is unique to the user's Azure
+    # resource and lives in AZURE_OPENAI_ENDPOINT. There's no single fixed
+    # base_url to put in PROVIDERS, so we resolve it from env here.
+    if provider_name == "azure":
+        endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "")
+        if not endpoint:
+            raise ValueError(
+                "Azure OpenAI requires AZURE_OPENAI_ENDPOINT "
+                "(e.g. https://my-resource.openai.azure.com) or pass api_base=."
+            )
+        key = api_key or os.environ.get("AZURE_OPENAI_API_KEY", "")
+        if not key:
+            raise ValueError(
+                "No API key for azure. Set AZURE_OPENAI_API_KEY or pass api_key=."
+            )
+        return endpoint, key
+
     cfg = PROVIDERS.get(provider_name, {})
     base = cfg.get("base_url", "")
     if not base:
@@ -606,6 +637,16 @@ def _send_completion(
         extra=kwargs,
     )
 
+    # Azure has a dedicated SDK client (different constructor + api_version);
+    # the OpenAI-compatible base_url path doesn't apply.
+    if provider_name == "azure":
+        try:
+            return _send_via_azure_sdk(
+                base_url, key, body, timeout, provider_name, effective_model,
+            )
+        except ImportError:
+            pass
+
     # Try openai SDK first (better DX, handles retries, types)
     try:
         return _send_via_openai_sdk(
@@ -632,6 +673,33 @@ def _send_via_openai_sdk(
     latency_ms = (time.time() - start) * 1000
 
     return _wrap_response(resp, provider_name, model_name, latency_ms)
+
+
+def _send_via_azure_sdk(
+    azure_endpoint: str, api_key: str, body: dict[str, Any],
+    timeout: float, provider_name: str, deployment_name: str,
+) -> ModelResponse:
+    """Call Azure OpenAI via the AzureOpenAI client.
+
+    On Azure, ``model=`` in the request is the *deployment name* (whatever the
+    user named the deployment in their resource), not the underlying model.
+    The deployment string lives in ``body["model"]`` already because
+    ``_prepare_request`` puts ``effective_model`` (post-``parse_model``) there.
+    """
+    from openai import AzureOpenAI
+
+    api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+    client = AzureOpenAI(
+        api_key=api_key,
+        azure_endpoint=azure_endpoint,
+        api_version=api_version,
+        timeout=timeout,
+    )
+    start = time.time()
+    resp = client.chat.completions.create(**body)
+    latency_ms = (time.time() - start) * 1000
+
+    return _wrap_response(resp, provider_name, deployment_name, latency_ms)
 
 
 def _send_via_http(
@@ -682,6 +750,24 @@ def _stream_completion(
         stream=True, force_engine=force_engine, force_direct=force_direct,
         extra=kwargs,
     )
+
+    # Azure: use AzureOpenAI client (different constructor + api_version).
+    if _provider == "azure":
+        try:
+            from openai import AzureOpenAI
+            api_version = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-10-21")
+            client = AzureOpenAI(
+                api_key=key,
+                azure_endpoint=base_url,
+                api_version=api_version,
+                timeout=timeout,
+            )
+            stream = client.chat.completions.create(**body)
+            for chunk in stream:
+                yield StreamChunk(chunk.model_dump())
+            return
+        except ImportError:
+            pass
 
     # Prefer openai SDK for streaming (handles SSE parsing)
     try:
