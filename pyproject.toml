@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opentracy"
-version = "0.3.2"
+version = "0.3.3"
 description = "Auto-distillation layer for your LLM calls — drop-in OpenAI-compatible SDK that turns every request into training data for cheaper custom models."
 readme = "README.md"
 license = {text = "MIT"}
