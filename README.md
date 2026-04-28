@@ -18,7 +18,7 @@
     <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" height="28">
   </a>
   &nbsp;
-  <a href="https://discord.gg/a8G5pQEN">
+  <a href="https://discord.gg/7hYWVrr7">
     <img src="https://img.shields.io/badge/Join%20our%20Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Join Discord" height="28">
   </a>
   &nbsp;
