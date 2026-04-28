@@ -1,7 +1,7 @@
 ---
 name: training_advisor
 description: Analyzes production metrics and trace issues to decide when auto-training should be triggered
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.2
 max_tokens: 800
 output_schema:

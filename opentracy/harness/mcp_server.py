@@ -32,15 +32,20 @@ from mcp.server.fastmcp import FastMCP
 
 SERVER_NAME = "opentracy-harness"
 SERVER_INSTRUCTIONS = (
-    "Read-only access to the OpenTracy harness: objectives, ledger, "
+    "Read + write access to the OpenTracy harness: objectives, ledger, "
     "policies, recipes, actions, agents. Use `get_ledger_chain` for "
     "causal drill-down from any signal id. Use "
-    "`get_objective_time_series` to see how an objective has moved."
+    "`get_objective_time_series` to see how an objective has moved.\n\n"
+    "Write tools (`run_agent`, `propose_action`, `approve_proposal`, "
+    "`reject_proposal`, `record_outcome`) are gated through the "
+    "`budget_justifier` critic — every approved write also writes a "
+    "decision row to the ledger so the audit trail is intact. Inspector "
+    "agents skip the gate (read-only by convention)."
 )
 
 
 def build_server() -> FastMCP:
-    """Construct the MCP server with all read-only tools registered.
+    """Construct the MCP server with all tools (read + write) registered.
 
     Kept as a function (not module-level execution) so tests and both
     transport entry points use the exact same server configuration.
@@ -57,6 +62,7 @@ def build_server() -> FastMCP:
     _register_objective_tools(server)
     _register_ledger_tools(server)
     _register_catalog_tools(server)
+    _register_write_tools(server)
     return server
 
 
@@ -254,6 +260,94 @@ def _register_catalog_tools(server: FastMCP) -> None:
                 },
             })
         return out
+
+
+# ---------------------------------------------------------------------------
+# Write tools (Phase 1.5: critic-gated mutations)
+# ---------------------------------------------------------------------------
+
+
+def _register_write_tools(server: FastMCP) -> None:
+    @server.tool()
+    async def run_agent(
+        name: str,
+        input: str,
+        objective_id: Optional[str] = None,
+        use_tools: bool = False,
+    ) -> dict:
+        """Run a harness agent with `input`. Inspector agents execute
+        directly; proposers and critics are gated through the
+        `budget_justifier` critic, which writes a decision row to the
+        ledger before allowing the run. A rejected verdict skips the
+        run and returns the rationale. Pass `objective_id` so the
+        critic can read the relevant trend."""
+        from opentracy.harness import writes as harness_writes
+
+        return await harness_writes.run_agent_gated(
+            name,
+            input,
+            objective_id=objective_id,
+            use_tools=use_tools,
+        )
+
+    @server.tool()
+    async def propose_action(
+        kind: str,
+        payload: dict,
+        summary: str = "",
+        objective_id: Optional[str] = None,
+    ) -> dict:
+        """Create a proposal for an action that should run later. The
+        critic runs immediately and the verdict is stored on the
+        proposal so an operator (or Phase 2 auto-research) can approve
+        or reject without re-asking the critic. Returns the new
+        proposal_id and the verdict."""
+        from opentracy.harness import writes as harness_writes
+
+        return await harness_writes.propose_action(
+            kind=kind,
+            payload=payload or {},
+            objective_id=objective_id,
+            summary=summary,
+        )
+
+    @server.tool()
+    async def approve_proposal(proposal_id: str) -> dict:
+        """Approve a pending proposal. Re-runs the critic — guards
+        against the objective recovering between propose and approve.
+        On reject, the proposal is closed without execution."""
+        from opentracy.harness import writes as harness_writes
+
+        return await harness_writes.approve_proposal(proposal_id)
+
+    @server.tool()
+    def reject_proposal(proposal_id: str, reason: str = "") -> dict:
+        """Reject a proposal. No critic re-check — manual rejection is
+        always permitted."""
+        from opentracy.harness import writes as harness_writes
+
+        return harness_writes.reject_proposal(proposal_id, reason=reason)
+
+    @server.tool()
+    def record_outcome(
+        proposal_id: str,
+        result: dict,
+        outcome: str,
+    ) -> dict:
+        """Record the outcome of an approved proposal that was actually
+        executed. `outcome` must be one of: ok, failed, rolled_back,
+        skipped. No critic check — this records reality."""
+        from opentracy.harness import writes as harness_writes
+
+        if outcome not in {"ok", "failed", "rolled_back", "skipped"}:
+            raise ValueError(
+                f"outcome must be ok|failed|rolled_back|skipped, got {outcome!r}"
+            )
+        return harness_writes.record_outcome(
+            proposal_id,
+            result=result or {},
+            outcome=outcome,  # type: ignore[arg-type]
+        )
 
 
 # ---------------------------------------------------------------------------

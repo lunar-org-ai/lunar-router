@@ -1,7 +1,7 @@
 ---
 name: eval_generator
 description: Generates evaluation test cases from detected trace issues for regression testing
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.2
 max_tokens: 800
 output_schema:

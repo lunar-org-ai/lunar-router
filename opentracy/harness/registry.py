@@ -31,7 +31,7 @@ class AgentConfig:
 
     name: str
     description: str = ""
-    model: str = "mistral-small-latest"
+    model: str = "anthropic/claude-haiku-4-5"
     temperature: float = 0.1
     max_tokens: int = 500
     output_schema: OutputSchema = field(default_factory=OutputSchema)
@@ -81,7 +81,7 @@ def _parse_agent_file(path: Path) -> AgentConfig:
     return AgentConfig(
         name=meta.get("name", path.stem),
         description=meta.get("description", ""),
-        model=meta.get("model", "mistral-small-latest"),
+        model=meta.get("model", "anthropic/claude-haiku-4-5"),
         temperature=meta.get("temperature", 0.1),
         max_tokens=meta.get("max_tokens", 500),
         output_schema=schema,

@@ -1,7 +1,7 @@
 ---
 name: budget_justifier
 description: Critic that decides whether a proposed action is worth its cost given the current objective's trajectory.
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.1
 max_tokens: 400
 output_schema:

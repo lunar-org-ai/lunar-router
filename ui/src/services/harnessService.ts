@@ -109,6 +109,69 @@ export interface ObjectiveTimeSeries {
 }
 
 // ---------------------------------------------------------------------------
+// Proposals (Phase 1.5 — operator surface for write paths)
+// ---------------------------------------------------------------------------
+
+export type ProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'rejected_by_critic'
+  | 'executed'
+  | 'failed';
+
+export interface CriticVerdict {
+  decision: 'approve' | 'reject';
+  rationale: string;
+  estimated_cost_usd: number;
+  estimated_benefit: string;
+  decision_entry_id: string;
+}
+
+/**
+ * A proposal is a `type='proposal'` ledger row. Status is computed
+ * server-side by walking children for a `proposal_resolved` decision
+ * tag. The verdict that gated the proposal is stored under `data`.
+ */
+export interface Proposal extends LedgerEntry {
+  status: ProposalStatus;
+}
+
+export interface ProposalFilters {
+  status?: ProposalStatus | '';
+  objective_id?: string;
+  limit?: number;
+}
+
+export interface ApproveResult {
+  proposal_id: string;
+  decision: 'approved' | 'rejected';
+  decision_entry_id: string;
+  verdict?: CriticVerdict;
+}
+
+// ---------------------------------------------------------------------------
+// Setup status (drives the in-product Setup Guide)
+// ---------------------------------------------------------------------------
+
+export interface HarnessSetupStatus {
+  configured_providers: string[];
+  required_providers: string[];
+  missing_providers: string[];
+  critic: {
+    agent: string;
+    model: string | null;
+    provider: string | null;
+    ready: boolean;
+  };
+  mcp: {
+    transport: 'http';
+    path: string;
+    name: string;
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -191,6 +254,69 @@ export function useHarnessService() {
     [],
   );
 
+  const listProposals = useCallback(
+    async (filters: ProposalFilters = {}): Promise<Proposal[]> => {
+      const params = new URLSearchParams();
+      if (filters.status) params.set('status', filters.status);
+      if (filters.objective_id) params.set('objective_id', filters.objective_id);
+      params.set('limit', String(filters.limit ?? 100));
+      const res = await fetch(`${BASE}/v1/harness/proposals?${params.toString()}`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return data.proposals || [];
+    },
+    [],
+  );
+
+  const getProposal = useCallback(async (id: string): Promise<Proposal | null> => {
+    const res = await fetch(`${BASE}/v1/harness/proposals/${id}`);
+    if (!res.ok) return null;
+    return res.json();
+  }, []);
+
+  const approveProposal = useCallback(async (id: string): Promise<ApproveResult> => {
+    const res = await fetch(`${BASE}/v1/harness/proposals/${id}/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!res.ok) throw new Error(`approve failed: ${res.status}`);
+    return res.json();
+  }, []);
+
+  const rejectProposal = useCallback(
+    async (id: string, reason = ''): Promise<ApproveResult> => {
+      const res = await fetch(`${BASE}/v1/harness/proposals/${id}/reject`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      if (!res.ok) throw new Error(`reject failed: ${res.status}`);
+      return res.json();
+    },
+    [],
+  );
+
+  const getSetupStatus = useCallback(async (): Promise<HarnessSetupStatus | null> => {
+    const res = await fetch(`${BASE}/v1/harness/setup-status`);
+    if (!res.ok) return null;
+    return res.json();
+  }, []);
+
+  const saveProviderKey = useCallback(
+    async (provider: string, apiKey: string): Promise<void> => {
+      const res = await fetch(`${BASE}/v1/secrets/${provider}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ api_key: apiKey }),
+      });
+      if (!res.ok) {
+        const detail = await res.text();
+        throw new Error(`save key failed (${res.status}): ${detail}`);
+      }
+    },
+    [],
+  );
+
   // Memoize the returned object so `service` has stable identity across
   // renders. Without this, every parent re-render produced a new `service`
   // object; any `useEffect(..., [service])` or `useCallback(..., [service])`
@@ -206,6 +332,12 @@ export function useHarnessService() {
       getLedgerEntry,
       getChain,
       getObjectiveTimeSeries,
+      listProposals,
+      getProposal,
+      approveProposal,
+      rejectProposal,
+      getSetupStatus,
+      saveProviderKey,
     }),
     [
       listAgents,
@@ -216,6 +348,12 @@ export function useHarnessService() {
       getLedgerEntry,
       getChain,
       getObjectiveTimeSeries,
+      listProposals,
+      getProposal,
+      approveProposal,
+      rejectProposal,
+      getSetupStatus,
+      saveProviderKey,
     ],
   );
 }

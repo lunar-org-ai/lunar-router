@@ -50,8 +50,8 @@ class ClusteringPipeline:
     def __init__(
         self,
         strategy: str = "auto",
-        llm_provider: str = "mistral",
-        llm_model: str = "mistral-small-latest",
+        llm_provider: str = "anthropic",
+        llm_model: str = "claude-haiku-4-5",
         engine_url: str = "http://localhost:8080",
         thresholds: Optional[QualityThresholds] = None,
     ):

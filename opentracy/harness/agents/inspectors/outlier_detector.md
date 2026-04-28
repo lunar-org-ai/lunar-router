@@ -1,7 +1,7 @@
 ---
 name: outlier_detector
 description: Identifies prompts that don't belong in a cluster
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.1
 max_tokens: 300
 output_schema:

@@ -654,27 +654,44 @@ async def get_harness_agent(name: str):
 
 @app.post("/v1/harness/run/{name}", tags=["harness"])
 async def run_harness_agent(name: str, body: dict):
-    """Run a harness agent with user_input and optional context."""
+    """Run a harness agent.
+
+    Inspector agents (read-only by convention) execute directly.
+    Proposers and critics flow through `writes.run_agent_gated`, which
+    fires a `budget_justifier` critic check and writes both the
+    decision and the run rows to the ledger. Pass `objective_id` so
+    the critic can read the relevant trend; without it the critic still
+    runs but with empty objective context.
+    """
     from ..harness.runner import AgentRunner
     from ..harness.memory_store import get_memory_store
+    from ..harness import writes as harness_writes
 
     record = body.get("record_memory", False)
-    store = get_memory_store() if record else None
+    memory = get_memory_store() if record else None
 
-    runner = AgentRunner(memory_store=store, record_memory=record)
+    runner = AgentRunner(memory_store=memory, record_memory=record)
     user_input = body.get("input", body.get("user_input", ""))
     context = body.get("context", {})
     use_tools = body.get("use_tools", False)
+    objective_id = body.get("objective_id")
 
     if not user_input:
         raise HTTPException(status_code=400, detail="input is required")
 
-    if use_tools:
-        result = await runner.run_with_tools(name, user_input)
-    else:
-        result = await runner.run(name, user_input, context)
+    gated = await harness_writes.run_agent_gated(
+        name,
+        user_input,
+        objective_id=objective_id,
+        use_tools=use_tools,
+        context=context if context else None,
+        runner=runner,
+    )
 
-    return {"agent": name, "result": result}
+    if gated["decision"] == "rejected":
+        return {"agent": name, "gated": gated}
+
+    return {"agent": name, "result": gated["result"], "gated": gated}
 
 
 # --- Harness Memory ---
@@ -869,6 +886,193 @@ async def get_ledger_entry(entry_id: str):
             status_code=404, detail=f"Ledger entry '{entry_id}' not found"
         )
     return entry.model_dump()
+
+
+# --- Harness Setup Status (Phase 1.5: drives the in-product Setup Guide) ---
+
+
+@app.get("/v1/harness/setup-status", tags=["harness"])
+async def harness_setup_status():
+    """Snapshot of everything the UI Setup Guide cares about.
+
+    The page renders three steps (Connect Claude Code, Add provider key,
+    Verify). This endpoint says which of those are already satisfied so
+    the UI can show ✓ vs ⏳ without the user having to know the
+    underlying APIs. Cheap to call — no LLM, just a few lookups.
+    """
+    from ..harness.registry import AgentRegistry
+    from ..storage.secrets import list_configured_providers
+
+    configured = list_configured_providers() or []
+    configured_set = {p.lower() for p in configured}
+
+    # Distinct providers the *agents* need. If the harness ships a
+    # mistral-pinned critic and an anthropic-pinned proposer, both
+    # appear here so the UI can prompt for whichever is missing.
+    required: set[str] = set()
+    for agent in AgentRegistry().list_agents():
+        model = (agent.model or "").lower()
+        if "/" in model:
+            provider = model.split("/", 1)[0]
+            required.add(provider)
+
+    # The "critic" is the gating agent. Surface its provider explicitly
+    # because it determines whether write paths can do anything at all.
+    critic_provider = None
+    critic_cfg = AgentRegistry().get("budget_justifier")
+    if critic_cfg and "/" in (critic_cfg.model or ""):
+        critic_provider = critic_cfg.model.split("/", 1)[0].lower()
+
+    return {
+        "configured_providers": sorted(configured_set),
+        "required_providers": sorted(required),
+        "missing_providers": sorted(required - configured_set),
+        "critic": {
+            "agent": "budget_justifier",
+            "model": critic_cfg.model if critic_cfg else None,
+            "provider": critic_provider,
+            "ready": critic_provider in configured_set if critic_provider else False,
+        },
+        "mcp": {
+            "transport": "http",
+            # Path the client needs; UI prepends its own origin so the
+            # copyable command points at whatever host the browser used.
+            "path": "/mcp/",
+            "name": "opentracy-harness",
+        },
+    }
+
+
+# --- Harness Proposals (Phase 1.5: operator surface for write paths) ---
+#
+# Proposals are stored as `type="proposal"` ledger rows. Status (pending /
+# approved / rejected / executed / failed) is derived per-row by walking
+# children — no separate proposals table. Every approve/reject path goes
+# through `harness.writes`, which gates writes through `budget_justifier`.
+
+
+@app.get("/v1/harness/proposals", tags=["harness"])
+async def list_harness_proposals(
+    status: str = "",
+    objective_id: str = "",
+    limit: int = 100,
+):
+    """List proposals newest-first with optional status filter.
+
+    Valid statuses: pending, approved, rejected, rejected_by_critic,
+    executed, failed. Empty status returns all.
+    """
+    from ..harness import writes as harness_writes
+
+    valid = {"pending", "approved", "rejected", "rejected_by_critic", "executed", "failed"}
+    status_filter = status.strip() or None
+    if status_filter and status_filter not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown status '{status_filter}'; valid: {sorted(valid)}",
+        )
+
+    proposals = harness_writes.list_proposals(
+        status=status_filter,  # type: ignore[arg-type]
+        objective_id=objective_id or None,
+        limit=limit,
+    )
+    return {"proposals": proposals, "count": len(proposals)}
+
+
+@app.post("/v1/harness/proposals", tags=["harness"])
+async def create_harness_proposal(body: dict):
+    """Create a proposal. The critic runs first; the verdict is stored
+    on the proposal row so the operator UI can show it without a
+    separate fetch.
+
+    Body: {kind, payload, objective_id?, summary}
+    """
+    from ..harness import writes as harness_writes
+
+    kind = body.get("kind")
+    summary = body.get("summary", "")
+    payload = body.get("payload") or {}
+    objective_id = body.get("objective_id")
+
+    if not kind:
+        raise HTTPException(status_code=400, detail="kind is required")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="payload must be an object")
+
+    result = await harness_writes.propose_action(
+        kind=kind,
+        payload=payload,
+        objective_id=objective_id,
+        summary=summary,
+    )
+    return result
+
+
+@app.get("/v1/harness/proposals/{proposal_id}", tags=["harness"])
+async def get_harness_proposal(proposal_id: str):
+    """Fetch one proposal with its computed status. Returns 404 if the
+    id is unknown OR refers to a non-proposal ledger entry."""
+    from ..harness import writes as harness_writes
+
+    proposal = harness_writes.get_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(
+            status_code=404, detail=f"Proposal '{proposal_id}' not found"
+        )
+    return proposal
+
+
+@app.post("/v1/harness/proposals/{proposal_id}/approve", tags=["harness"])
+async def approve_harness_proposal(proposal_id: str):
+    """Approve a proposal. Re-runs the critic — guards against the
+    objective recovering between propose and approve. Cache normally
+    hits, so the re-check is cheap unless 10+ minutes elapsed."""
+    from ..harness import writes as harness_writes
+
+    try:
+        return await harness_writes.approve_proposal(proposal_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/harness/proposals/{proposal_id}/reject", tags=["harness"])
+async def reject_harness_proposal(proposal_id: str, body: dict | None = None):
+    """Reject a proposal. No critic re-check — manual rejection always
+    succeeds. Body: {reason?: string}."""
+    from ..harness import writes as harness_writes
+
+    reason = (body or {}).get("reason", "") if body else ""
+    try:
+        return harness_writes.reject_proposal(proposal_id, reason=reason)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/harness/proposals/{proposal_id}/outcome", tags=["harness"])
+async def record_harness_proposal_outcome(proposal_id: str, body: dict):
+    """Record the outcome of an approved proposal that was actually
+    executed. Body: {result: object, outcome: 'ok'|'failed'|'rolled_back'|'skipped'}.
+    No critic check — this records reality, not a decision."""
+    from ..harness import writes as harness_writes
+
+    outcome = body.get("outcome")
+    result = body.get("result") or {}
+    valid = {"ok", "failed", "rolled_back", "skipped"}
+    if outcome not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"outcome must be one of {sorted(valid)}",
+        )
+    if not isinstance(result, dict):
+        raise HTTPException(status_code=400, detail="result must be an object")
+
+    try:
+        return harness_writes.record_outcome(
+            proposal_id, result=result, outcome=outcome,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 # --- Trace Issues (Scan Now) ---

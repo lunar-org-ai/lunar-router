@@ -86,6 +86,7 @@ async def test_expected_tool_surface(server):
     tools = await server.list_tools()
     names = {t.name for t in tools}
     assert names == {
+        # read tools
         "list_objectives",
         "get_objective_time_series",
         "list_ledger_entries",
@@ -97,6 +98,12 @@ async def test_expected_tool_surface(server):
         "describe_recipe",
         "list_actions",
         "list_agents",
+        # write tools (Phase 1.5)
+        "run_agent",
+        "propose_action",
+        "approve_proposal",
+        "reject_proposal",
+        "record_outcome",
     }
 
 
@@ -282,3 +289,149 @@ async def test_list_agents_elides_system_prompt(server, ledger):
     assert all("system_prompt" not in a for a in result)
     # Sanity: budget_justifier critic is present after the Step-3 add.
     assert any(a["name"] == "budget_justifier" for a in result)
+
+
+# ---------------------------------------------------------------------------
+# Write tools — gated through a stubbed critic to avoid LLM calls
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def stub_critic(monkeypatch):
+    """Replace harness.writes.critic_check with a stub the test can
+    flip between approve / reject by mutating `state["decision"]`."""
+    from opentracy.harness import writes as harness_writes
+    from opentracy.harness.critic_gate import CriticVerdict
+    from opentracy.harness.ledger import LedgerEntry
+
+    state = {"decision": "approve"}
+
+    async def _stub_critic_check(*, action_kind, payload, objective_id, ledger=None, runner=None, cache=None):
+        from opentracy.harness.ledger import _global as ledger_global
+
+        store = ledger if ledger is not None else ledger_global._instance
+        decision = state["decision"]
+        entry = LedgerEntry(
+            type="decision",
+            objective_id=objective_id,
+            agent="budget_justifier",
+            data={"decision": decision, "rationale": "stub", "estimated_cost_usd": 0.1, "estimated_benefit": "x", "action_kind": action_kind},
+            tags=["critic_check", action_kind, decision],
+            outcome="ok",
+        )
+        store.append(entry)
+        return CriticVerdict(
+            decision=decision,
+            rationale="stub",
+            estimated_cost_usd=0.1,
+            estimated_benefit="x",
+            decision_entry_id=entry.id,
+        )
+
+    monkeypatch.setattr(harness_writes, "critic_check", _stub_critic_check)
+    return state
+
+
+async def test_propose_action_creates_pending_proposal(server, ledger, stub_critic):
+    out = await _call(
+        server,
+        "propose_action",
+        {
+            "kind": "queue_training",
+            "payload": {"student": "x"},
+            "summary": "test",
+        },
+    )
+    pid = out["proposal_id"]
+    assert pid
+
+    # Verify a proposal row exists in the ledger.
+    rows = ledger.recent(limit=10)
+    types = {r.type for r in rows}
+    assert "proposal" in types and "decision" in types
+
+
+async def test_approve_proposal_round_trip(server, ledger, stub_critic):
+    proposed = await _call(
+        server,
+        "propose_action",
+        {"kind": "run_eval", "payload": {"a": 1}, "summary": "x"},
+    )
+    pid = proposed["proposal_id"]
+
+    # Cache could short-circuit the recheck; reset between calls.
+    from opentracy.harness import critic_gate as _cg
+    _cg.reset_cache_for_tests()
+
+    decided = await _call(server, "approve_proposal", {"proposal_id": pid})
+    assert decided["decision"] == "approved"
+
+
+async def test_reject_proposal_does_not_call_critic_recheck(server, ledger, stub_critic):
+    proposed = await _call(
+        server,
+        "propose_action",
+        {"kind": "run_eval", "payload": {"a": 1}, "summary": "x"},
+    )
+    pid = proposed["proposal_id"]
+
+    out = await _call(
+        server,
+        "reject_proposal",
+        {"proposal_id": pid, "reason": "test"},
+    )
+    assert out["decision"] == "rejected"
+
+
+async def test_record_outcome_on_approved_proposal(server, ledger, stub_critic):
+    proposed = await _call(
+        server,
+        "propose_action",
+        {"kind": "run_eval", "payload": {"a": 1}, "summary": "x"},
+    )
+    pid = proposed["proposal_id"]
+
+    from opentracy.harness import critic_gate as _cg
+    _cg.reset_cache_for_tests()
+
+    await _call(server, "approve_proposal", {"proposal_id": pid})
+    out = await _call(
+        server,
+        "record_outcome",
+        {"proposal_id": pid, "result": {"score": 0.9}, "outcome": "ok"},
+    )
+    assert out["outcome"] == "ok"
+
+
+async def test_run_agent_inspector_skips_critic(server, ledger, stub_critic):
+    """Inspectors are read-only by convention; the critic must NOT be
+    invoked. We verify by setting the stub to reject — if it were called,
+    the run would not happen."""
+    stub_critic["decision"] = "reject"
+
+    # Patch the AgentRunner so we don't reach the LLM.
+    from opentracy.harness import writes as harness_writes
+
+    class _NoNetRunner:
+        async def run(self, agent_name, user_input, *_a, **_k):
+            class _R:
+                data = {"label": "ok"}
+                duration_ms = 1.0
+                cost_usd = None
+            return _R()
+
+        async def run_with_tools(self, *a, **k):
+            return await self.run(*a, **k)
+
+    original = harness_writes.run_agent_gated
+
+    async def _patched(name, user_input, **kwargs):
+        kwargs["runner"] = _NoNetRunner()
+        return await original(name, user_input, **kwargs)
+
+    out = await _patched(
+        "cluster_labeler",
+        "samples",
+        ledger=ledger,
+    )
+    assert out["decision"] == "ungated"
