@@ -1,0 +1,35 @@
+id: evaluate_student_distillation
+description: >
+  Triggered by cost drift on cost_per_successful_completion. Pulls a
+  cost+error summary, asks the training_advisor (proposer) whether a
+  distillation run is warranted, gates through the budget_justifier
+  (critic), and queues training if approved. Full
+  inspector/proposer/critic/action pattern per the harness redesign
+  plan Step 5.3.
+
+budget:
+  max_cost_usd: 1.0
+
+steps:
+  - id: fetch
+    type: action
+    action: fetch_cost_summary
+
+  - id: propose
+    type: agent
+    agent: training_advisor
+    input_from: fetch
+
+  - id: critique
+    type: agent
+    agent: budget_justifier
+    input_from: propose
+
+  - id: queue
+    type: action
+    action: queue_training
+    input_from: critique
+    condition:
+      from_step: critique
+      field: decision
+      equals: approve

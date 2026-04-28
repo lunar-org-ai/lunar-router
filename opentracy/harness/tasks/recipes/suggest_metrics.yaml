@@ -1,0 +1,19 @@
+id: suggest_metrics
+description: >
+  Triggered when a new clustering run lands. Pulls sample prompts from
+  the top cluster and asks the metrics_suggester agent to propose
+  evaluation metrics for it. The suggestions land in the ledger so a
+  human can review and optionally promote them to custom metrics.
+
+budget:
+  max_cost_usd: 0.5
+
+steps:
+  - id: fetch
+    type: action
+    action: fetch_dataset_samples
+
+  - id: suggest
+    type: agent
+    agent: metrics_suggester
+    input_from: fetch

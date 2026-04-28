@@ -7,6 +7,7 @@ export type TabKey =
   | 'production'
   | 'compare'
   | 'evaluations'
+  | 'harness'
   | 'intelligence'
   | 'traces'
   | 'api-keys'

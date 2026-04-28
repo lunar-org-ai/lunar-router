@@ -31,7 +31,7 @@ class AgentConfig:
 
     name: str
     description: str = ""
-    model: str = "mistral-small-latest"
+    model: str = "anthropic/claude-haiku-4-5"
     temperature: float = 0.1
     max_tokens: int = 500
     output_schema: OutputSchema = field(default_factory=OutputSchema)
@@ -81,7 +81,7 @@ def _parse_agent_file(path: Path) -> AgentConfig:
     return AgentConfig(
         name=meta.get("name", path.stem),
         description=meta.get("description", ""),
-        model=meta.get("model", "mistral-small-latest"),
+        model=meta.get("model", "anthropic/claude-haiku-4-5"),
         temperature=meta.get("temperature", 0.1),
         max_tokens=meta.get("max_tokens", 500),
         output_schema=schema,
@@ -100,14 +100,20 @@ class AgentRegistry:
         self._scan()
 
     def _scan(self) -> None:
-        """Scan agents directory and load all .md files."""
+        """Scan agents directory and load all .md files.
+
+        Uses rglob so role subfolders (inspectors/, proposers/, critics/,
+        narrators/) are discovered. Agents keep their identity through the
+        `name` field in frontmatter, so moving a file between role folders
+        doesn't break callers.
+        """
         self._agents.clear()
 
         if not self.agents_dir.exists():
             logger.warning(f"Agents directory not found: {self.agents_dir}")
             return
 
-        for path in sorted(self.agents_dir.glob("*.md")):
+        for path in sorted(self.agents_dir.rglob("*.md")):
             try:
                 config = _parse_agent_file(path)
                 self._agents[config.name] = config
@@ -131,10 +137,10 @@ class AgentRegistry:
         return config
 
     def list_agents(self) -> list[AgentConfig]:
-        """Return all registered agents. Scans for new files."""
-        # Check for new files without full reload
+        """Return all registered agents. Scans for new files across all
+        role subfolders (rglob), not just the top-level directory."""
         if self.agents_dir.exists():
-            for path in self.agents_dir.glob("*.md"):
+            for path in self.agents_dir.rglob("*.md"):
                 name = path.stem
                 meta = yaml.safe_load(path.read_text().split("---", 2)[1]) if path.read_text().startswith("---") else {}
                 agent_name = meta.get("name", name) if isinstance(meta, dict) else name

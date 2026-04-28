@@ -1,7 +1,7 @@
 ---
 name: merge_checker
 description: Determines if two clusters represent the same domain
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.1
 max_tokens: 300
 output_schema:

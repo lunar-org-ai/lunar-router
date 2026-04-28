@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from .ledger import LedgerEntry, LedgerStore
 from .memory_store import MemoryEntry, MemoryStore, get_memory_store
 from .runner import AgentRunner
 
@@ -28,6 +29,20 @@ ISSUE_CATEGORY = "trace_issue"
 SCAN_CATEGORY = "trace_scan"
 FEEDBACK_CATEGORY = "user_feedback"
 AUTO_EVAL_CATEGORY = "auto_evaluation"
+
+# Maps heuristic/agent issue types to the objective whose time-series
+# the observation belongs in. `None` means the issue has no direct
+# objective linkage yet (still recorded, just not time-series-indexed).
+ISSUE_TYPE_TO_OBJECTIVE: dict[str, Optional[str]] = {
+    "latency_spike": "p95_latency_ms",
+    "cost_anomaly": "cost_per_successful_completion",
+    "hallucination": "domain_coverage_ratio",
+    "refusal": "domain_coverage_ratio",
+    "safety": "domain_coverage_ratio",
+    "quality_regression": "domain_coverage_ratio",
+    "format_violation": None,
+    "incomplete_response": None,
+}
 
 # Heuristic thresholds
 LATENCY_SPIKE_ZSCORE = 2.0  # standard deviations above mean
@@ -262,9 +277,13 @@ class TraceScanner:
         self,
         engine_url: Optional[str] = None,
         memory_store: Optional[MemoryStore] = None,
+        ledger: Optional[LedgerStore] = None,
     ):
         self.engine_url = engine_url
         self.memory_store = memory_store or get_memory_store()
+        # When `ledger` is None, ledger emission is skipped — keeps existing
+        # callsites (and the 19 rebrand tests) working unchanged.
+        self.ledger = ledger
         self._runner: Optional[AgentRunner] = None
 
     def _get_runner(self) -> AgentRunner:
@@ -281,14 +300,25 @@ class TraceScanner:
         scan_id: str,
         days: int = 7,
         limit: int = 100,
+        parent_id: Optional[str] = None,
     ) -> list[TraceIssue]:
-        """Run a full scan and return detected issues."""
+        """Run a full scan and return detected issues.
+
+        `parent_id` chains this scan to an upstream ledger entry (e.g., a
+        `signal` emitted by the trigger engine). When None, the scan's
+        run entry is a chain root.
+        """
         state = ScanState(
             scan_id=scan_id,
             status="running",
             started_at=datetime.now(timezone.utc).isoformat(),
         )
         _active_scans[scan_id] = state
+
+        run_entry = self._ledger_start_run(
+            scan_id, days=days, limit=limit, parent_id=parent_id,
+        )
+        scan_start = datetime.now(timezone.utc)
 
         try:
             traces = await self._fetch_traces(days=days, limit=limit)
@@ -297,6 +327,9 @@ class TraceScanner:
             if not traces:
                 state.status = "completed"
                 state.completed_at = datetime.now(timezone.utc).isoformat()
+                self._ledger_emit_summary(
+                    run_entry, state, eval_count=0, scan_start=scan_start
+                )
                 return []
 
             issues: list[TraceIssue] = []
@@ -318,6 +351,9 @@ class TraceScanner:
             # Store issues in memory
             self._store_issues(issues, scan_id)
 
+            # Emit one ledger observation per issue, parented to the run.
+            self._ledger_emit_issue_observations(run_entry, issues)
+
             # Auto-generate eval cases from high/medium issues
             eval_count = 0
             if issues:
@@ -335,13 +371,125 @@ class TraceScanner:
             # Store scan summary in memory
             self._store_scan_summary(state, issues, eval_count=eval_count)
 
+            self._ledger_emit_summary(
+                run_entry, state, eval_count=eval_count, scan_start=scan_start
+            )
+
             return issues
 
         except Exception as e:
             logger.error(f"Scan {scan_id} failed: {e}")
             state.status = "failed"
             state.completed_at = datetime.now(timezone.utc).isoformat()
+            self._ledger_emit_failure(run_entry, error=str(e), scan_start=scan_start)
             raise
+
+    # ------------------------------------------------------------------
+    # Ledger emission — append-only observability per scan.
+    # All four helpers are no-ops when `self.ledger is None`, so the rest
+    # of the harness can keep constructing a bare TraceScanner() as before.
+    # ------------------------------------------------------------------
+
+    def _ledger_start_run(
+        self, scan_id: str, days: int, limit: int,
+        parent_id: Optional[str] = None,
+    ) -> Optional[LedgerEntry]:
+        if self.ledger is None:
+            return None
+        entry = LedgerEntry(
+            id=scan_id,
+            type="run",
+            agent="trace_scanner",
+            parameters_in={"days": days, "limit": limit},
+            parent_id=parent_id,
+            tags=["scheduler_tick", "trace_scanner"],
+        )
+        try:
+            self.ledger.append(entry)
+        except Exception as e:
+            logger.debug(f"Failed to append run entry to ledger: {e}")
+            return None
+        return entry
+
+    def _ledger_emit_issue_observations(
+        self,
+        run_entry: Optional[LedgerEntry],
+        issues: list[TraceIssue],
+    ) -> None:
+        if self.ledger is None or run_entry is None:
+            return
+        for issue in issues:
+            obs = LedgerEntry(
+                type="observation",
+                objective_id=ISSUE_TYPE_TO_OBJECTIVE.get(issue.type),
+                subject=issue.trace_id or None,
+                agent="trace_scanner",
+                parent_id=run_entry.id,
+                data={
+                    "issue_id": issue.id,
+                    "issue_type": issue.type,
+                    "severity": issue.severity,
+                    "title": issue.title,
+                    "confidence": issue.ai_confidence,
+                    "model": issue.model_id,
+                },
+                tags=[issue.type, issue.severity],
+            )
+            try:
+                self.ledger.append(obs)
+            except Exception as e:
+                logger.debug(f"Failed to append observation to ledger: {e}")
+
+    def _ledger_emit_summary(
+        self,
+        run_entry: Optional[LedgerEntry],
+        state: ScanState,
+        eval_count: int,
+        scan_start: datetime,
+    ) -> None:
+        if self.ledger is None or run_entry is None:
+            return
+        duration_ms = int((datetime.now(timezone.utc) - scan_start).total_seconds() * 1000)
+        entry = LedgerEntry(
+            type="observation",
+            agent="trace_scanner",
+            parent_id=run_entry.id,
+            data={
+                "traces_scanned": state.traces_scanned,
+                "issues_found": state.issues_found,
+                "eval_cases_generated": eval_count,
+            },
+            tags=["scan_summary"],
+            duration_ms=duration_ms,
+            outcome="ok",
+        )
+        try:
+            self.ledger.append(entry)
+        except Exception as e:
+            logger.debug(f"Failed to append summary to ledger: {e}")
+
+    def _ledger_emit_failure(
+        self,
+        run_entry: Optional[LedgerEntry],
+        error: str,
+        scan_start: datetime,
+    ) -> None:
+        if self.ledger is None or run_entry is None:
+            return
+        duration_ms = int((datetime.now(timezone.utc) - scan_start).total_seconds() * 1000)
+        entry = LedgerEntry(
+            type="observation",
+            agent="trace_scanner",
+            parent_id=run_entry.id,
+            data={"error": error},
+            tags=["scan_failed"],
+            duration_ms=duration_ms,
+            outcome="failed",
+        )
+        try:
+            self.ledger.append(entry)
+        except Exception as e:
+            logger.debug(f"Failed to append failure to ledger: {e}")
 
     async def _fetch_traces(self, days: int = 7, limit: int = 100) -> list[dict]:
         """Fetch recent traces from ClickHouse via the toolkit."""

@@ -1,0 +1,21 @@
+id: cost_drift_to_evaluate_student_distillation
+description: >
+  When cost-per-successful-completion regresses past its guardrail,
+  run the full evaluate-student-distillation recipe: pull cost
+  context, propose training via the training_advisor, gate through
+  the budget_justifier, and queue the training if approved.
+  Matches the plan's `cost_drift → evaluate_student_distillation`
+  policy — replaces the Step-3 stop-gap that dispatched the advisor
+  agent directly.
+
+match:
+  signal_tags: [objective_regression]
+  objective_id: cost_per_successful_completion
+
+dispatch:
+  recipe: evaluate_student_distillation
+
+budget:
+  # Three chances per day to kick off a training cycle from cost drift.
+  # The recipe itself enforces cost_usd per invocation.
+  max_per_day: 3

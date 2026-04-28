@@ -1,0 +1,20 @@
+id: p95_latency_ms
+description: >
+  95th percentile end-to-end latency on routed production traffic over the
+  trailing window. Per-model breakdown.
+compute_fn: opentracy.harness.objectives.compute:p95_latency_ms
+unit: ms
+direction: lower_is_better
+baseline: null
+target: 2500
+window_hours: 168       # 7d
+update_cadence: hourly
+dimensions:
+  - selected_model
+owner_agents:
+  - training_advisor
+guardrails:
+  - type: no_regression_worse_than_pct
+    threshold: 10
+  - type: min_sample_size
+    min_n: 100

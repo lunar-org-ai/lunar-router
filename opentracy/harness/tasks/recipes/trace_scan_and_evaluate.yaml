@@ -1,0 +1,37 @@
+id: trace_scan_and_evaluate
+description: >
+  End-to-end Step 3 flow: inspector scans traces for issues, proposer
+  distills each issue into an eval case, critic gates against the
+  per-invocation budget, action queues each approved eval into the
+  ledger for downstream execution.
+
+budget:
+  max_cost_usd: 1.0
+
+steps:
+  - id: inspect
+    type: agent
+    agent: trace_scanner
+    input: >
+      Scan the most recent production traces for quality, cost, and
+      latency regressions. Return structured issues with severity and
+      suggested_action per issue.
+
+  - id: propose
+    type: agent
+    agent: eval_generator
+    input_from: inspect
+
+  - id: critique
+    type: agent
+    agent: budget_justifier
+    input_from: propose
+
+  - id: queue_eval
+    type: action
+    action: run_eval
+    input_from: propose
+    condition:
+      from_step: critique
+      field: decision
+      equals: approve

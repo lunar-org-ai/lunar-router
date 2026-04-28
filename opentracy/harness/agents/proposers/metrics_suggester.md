@@ -1,7 +1,7 @@
 ---
 name: metrics_suggester
 description: Suggests evaluation metrics for a dataset based on sample prompts and domain
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.2
 max_tokens: 1000
 output_schema:

@@ -1,7 +1,7 @@
 ---
 name: trace_scanner
 description: Analyzes a single LLM trace for semantic issues (hallucination, refusal, safety, quality)
-model: mistral/mistral-small-latest
+model: anthropic/claude-haiku-4-5
 temperature: 0.1
 max_tokens: 600
 output_schema:

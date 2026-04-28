@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from .ledger import LedgerEntry, LedgerStore
 from .memory_store import MemoryEntry, MemoryStore, get_memory_store
 from .runner import AgentRunner
 
@@ -33,6 +34,26 @@ DRIFT_RATIO_THRESHOLD = 1.5
 MIN_TRACES_FOR_TRAINING = 100
 MIN_HOURS_BETWEEN_TRAINING = 48
 HIGH_SEVERITY_ISSUE_THRESHOLD = 3  # this many high-severity issues = signal
+
+# Maps heuristic signal names to the objective time-series they feed.
+# `None` means the signal is a meta-indicator (drift) that's ledger-
+# worthy but not part of any objective series.
+SIGNAL_TO_OBJECTIVE: dict[str, Optional[str]] = {
+    "error_rate_increase": "domain_coverage_ratio",
+    "high_severity_issues": "domain_coverage_ratio",
+    "drift_ratio": None,
+    "trace_volume": None,
+    "cooldown": None,
+}
+
+# Signals where `triggered=True` means "problem detected" and warrants
+# a ledger observation. `cooldown` / `trace_volume` invert this polarity
+# (triggered=True means "gate passed"), so they're excluded.
+_OBSERVABLE_SIGNALS = frozenset({
+    "error_rate_increase",
+    "high_severity_issues",
+    "drift_ratio",
+})
 
 
 @dataclass
@@ -103,9 +124,12 @@ class TrainingAdvisor:
         self,
         engine_url: Optional[str] = None,
         memory_store: Optional[MemoryStore] = None,
+        ledger: Optional[LedgerStore] = None,
     ):
         self.engine_url = engine_url
         self.memory_store = memory_store or get_memory_store()
+        # `ledger=None` = no-op emission (keeps existing callsites unchanged).
+        self.ledger = ledger
         self._runner = AgentRunner(
             engine_url=engine_url,
             memory_store=self.memory_store,
@@ -122,6 +146,7 @@ class TrainingAdvisor:
         drift_ratio: float = 1.0,
         trace_count: int = 0,
         hours_since_last_training: Optional[float] = None,
+        parent_id: Optional[str] = None,
     ) -> TrainingRecommendation:
         """
         Fast heuristic check — no LLM call needed.
@@ -137,6 +162,7 @@ class TrainingAdvisor:
         Returns:
             TrainingRecommendation with heuristic-based decision.
         """
+        started_at = datetime.now(timezone.utc)
         signals: list[TrainingSignal] = []
         triggered_count = 0
 
@@ -232,13 +258,27 @@ class TrainingAdvisor:
             confidence = 0.9
             reason = "All metrics within normal range"
 
-        return TrainingRecommendation(
+        result = TrainingRecommendation(
             recommendation=rec,
             confidence=confidence,
             reason=reason,
             signals=signals,
             source="heuristic",
         )
+        self._ledger_emit_decision(
+            result,
+            started_at=started_at,
+            parameters={
+                "error_rates": error_rates,
+                "baseline_error_rates": baseline_error_rates,
+                "high_severity_issues": high_severity_issues,
+                "drift_ratio": drift_ratio,
+                "trace_count": trace_count,
+                "hours_since_last_training": hours_since_last_training,
+            },
+            parent_id=parent_id,
+        )
+        return result
 
     # ── Layer 2: LLM agent analysis (smart, slower) ─────────────────────
 
@@ -318,6 +358,93 @@ Given all this data, should we trigger auto-training now?"""
         # Store decision in memory
         self._store_decision(rec)
         return rec
+
+    # ── Ledger ───────────────────────────────────────────────────────────
+
+    def _ledger_emit_decision(
+        self,
+        rec: TrainingRecommendation,
+        started_at: datetime,
+        parameters: dict[str, Any],
+        parent_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Write run + triggered-signal observations + decision to the ledger.
+
+        Returns the run entry id, or None if no ledger is configured.
+        Failure to append is logged at debug and does not propagate — the
+        advisor's decision path must not be blocked by an observability bug.
+
+        `parent_id` chains the run to an upstream ledger entry (typically
+        a `signal` from the trigger engine). When None, the run is a root.
+        """
+        if self.ledger is None:
+            return None
+
+        run_id = str(uuid.uuid4())
+        run_entry = LedgerEntry(
+            id=run_id,
+            type="run",
+            agent="training_advisor",
+            parameters_in=parameters,
+            parent_id=parent_id,
+            tags=["scheduler_tick", "training_advisor"],
+        )
+        try:
+            self.ledger.append(run_entry)
+        except Exception as e:
+            logger.debug(f"Failed to append training-advisor run to ledger: {e}")
+            return None
+
+        for signal in rec.signals:
+            if signal.name not in _OBSERVABLE_SIGNALS:
+                continue
+            if not signal.triggered:
+                continue
+            obs = LedgerEntry(
+                type="observation",
+                objective_id=SIGNAL_TO_OBJECTIVE.get(signal.name),
+                agent="training_advisor",
+                parent_id=run_id,
+                data={
+                    "signal_name": signal.name,
+                    "value": signal.value,
+                    "threshold": signal.threshold,
+                    "detail": signal.detail,
+                },
+                tags=[signal.name, "triggered"],
+            )
+            try:
+                self.ledger.append(obs)
+            except Exception as e:
+                logger.debug(f"Failed to append signal observation to ledger: {e}")
+
+        # Map recommendation → outcome. `train_now` is the only positive
+        # action-producing decision; everything else is either a deferred
+        # investigation or an explicit skip (cooldown / insufficient data).
+        outcome = "ok" if rec.recommendation == "train_now" else "skipped"
+        duration_ms = int(
+            (datetime.now(timezone.utc) - started_at).total_seconds() * 1000
+        )
+        decision = LedgerEntry(
+            type="decision",
+            agent="training_advisor",
+            parent_id=run_id,
+            data={
+                "recommendation": rec.recommendation,
+                "confidence": rec.confidence,
+                "reason": rec.reason,
+                "source": rec.source,
+            },
+            tags=[rec.recommendation, rec.source],
+            duration_ms=duration_ms,
+            outcome=outcome,
+        )
+        try:
+            self.ledger.append(decision)
+        except Exception as e:
+            logger.debug(f"Failed to append decision to ledger: {e}")
+
+        return run_id
 
     # ── Memory ───────────────────────────────────────────────────────────
 

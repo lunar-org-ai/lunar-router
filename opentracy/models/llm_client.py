@@ -182,6 +182,10 @@ class AnthropicClient(LLMClient):
     """
 
     COSTS = {
+        "claude-haiku-4-5": 0.001,
+        "claude-haiku-4-5-20251001": 0.001,
+        "claude-sonnet-4-6": 0.003,
+        "claude-opus-4-7": 0.015,
         "claude-3-5-sonnet-20241022": 0.003,
         "claude-3-5-haiku-20241022": 0.0008,
         "claude-3-opus-20240229": 0.015,
@@ -191,7 +195,7 @@ class AnthropicClient(LLMClient):
 
     def __init__(
         self,
-        model: str = "claude-3-5-haiku-20241022",
+        model: str = "claude-haiku-4-5",
         api_key: Optional[str] = None,
     ):
         """

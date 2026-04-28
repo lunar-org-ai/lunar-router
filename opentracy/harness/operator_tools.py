@@ -264,11 +264,11 @@ async def _llm_label_and_summary(
     label: dict[str, Any] = {}
     summary: dict[str, Any] = {}
     try:
-        if not os.environ.get("MISTRAL_API_KEY"):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
             return label, summary, False
-        from ..models.llm_client import MistralClient
+        from ..models.llm_client import AnthropicClient
 
-        client = MistralClient(model="mistral-small-latest")
+        client = AnthropicClient(model="claude-haiku-4-5")
         labeler_prompt = _load_agent_prompt("cluster_labeler")
         summarizer_prompt = _load_agent_prompt("dataset_summarizer")
 

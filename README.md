@@ -151,6 +151,22 @@ make start-full   # Gateway + ClickHouse analytics + Python API + UI
 
 Engine at `http://localhost:8080`, Python API at `http://localhost:8000`, UI at `http://localhost:3000`.
 
+### GPU is optional
+
+The Python API container runs on CPU by default — no `nvidia-container-toolkit`
+required, so it works on plain cloud VMs and laptops without a GPU. Local
+training and inference paths fall back to CPU automatically.
+
+To enable GPU acceleration (faster distillation training, local inference):
+
+```bash
+DOCKER_RUNTIME=nvidia docker compose up -d
+```
+
+This requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+on the host. Persist the variable in `.env` next to `docker-compose.yml` if you
+always run with GPU.
+
 ## What OpenTracy Does
 
 ```
