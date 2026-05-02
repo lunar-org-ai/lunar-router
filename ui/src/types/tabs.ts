@@ -8,6 +8,7 @@ export type TabKey =
   | 'compare'
   | 'evaluations'
   | 'harness'
+  | 'agents'
   | 'intelligence'
   | 'traces'
   | 'api-keys'

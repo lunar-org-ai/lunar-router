@@ -8,6 +8,7 @@ import {
   BookOpen,
   Rocket,
   Sparkles,
+  Workflow,
 } from 'lucide-react';
 import type { TabKey } from '../../types/tabs';
 
@@ -108,6 +109,13 @@ export const MENU_SECTIONS: MenuSection[] = [
         path: '/harness',
         icon: <Radar size={20} />,
         description: 'Objectives, causal ledger & agents',
+      },
+      {
+        label: 'Agents',
+        value: 'agents',
+        path: '/agents/support-bot',
+        icon: <Workflow size={20} />,
+        description: 'Agent topology and evaluation scores',
       },
     ],
   },
