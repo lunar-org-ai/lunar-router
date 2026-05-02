@@ -5,9 +5,13 @@ import {
   ArrowRight,
   Check,
   Copy,
+  Headphones,
+  Library,
+  type LucideIcon,
   Play,
   Plug,
   Sparkles,
+  Telescope,
   Terminal,
 } from 'lucide-react';
 import { CrewAI, LangChain, LangGraph, OpenAI } from '@lobehub/icons';
@@ -29,6 +33,17 @@ const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: numbe
   langgraph: LangGraph.Avatar,
   crewai: CrewAI.Avatar,
   'openai-agents': OpenAI.Avatar,
+};
+
+type TemplateIconMeta = {
+  Icon: LucideIcon;
+  tone: string;
+};
+
+const TEMPLATE_ICONS: Record<string, TemplateIconMeta> = {
+  'support-bot': { Icon: Headphones, tone: 'bg-amber-500/10 text-amber-500' },
+  'rag-agent': { Icon: Library, tone: 'bg-sky-500/10 text-sky-500' },
+  'research-agent': { Icon: Telescope, tone: 'bg-violet-500/10 text-violet-500' },
 };
 
 type OnboardingFlowProps = {
@@ -293,27 +308,44 @@ function TemplatePicker({ selectedId, onSelect }: TemplatePickerProps) {
     <div className="flex flex-col gap-2">
       {AGENT_TEMPLATES.map((template) => {
         const active = template.id === selectedId;
+        const meta = TEMPLATE_ICONS[template.id];
+        const Icon = meta?.Icon;
         return (
           <button
             key={template.id}
             type="button"
             onClick={() => onSelect(template.id)}
             className={cn(
-              'flex flex-col gap-1.5 rounded-xl border bg-card/30 px-4 py-3 text-left transition-colors',
+              'flex items-start gap-3 rounded-xl border bg-card/30 px-3.5 py-3 text-left transition-colors',
               active
                 ? 'border-foreground/40 bg-card/60'
                 : 'border-border/40 hover:border-border/70 hover:bg-card/50'
             )}
           >
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">{template.name}</span>
-              <span className="font-mono text-[11px] text-muted-foreground">
-                {template.nodes.length} nodes
+            {Icon ? (
+              <span
+                className={cn(
+                  'flex size-9 shrink-0 items-center justify-center rounded-lg',
+                  meta.tone
+                )}
+              >
+                <Icon className="size-4" />
+              </span>
+            ) : null}
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-sm font-medium leading-tight">{template.name}</span>
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {template.nodes.length} nodes
+                </span>
+              </div>
+              <span className="font-mono text-[11px] leading-relaxed text-muted-foreground">
+                {template.description}
               </span>
             </div>
-            <span className="font-mono text-[11px] leading-relaxed text-muted-foreground">
-              {template.description}
-            </span>
+            {active ? (
+              <Check className="mt-1 size-3.5 shrink-0 text-emerald-500" />
+            ) : null}
           </button>
         );
       })}
