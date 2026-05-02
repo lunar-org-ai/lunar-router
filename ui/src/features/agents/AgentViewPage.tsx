@@ -71,7 +71,6 @@ export default function AgentViewPage() {
     <div className="flex h-full min-h-0 flex-1 flex-col bg-background">
       <AgentHeader
         agentName={run.agentName}
-        version={run.version}
         overall={run.overall}
         showActions={showGraphArea}
         scoreState={headerScoreState}
