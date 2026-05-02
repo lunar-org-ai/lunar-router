@@ -151,13 +151,13 @@ type PaneProps = {
 };
 
 function Pane({ direction, children }: PaneProps) {
-  const offset = direction === 'forward' ? -8 : 8;
+  const offset = direction === 'forward' ? -10 : 10;
   return (
     <motion.div
       initial={{ opacity: 0, x: -offset }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: offset }}
-      transition={{ duration: 0.2, ease: 'easeOut' }}
+      transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
       className="flex flex-col gap-5"
     >
       {children}

@@ -1,4 +1,5 @@
 import { GitBranch, MessageSquare, Search, Send, Sparkles, type LucideIcon } from 'lucide-react';
+import { motion } from 'framer-motion';
 
 import { Badge } from '@/components/ui/badge';
 import { Card } from '@/components/ui/card';
@@ -41,14 +42,19 @@ export function NodeCard({ node, className }: NodeCardProps) {
           </div>
         ) : null}
         {hasMetrics ? (
-          <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-muted-foreground/60">
+          <motion.div
+            className="mt-1 flex items-center gap-2 font-mono text-[10px] text-muted-foreground/60"
+            initial={{ opacity: 0, y: 2 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3, delay: 0.18, ease: [0.22, 1, 0.36, 1] }}
+          >
             {node.cost ? (
               <span className="rounded-sm bg-emerald-500/10 px-1 py-px text-emerald-500/80">
                 {node.cost}
               </span>
             ) : null}
             {node.latency ? <span>{node.latency}</span> : null}
-          </div>
+          </motion.div>
         ) : null}
       </div>
 

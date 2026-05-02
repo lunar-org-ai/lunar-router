@@ -10,9 +10,9 @@ import {
 } from '@/features/agents/state';
 import { SUPPORT_TEMPLATE_ID } from '@/features/agents/templates';
 
-const NODE_REVEAL_INTERVAL_MS = 380;
-const BUILD_DURATION_MS = 700;
-const EVAL_DURATION_MS = 1600;
+const NODE_REVEAL_INTERVAL_MS = 320;
+const BUILD_DURATION_MS = 620;
+const EVAL_DURATION_MS = 1300;
 
 type State = {
   phase: AgentPhase;

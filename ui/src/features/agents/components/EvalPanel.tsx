@@ -62,7 +62,11 @@ function AnimatedOverall({ value, runId }: AnimatedOverallProps) {
   const rounded = useTransform(motionValue, (current) => `${Math.round(current)}%`);
 
   useEffect(() => {
-    const controls = animate(motionValue, value, { duration: 1.4, ease: 'easeOut' });
+    motionValue.set(0);
+    const controls = animate(motionValue, value, {
+      duration: 1.1,
+      ease: [0.22, 1, 0.36, 1],
+    });
     return controls.stop;
   }, [value, runId, motionValue]);
 
