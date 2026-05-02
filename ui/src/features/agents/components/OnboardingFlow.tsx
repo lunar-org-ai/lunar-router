@@ -10,6 +10,7 @@ import {
   Sparkles,
   Terminal,
 } from 'lucide-react';
+import { CrewAI, LangChain, LangGraph, OpenAI } from '@lobehub/icons';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -22,6 +23,13 @@ import {
   type OnboardingMode,
 } from '@/features/agents/state';
 import { AGENT_TEMPLATES, type AgentTemplate } from '@/features/agents/templates';
+
+const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: number }>> = {
+  langchain: LangChain.Avatar,
+  langgraph: LangGraph.Avatar,
+  crewai: CrewAI.Avatar,
+  'openai-agents': OpenAI.Avatar,
+};
 
 type OnboardingFlowProps = {
   mode: OnboardingMode;
@@ -245,27 +253,29 @@ function FrameworkPicker({ selectedId, onSelect }: FrameworkPickerProps) {
     <div className="grid grid-cols-2 gap-3">
       {FRAMEWORK_OPTIONS.map((option) => {
         const active = option.id === selectedId;
+        const Icon = FRAMEWORK_ICONS[option.id];
         return (
           <button
             key={option.id}
             type="button"
             onClick={() => onSelect(option.id)}
             className={cn(
-              'flex flex-col gap-1.5 rounded-xl border bg-card/30 px-4 py-3 text-left transition-colors',
+              'flex items-center gap-3 rounded-xl border bg-card/30 px-3.5 py-3 text-left transition-colors',
               active
                 ? 'border-foreground/40 bg-card/60'
                 : 'border-border/40 hover:border-border/70 hover:bg-card/50'
             )}
           >
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium">{option.name}</span>
-              {active ? (
-                <Check className="size-3.5 text-emerald-500" />
-              ) : (
-                <span className="size-3.5" />
-              )}
+            <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg">
+              <Icon size={36} />
+            </span>
+            <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <span className="text-sm font-medium leading-tight">{option.name}</span>
+              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                {option.pkg}
+              </span>
             </div>
-            <span className="font-mono text-[11px] text-muted-foreground">{option.pkg}</span>
+            {active ? <Check className="size-3.5 shrink-0 text-emerald-500" /> : null}
           </button>
         );
       })}
