@@ -1,19 +1,10 @@
 import { LayoutGrid, Loader2, Play, RotateCcw } from 'lucide-react';
 
-import {
-  Breadcrumb,
-  BreadcrumbItem,
-  BreadcrumbLink,
-  BreadcrumbList,
-  BreadcrumbPage,
-  BreadcrumbSeparator,
-} from '@/components/ui/breadcrumb';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 type AgentHeaderProps = {
-  agentId: string;
   agentName: string;
   version: string;
   overall: number;
@@ -31,7 +22,6 @@ function scoreColor(value: number) {
 }
 
 export function AgentHeader({
-  agentId,
   agentName,
   version,
   overall,
@@ -42,19 +32,7 @@ export function AgentHeader({
   evalDisabled = false,
 }: AgentHeaderProps) {
   return (
-    <header className="flex flex-col gap-3 border-b border-border/40 px-6 pb-4 pt-5">
-      <Breadcrumb>
-        <BreadcrumbList className="text-xs">
-          <BreadcrumbItem>
-            <BreadcrumbLink href="/agents">agents</BreadcrumbLink>
-          </BreadcrumbItem>
-          <BreadcrumbSeparator />
-          <BreadcrumbItem>
-            <BreadcrumbPage>{agentId}</BreadcrumbPage>
-          </BreadcrumbItem>
-        </BreadcrumbList>
-      </Breadcrumb>
-
+    <header className="flex flex-col gap-3 border-b border-border/40 px-6 py-5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="flex size-8 items-center justify-center rounded-md border border-border/40 bg-card/40 text-muted-foreground">
