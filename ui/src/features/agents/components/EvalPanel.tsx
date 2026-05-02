@@ -64,8 +64,8 @@ function AnimatedOverall({ value, runId }: AnimatedOverallProps) {
   useEffect(() => {
     motionValue.set(0);
     const controls = animate(motionValue, value, {
-      duration: 1.1,
-      ease: [0.22, 1, 0.36, 1],
+      duration: 0.8,
+      ease: [0.16, 1, 0.3, 1],
     });
     return controls.stop;
   }, [value, runId, motionValue]);

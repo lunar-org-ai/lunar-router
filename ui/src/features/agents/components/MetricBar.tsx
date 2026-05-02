@@ -72,7 +72,7 @@ export function MetricBar({ metric, index = 0, runId = 0 }: MetricBarProps) {
           className={cn('absolute inset-y-0 left-0 rounded-full', resolved.barColor)}
           initial={{ width: 0 }}
           animate={{ width: `${resolved.width}%` }}
-          transition={{ delay: index * 0.07, duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+          transition={{ delay: index * 0.05, duration: 0.5, ease: [0.16, 1, 0.3, 1] }}
         />
       </div>
     </div>
