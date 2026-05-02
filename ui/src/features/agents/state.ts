@@ -4,11 +4,18 @@ export type OnboardingMode = 'import' | 'create';
 
 export type AgentPhase = 'empty' | 'modal' | 'discovering' | 'evaluating' | 'ready';
 
+export const DEFAULT_PROJECT_NAME = 'my-agent';
+
 export type FrameworkOption = {
   id: AgentFramework;
   name: string;
   pkg: string;
-  snippet: string;
+  buildSnippet: (projectName: string) => string;
+};
+
+const safeProjectName = (raw: string): string => {
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : DEFAULT_PROJECT_NAME;
 };
 
 export const FRAMEWORK_OPTIONS: FrameworkOption[] = [
@@ -16,10 +23,10 @@ export const FRAMEWORK_OPTIONS: FrameworkOption[] = [
     id: 'langchain',
     name: 'LangChain',
     pkg: 'opentracy-langchain',
-    snippet: `from opentracy import register
+    buildSnippet: (project) => `from opentracy import register
 from opentracy.langchain import LangChainInstrumentor
 
-provider = register(project="support-bot")
+provider = register(project="${safeProjectName(project)}")
 LangChainInstrumentor().instrument(tracer_provider=provider)
 
 # Use LangChain as usual — every chain, tool, and LLM call is traced.`,
@@ -28,10 +35,10 @@ LangChainInstrumentor().instrument(tracer_provider=provider)
     id: 'langgraph',
     name: 'LangGraph',
     pkg: 'opentracy-langgraph',
-    snippet: `from opentracy import register
+    buildSnippet: (project) => `from opentracy import register
 from opentracy.langgraph import LangGraphInstrumentor
 
-provider = register(project="support-bot")
+provider = register(project="${safeProjectName(project)}")
 LangGraphInstrumentor().instrument(tracer_provider=provider)
 
 # Build your graph normally — every node, edge, and state transition is captured.`,
@@ -40,10 +47,10 @@ LangGraphInstrumentor().instrument(tracer_provider=provider)
     id: 'crewai',
     name: 'CrewAI',
     pkg: 'opentracy-crewai',
-    snippet: `from opentracy import register
+    buildSnippet: (project) => `from opentracy import register
 from opentracy.crewai import CrewAIInstrumentor
 
-provider = register(project="support-bot")
+provider = register(project="${safeProjectName(project)}")
 CrewAIInstrumentor().instrument(tracer_provider=provider)
 
 # Run your crew — every agent decision and tool invocation is recorded.`,
@@ -52,10 +59,10 @@ CrewAIInstrumentor().instrument(tracer_provider=provider)
     id: 'openai-agents',
     name: 'OpenAI Agents',
     pkg: 'opentracy-openai-agents',
-    snippet: `from opentracy import register
+    buildSnippet: (project) => `from opentracy import register
 from opentracy.openai_agents import OpenAIAgentsInstrumentor
 
-provider = register(project="support-bot")
+provider = register(project="${safeProjectName(project)}")
 OpenAIAgentsInstrumentor().instrument(tracer_provider=provider)
 
 # Use the OpenAI Agents SDK as usual.`,

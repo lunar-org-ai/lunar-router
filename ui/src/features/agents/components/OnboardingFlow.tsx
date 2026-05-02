@@ -113,9 +113,13 @@ export function OnboardingFlow({
             <Pane key="import-2" direction="backward">
               <Heading
                 title="Add to your code"
-                description={`Drop this snippet into your ${selectedFramework.name} app, then run a simulation to preview the topology.`}
+                description={`Pick a project name, drop this snippet into your ${selectedFramework.name} app, and OpenTracy will use that name as the agent.`}
               />
-              <CodeStep option={selectedFramework} />
+              <CodeStep
+                option={selectedFramework}
+                projectName={name}
+                onProjectNameChange={onSetName}
+              />
             </Pane>
           ) : null}
 
@@ -355,12 +359,15 @@ function TemplatePicker({ selectedId, onSelect }: TemplatePickerProps) {
 
 type CodeStepProps = {
   option: FrameworkOption;
+  projectName: string;
+  onProjectNameChange: (value: string) => void;
 };
 
-function CodeStep({ option }: CodeStepProps) {
+function CodeStep({ option, projectName, onProjectNameChange }: CodeStepProps) {
   const [copied, setCopied] = useState<'install' | 'snippet' | null>(null);
 
   const installCommand = `pip install ${option.pkg}`;
+  const snippet = option.buildSnippet(projectName);
 
   const handleCopy = (text: string, target: 'install' | 'snippet') => {
     if (typeof navigator === 'undefined' || !navigator.clipboard) return;
@@ -372,6 +379,23 @@ function CodeStep({ option }: CodeStepProps) {
 
   return (
     <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-1.5">
+        <label htmlFor="project-name" className="text-xs text-muted-foreground">
+          Project name
+        </label>
+        <Input
+          id="project-name"
+          value={projectName}
+          onChange={(event) => onProjectNameChange(event.target.value)}
+          placeholder="my-agent"
+          className="font-mono text-sm"
+        />
+        <span className="font-mono text-[11px] text-muted-foreground/70">
+          This name flows through to <code>register(project=...)</code> and becomes the agent
+          name in OpenTracy.
+        </span>
+      </div>
+
       <div className="flex items-center gap-2 rounded-lg border border-border/40 bg-card/30 px-3 py-2">
         <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
         <code className="flex-1 font-mono text-[12px] text-foreground">{installCommand}</code>
@@ -394,7 +418,7 @@ function CodeStep({ option }: CodeStepProps) {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => handleCopy(option.snippet, 'snippet')}
+            onClick={() => handleCopy(snippet, 'snippet')}
             className="h-6 gap-1 px-2 text-[11px]"
           >
             {copied === 'snippet' ? <Check className="size-3" /> : <Copy className="size-3" />}
@@ -402,7 +426,7 @@ function CodeStep({ option }: CodeStepProps) {
           </Button>
         </div>
         <pre className="overflow-x-auto px-4 py-3 font-mono text-[12px] leading-relaxed text-muted-foreground">
-          <code>{option.snippet}</code>
+          <code>{snippet}</code>
         </pre>
       </div>
     </div>

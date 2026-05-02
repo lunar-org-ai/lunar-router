@@ -6,6 +6,7 @@ import { EmptyState } from '@/features/agents/components/EmptyState';
 import { EvalPanel } from '@/features/agents/components/EvalPanel';
 import { OnboardingFlow } from '@/features/agents/components/OnboardingFlow';
 import { useAgentImport } from '@/features/agents/hooks/useAgentImport';
+import { DEFAULT_PROJECT_NAME } from '@/features/agents/state';
 import {
   AGENT_TEMPLATES,
   SUPPORT_TEMPLATE_ID,
@@ -44,7 +45,13 @@ export default function AgentViewPage() {
     return findTemplate(SUPPORT_TEMPLATE_ID) ?? fallbackTemplate;
   }, [mode, templateId, fallbackTemplate]);
 
-  const displayName = mode === 'create' && name.trim() ? name.trim() : activeTemplate.name;
+  const trimmedName = name.trim();
+  const displayName =
+    trimmedName.length > 0
+      ? trimmedName
+      : mode === 'import'
+        ? DEFAULT_PROJECT_NAME
+        : activeTemplate.name;
 
   const run: AgentRun = useMemo(
     () => ({
