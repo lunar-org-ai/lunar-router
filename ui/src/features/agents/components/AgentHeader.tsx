@@ -1,4 +1,4 @@
-import { LayoutGrid, Loader2, Play, RotateCcw } from 'lucide-react';
+import { Loader2, Play, RotateCcw } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -35,9 +35,6 @@ export function AgentHeader({
     <header className="flex flex-col gap-3 border-b border-border/40 px-6 py-5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex size-8 items-center justify-center rounded-md border border-border/40 bg-card/40 text-muted-foreground">
-            <LayoutGrid className="size-4" />
-          </div>
           <h1 className="text-xl font-medium tracking-tight">{agentName}</h1>
           <Badge
             variant="outline"

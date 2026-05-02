@@ -2,7 +2,6 @@ import { useMemo } from 'react';
 
 import { AgentGraph } from '@/features/agents/components/AgentGraph';
 import { AgentHeader } from '@/features/agents/components/AgentHeader';
-import { AgentSidebar } from '@/features/agents/components/AgentSidebar';
 import { EmptyState } from '@/features/agents/components/EmptyState';
 import { EvalPanel } from '@/features/agents/components/EvalPanel';
 import { OnboardingFlow } from '@/features/agents/components/OnboardingFlow';
@@ -82,7 +81,6 @@ export default function AgentViewPage() {
       />
 
       <div className="flex min-h-0 flex-1">
-        <AgentSidebar />
         <main className="flex min-w-0 flex-1">
           {showEmpty ? <EmptyState onImport={openImport} onCreate={openCreate} /> : null}
 
