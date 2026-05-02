@@ -1,5 +1,7 @@
 export type AgentFramework = 'langchain' | 'langgraph' | 'crewai' | 'openai-agents';
 
+export type OnboardingMode = 'import' | 'create';
+
 export type AgentPhase = 'empty' | 'modal' | 'discovering' | 'evaluating' | 'ready';
 
 export type FrameworkOption = {
@@ -62,31 +64,36 @@ OpenAIAgentsInstrumentor().instrument(tracer_provider=provider)
 
 export const STORAGE_KEY = 'opentracy.agents.support-bot';
 
-export type StoredImport = {
-  framework: AgentFramework;
+export type StoredOnboarding = {
+  mode: OnboardingMode;
+  framework: AgentFramework | null;
+  templateId: string | null;
+  name: string;
   importedAt: string;
 };
 
-export function loadStoredImport(): StoredImport | null {
+export function loadStoredOnboarding(): StoredOnboarding | null {
   if (typeof window === 'undefined') return null;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredImport;
-    if (parsed && typeof parsed.framework === 'string') return parsed;
+    const parsed = JSON.parse(raw) as StoredOnboarding;
+    if (parsed && (parsed.mode === 'import' || parsed.mode === 'create')) {
+      return parsed;
+    }
     return null;
   } catch {
     return null;
   }
 }
 
-export function saveStoredImport(framework: AgentFramework): void {
+export function saveStoredOnboarding(value: Omit<StoredOnboarding, 'importedAt'>): void {
   if (typeof window === 'undefined') return;
-  const value: StoredImport = { framework, importedAt: new Date().toISOString() };
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+  const stored: StoredOnboarding = { ...value, importedAt: new Date().toISOString() };
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
 }
 
-export function clearStoredImport(): void {
+export function clearStoredOnboarding(): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(STORAGE_KEY);
 }

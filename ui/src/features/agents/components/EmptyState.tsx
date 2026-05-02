@@ -1,13 +1,14 @@
-import { Workflow } from 'lucide-react';
+import { Plug, Sparkles, Workflow } from 'lucide-react';
 import { motion } from 'framer-motion';
 
 import { Button } from '@/components/ui/button';
 
 type EmptyStateProps = {
   onImport: () => void;
+  onCreate: () => void;
 };
 
-export function EmptyState({ onImport }: EmptyStateProps) {
+export function EmptyState({ onImport, onCreate }: EmptyStateProps) {
   return (
     <div className="flex flex-1 items-center justify-center px-8">
       <motion.div
@@ -21,16 +22,23 @@ export function EmptyState({ onImport }: EmptyStateProps) {
         </div>
 
         <div className="flex flex-col gap-2">
-          <h2 className="text-lg font-medium tracking-tight">No agents imported yet</h2>
+          <h2 className="text-lg font-medium tracking-tight">Start with an agent</h2>
           <p className="font-mono text-xs leading-relaxed text-muted-foreground">
-            Connect an agent framework like LangChain, LangGraph, or CrewAI and OpenTracy will
-            visualize its topology and surface evaluation scores in real time.
+            Bring in an existing agent built with LangChain, CrewAI, or another framework — or
+            spin up a new one from a template.
           </p>
         </div>
 
-        <Button onClick={onImport} className="gap-2">
-          Import Agent
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={onImport} variant="outline" className="gap-2">
+            <Plug className="size-3.5" />
+            Import Agent
+          </Button>
+          <Button onClick={onCreate} className="gap-2">
+            <Sparkles className="size-3.5" />
+            Create Agent
+          </Button>
+        </div>
       </motion.div>
     </div>
   );

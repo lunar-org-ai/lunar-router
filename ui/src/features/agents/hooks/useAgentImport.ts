@@ -3,71 +3,114 @@ import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react';
 import {
   type AgentFramework,
   type AgentPhase,
-  clearStoredImport,
-  loadStoredImport,
-  saveStoredImport,
+  type OnboardingMode,
+  clearStoredOnboarding,
+  loadStoredOnboarding,
+  saveStoredOnboarding,
 } from '@/features/agents/state';
+import { SUPPORT_TEMPLATE_ID } from '@/features/agents/templates';
 
 const NODE_REVEAL_INTERVAL_MS = 380;
 const EVAL_DURATION_MS = 1600;
 
 type State = {
   phase: AgentPhase;
+  mode: OnboardingMode | null;
   modalStep: 1 | 2;
   framework: AgentFramework | null;
+  templateId: string | null;
+  name: string;
   revealedCount: number;
   runId: number;
 };
 
 type Action =
-  | { type: 'open-modal' }
+  | { type: 'open-import' }
+  | { type: 'open-create' }
   | { type: 'close-modal' }
   | { type: 'select-framework'; framework: AgentFramework }
+  | { type: 'select-template'; templateId: string }
+  | { type: 'set-name'; name: string }
   | { type: 'advance-step' }
-  | { type: 'start-discovering'; framework: AgentFramework }
+  | { type: 'start-discovering' }
   | { type: 'reveal-next' }
   | { type: 'start-evaluating' }
   | { type: 'finish-evaluating' }
   | { type: 'rerun-eval' }
   | { type: 'reset' };
 
-const initialState = (totalNodes: number): State => {
-  const stored = loadStoredImport();
+const emptyState: State = {
+  phase: 'empty',
+  mode: null,
+  modalStep: 1,
+  framework: null,
+  templateId: null,
+  name: '',
+  revealedCount: 0,
+  runId: 0,
+};
+
+const initialState = (): State => {
+  const stored = loadStoredOnboarding();
   if (stored) {
     return {
       phase: 'ready',
+      mode: stored.mode,
       modalStep: 1,
       framework: stored.framework,
-      revealedCount: totalNodes,
+      templateId: stored.templateId ?? SUPPORT_TEMPLATE_ID,
+      name: stored.name,
+      revealedCount: Number.MAX_SAFE_INTEGER,
       runId: 1,
     };
   }
-  return {
-    phase: 'empty',
-    modalStep: 1,
-    framework: null,
-    revealedCount: 0,
-    runId: 0,
-  };
+  return emptyState;
+};
+
+const stepReadyForCreate = (state: State): boolean => {
+  if (state.modalStep === 1) return state.templateId !== null;
+  return true;
+};
+
+const stepReadyForImport = (state: State): boolean => {
+  if (state.modalStep === 1) return state.framework !== null;
+  return true;
 };
 
 const reducer = (state: State, action: Action): State => {
   switch (action.type) {
-    case 'open-modal':
-      return { ...state, phase: 'modal', modalStep: 1 };
-    case 'close-modal':
-      return { ...state, phase: 'empty', modalStep: 1 };
-    case 'select-framework':
-      return { ...state, framework: action.framework };
-    case 'advance-step':
-      return state.framework ? { ...state, modalStep: 2 } : state;
-    case 'start-discovering':
+    case 'open-import':
       return {
         ...state,
-        phase: 'discovering',
-        framework: action.framework,
-        revealedCount: 0,
+        phase: 'modal',
+        mode: 'import',
+        modalStep: 1,
+        framework: state.framework,
+        templateId: SUPPORT_TEMPLATE_ID,
       };
+    case 'open-create':
+      return {
+        ...state,
+        phase: 'modal',
+        mode: 'create',
+        modalStep: 1,
+        templateId: state.mode === 'create' ? state.templateId : null,
+      };
+    case 'close-modal':
+      return { ...emptyState };
+    case 'select-framework':
+      return { ...state, framework: action.framework };
+    case 'select-template':
+      return { ...state, templateId: action.templateId };
+    case 'set-name':
+      return { ...state, name: action.name };
+    case 'advance-step': {
+      const ready = state.mode === 'create' ? stepReadyForCreate(state) : stepReadyForImport(state);
+      if (!ready) return state;
+      return { ...state, modalStep: 2 };
+    }
+    case 'start-discovering':
+      return { ...state, phase: 'discovering', revealedCount: 0 };
     case 'reveal-next':
       return { ...state, revealedCount: state.revealedCount + 1 };
     case 'start-evaluating':
@@ -77,13 +120,7 @@ const reducer = (state: State, action: Action): State => {
     case 'rerun-eval':
       return { ...state, phase: 'evaluating', runId: state.runId + 1 };
     case 'reset':
-      return {
-        phase: 'empty',
-        modalStep: 1,
-        framework: null,
-        revealedCount: 0,
-        runId: 0,
-      };
+      return { ...emptyState };
     default:
       return state;
   }
@@ -91,13 +128,19 @@ const reducer = (state: State, action: Action): State => {
 
 type UseAgentImportResult = {
   phase: AgentPhase;
+  mode: OnboardingMode | null;
   modalStep: 1 | 2;
   framework: AgentFramework | null;
+  templateId: string | null;
+  name: string;
   revealedCount: number;
   runId: number;
   openImport: () => void;
+  openCreate: () => void;
   closeModal: () => void;
   selectFramework: (framework: AgentFramework) => void;
+  selectTemplate: (templateId: string) => void;
+  setName: (name: string) => void;
   advanceStep: () => void;
   runSimulation: () => void;
   runEval: () => void;
@@ -105,7 +148,7 @@ type UseAgentImportResult = {
 };
 
 export function useAgentImport(totalNodes: number): UseAgentImportResult {
-  const [state, dispatch] = useReducer(reducer, totalNodes, initialState);
+  const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const timeoutsRef = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const clearTimers = useCallback(() => {
@@ -135,24 +178,34 @@ export function useAgentImport(totalNodes: number): UseAgentImportResult {
   }, [state.phase, state.runId]);
 
   useEffect(() => {
-    if (state.phase === 'ready' && state.framework) {
-      saveStoredImport(state.framework);
+    if (state.phase === 'ready' && state.mode) {
+      saveStoredOnboarding({
+        mode: state.mode,
+        framework: state.framework,
+        templateId: state.templateId,
+        name: state.name,
+      });
     }
-  }, [state.phase, state.framework]);
+  }, [state.phase, state.mode, state.framework, state.templateId, state.name]);
 
-  const openImport = useCallback(() => dispatch({ type: 'open-modal' }), []);
+  const openImport = useCallback(() => dispatch({ type: 'open-import' }), []);
+  const openCreate = useCallback(() => dispatch({ type: 'open-create' }), []);
   const closeModal = useCallback(() => dispatch({ type: 'close-modal' }), []);
   const selectFramework = useCallback(
     (framework: AgentFramework) => dispatch({ type: 'select-framework', framework }),
     []
   );
+  const selectTemplate = useCallback(
+    (templateId: string) => dispatch({ type: 'select-template', templateId }),
+    []
+  );
+  const setName = useCallback((name: string) => dispatch({ type: 'set-name', name }), []);
   const advanceStep = useCallback(() => dispatch({ type: 'advance-step' }), []);
 
   const runSimulation = useCallback(() => {
-    if (!state.framework) return;
     clearTimers();
-    dispatch({ type: 'start-discovering', framework: state.framework });
-  }, [state.framework, clearTimers]);
+    dispatch({ type: 'start-discovering' });
+  }, [clearTimers]);
 
   const runEval = useCallback(() => {
     if (state.phase !== 'ready') return;
@@ -162,25 +215,43 @@ export function useAgentImport(totalNodes: number): UseAgentImportResult {
 
   const reset = useCallback(() => {
     clearTimers();
-    clearStoredImport();
+    clearStoredOnboarding();
     dispatch({ type: 'reset' });
   }, [clearTimers]);
 
   return useMemo(
     () => ({
       phase: state.phase,
+      mode: state.mode,
       modalStep: state.modalStep,
       framework: state.framework,
+      templateId: state.templateId,
+      name: state.name,
       revealedCount: state.revealedCount,
       runId: state.runId,
       openImport,
+      openCreate,
       closeModal,
       selectFramework,
+      selectTemplate,
+      setName,
       advanceStep,
       runSimulation,
       runEval,
       reset,
     }),
-    [state, openImport, closeModal, selectFramework, advanceStep, runSimulation, runEval, reset]
+    [
+      state,
+      openImport,
+      openCreate,
+      closeModal,
+      selectFramework,
+      selectTemplate,
+      setName,
+      advanceStep,
+      runSimulation,
+      runEval,
+      reset,
+    ]
   );
 }
