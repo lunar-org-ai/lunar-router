@@ -7,6 +7,8 @@ export type AgentNode = {
   subtitle?: string;
   meta?: string;
   badge?: 'NEW';
+  cost?: string;
+  latency?: string;
 };
 
 export type MetricStatus = 'pass' | 'fail';

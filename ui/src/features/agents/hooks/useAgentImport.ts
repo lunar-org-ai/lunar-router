@@ -11,6 +11,7 @@ import {
 import { SUPPORT_TEMPLATE_ID } from '@/features/agents/templates';
 
 const NODE_REVEAL_INTERVAL_MS = 380;
+const BUILD_DURATION_MS = 700;
 const EVAL_DURATION_MS = 1600;
 
 type State = {
@@ -160,6 +161,11 @@ export function useAgentImport(totalNodes: number): UseAgentImportResult {
 
   useEffect(() => {
     if (state.phase !== 'discovering') return;
+    if (state.mode === 'create') {
+      const id = setTimeout(() => dispatch({ type: 'start-evaluating' }), BUILD_DURATION_MS);
+      timeoutsRef.current.push(id);
+      return () => clearTimeout(id);
+    }
     if (state.revealedCount < totalNodes) {
       const id = setTimeout(() => dispatch({ type: 'reveal-next' }), NODE_REVEAL_INTERVAL_MS);
       timeoutsRef.current.push(id);
@@ -168,7 +174,7 @@ export function useAgentImport(totalNodes: number): UseAgentImportResult {
     const id = setTimeout(() => dispatch({ type: 'start-evaluating' }), 400);
     timeoutsRef.current.push(id);
     return () => clearTimeout(id);
-  }, [state.phase, state.revealedCount, totalNodes]);
+  }, [state.phase, state.mode, state.revealedCount, totalNodes]);
 
   useEffect(() => {
     if (state.phase !== 'evaluating') return;

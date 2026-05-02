@@ -20,6 +20,7 @@ type NodeCardProps = {
 
 export function NodeCard({ node, className }: NodeCardProps) {
   const Icon = ICONS[node.type];
+  const hasMetrics = Boolean(node.cost) || Boolean(node.latency);
 
   return (
     <Card
@@ -37,6 +38,16 @@ export function NodeCard({ node, className }: NodeCardProps) {
         {node.subtitle ? (
           <div className="font-mono text-xs leading-tight text-muted-foreground">
             {node.subtitle}
+          </div>
+        ) : null}
+        {hasMetrics ? (
+          <div className="mt-1 flex items-center gap-2 font-mono text-[10px] text-muted-foreground/60">
+            {node.cost ? (
+              <span className="rounded-sm bg-emerald-500/10 px-1 py-px text-emerald-500/80">
+                {node.cost}
+              </span>
+            ) : null}
+            {node.latency ? <span>{node.latency}</span> : null}
           </div>
         ) : null}
       </div>

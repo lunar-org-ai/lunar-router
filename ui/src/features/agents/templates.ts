@@ -16,13 +16,21 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
     name: 'Support Agent',
     description: 'Customer support flow with KB retrieval and routing across resolution paths.',
     nodes: [
-      { id: 's1', type: 'agent', title: 'Agent Node', subtitle: 'customer_support_v1' },
+      {
+        id: 's1',
+        type: 'agent',
+        title: 'Agent Node',
+        subtitle: 'customer_support_v1',
+        latency: '12ms',
+      },
       {
         id: 's2',
         type: 'tool',
         title: 'Tool: KB Search',
         subtitle: 'vector_retrieval(top_k=5)',
         badge: 'NEW',
+        cost: '$0.0001',
+        latency: '180ms p95',
       },
       {
         id: 's3',
@@ -30,9 +38,23 @@ export const AGENT_TEMPLATES: AgentTemplate[] = [
         title: 'LLM Prompt',
         subtitle: '"You are a helpful support assistant"',
         meta: 'gpt-4o-mini',
+        cost: '$0.0008',
+        latency: '1.2s p95',
       },
-      { id: 's4', type: 'router', title: 'Router', subtitle: 'escalate | resolve | clarify' },
-      { id: 's5', type: 'output', title: 'Output', subtitle: 'response → user' },
+      {
+        id: 's4',
+        type: 'router',
+        title: 'Router',
+        subtitle: 'escalate | resolve | clarify',
+        latency: '8ms',
+      },
+      {
+        id: 's5',
+        type: 'output',
+        title: 'Output',
+        subtitle: 'response → user',
+        latency: '4ms',
+      },
     ],
     metrics: [
       { name: 'Factuality', value: 62 },

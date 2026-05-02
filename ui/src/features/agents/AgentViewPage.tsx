@@ -106,8 +106,18 @@ export default function AgentViewPage() {
             <>
               <AgentGraph
                 nodes={run.nodes}
-                revealedCount={phase === 'discovering' ? revealedCount : run.nodes.length}
-                highlightLast={phase === 'discovering'}
+                revealedCount={
+                  phase === 'discovering' && mode === 'import'
+                    ? revealedCount
+                    : run.nodes.length
+                }
+                flowMode={
+                  phase === 'discovering'
+                    ? mode === 'create'
+                      ? 'build'
+                      : 'discovery'
+                    : 'static'
+                }
               />
               <EvalPanel run={run} evaluating={evaluating} runId={runId} />
             </>
