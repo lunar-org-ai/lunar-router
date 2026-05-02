@@ -6,6 +6,7 @@ import type { EvalMetric } from '@/features/agents/types';
 type MetricBarProps = {
   metric: EvalMetric;
   index?: number;
+  runId?: number;
 };
 
 type Resolved = {
@@ -56,7 +57,7 @@ function resolveMetric(value: EvalMetric['value']): Resolved {
   };
 }
 
-export function MetricBar({ metric, index = 0 }: MetricBarProps) {
+export function MetricBar({ metric, index = 0, runId = 0 }: MetricBarProps) {
   const resolved = resolveMetric(metric.value);
 
   return (
@@ -67,6 +68,7 @@ export function MetricBar({ metric, index = 0 }: MetricBarProps) {
       </div>
       <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted/40">
         <motion.div
+          key={runId}
           className={cn('absolute inset-y-0 left-0 rounded-full', resolved.barColor)}
           initial={{ width: 0 }}
           animate={{ width: `${resolved.width}%` }}

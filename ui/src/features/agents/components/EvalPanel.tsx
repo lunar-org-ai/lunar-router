@@ -1,4 +1,6 @@
-import { AlertTriangle } from 'lucide-react';
+import { useEffect } from 'react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
+import { animate, motion, useMotionValue, useTransform } from 'framer-motion';
 
 import { MetricBar } from '@/features/agents/components/MetricBar';
 import { cn } from '@/lib/utils';
@@ -6,6 +8,8 @@ import type { AgentRun } from '@/features/agents/types';
 
 type EvalPanelProps = {
   run: AgentRun;
+  evaluating?: boolean;
+  runId?: number;
 };
 
 function overallColor(value: number) {
@@ -14,27 +18,28 @@ function overallColor(value: number) {
   return 'text-rose-500';
 }
 
-export function EvalPanel({ run }: EvalPanelProps) {
+export function EvalPanel({ run, evaluating = false, runId = 0 }: EvalPanelProps) {
   return (
     <aside className="flex w-[360px] shrink-0 flex-col gap-6 border-l border-border/40 px-6 py-8">
       <div className="flex items-baseline justify-between">
         <span className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
           Evaluation
         </span>
-        <span className="font-mono text-xs text-muted-foreground">{run.runLabel}</span>
+        <span className="flex items-center gap-2 font-mono text-xs text-muted-foreground">
+          {evaluating ? <Loader2 className="size-3 animate-spin" /> : null}
+          {evaluating ? 'Running…' : run.runLabel}
+        </span>
       </div>
 
       <div className="flex flex-col gap-5">
         {run.metrics.map((metric, index) => (
-          <MetricBar key={metric.name} metric={metric} index={index} />
+          <MetricBar key={metric.name} metric={metric} index={index} runId={runId} />
         ))}
       </div>
 
       <div className="flex items-baseline justify-between border-t border-border/40 pt-5">
         <span className="text-sm font-medium">Overall</span>
-        <span className={cn('font-mono text-xl font-medium', overallColor(run.overall))}>
-          {run.overall}%
-        </span>
+        <AnimatedOverall value={run.overall} runId={runId} />
       </div>
 
       {run.warning ? (
@@ -44,5 +49,26 @@ export function EvalPanel({ run }: EvalPanelProps) {
         </div>
       ) : null}
     </aside>
+  );
+}
+
+type AnimatedOverallProps = {
+  value: number;
+  runId: number;
+};
+
+function AnimatedOverall({ value, runId }: AnimatedOverallProps) {
+  const motionValue = useMotionValue(0);
+  const rounded = useTransform(motionValue, (current) => `${Math.round(current)}%`);
+
+  useEffect(() => {
+    const controls = animate(motionValue, value, { duration: 1.4, ease: 'easeOut' });
+    return controls.stop;
+  }, [value, runId, motionValue]);
+
+  return (
+    <motion.span className={cn('font-mono text-xl font-medium', overallColor(value))}>
+      {rounded}
+    </motion.span>
   );
 }

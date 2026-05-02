@@ -1,4 +1,4 @@
-import { LayoutGrid, Play } from 'lucide-react';
+import { LayoutGrid, Loader2, Play, RotateCcw } from 'lucide-react';
 
 import {
   Breadcrumb,
@@ -17,6 +17,11 @@ type AgentHeaderProps = {
   agentName: string;
   version: string;
   overall: number;
+  showActions?: boolean;
+  scoreState?: 'visible' | 'pending' | 'evaluating';
+  onRunEval?: () => void;
+  onReset?: () => void;
+  evalDisabled?: boolean;
 };
 
 function scoreColor(value: number) {
@@ -25,7 +30,17 @@ function scoreColor(value: number) {
   return 'text-rose-500';
 }
 
-export function AgentHeader({ agentId, agentName, version, overall }: AgentHeaderProps) {
+export function AgentHeader({
+  agentId,
+  agentName,
+  version,
+  overall,
+  showActions = true,
+  scoreState = 'visible',
+  onRunEval,
+  onReset,
+  evalDisabled = false,
+}: AgentHeaderProps) {
   return (
     <header className="flex flex-col gap-3 border-b border-border/40 px-6 pb-4 pt-5">
       <Breadcrumb>
@@ -54,16 +69,50 @@ export function AgentHeader({ agentId, agentName, version, overall }: AgentHeade
           </Badge>
         </div>
 
-        <div className="flex items-center gap-4">
-          <span className={cn('font-mono text-base font-medium', scoreColor(overall))}>
-            {overall}%
-          </span>
-          <Button size="sm" className="gap-1.5">
-            <Play className="size-3.5 fill-current" />
-            Run Eval
-          </Button>
-        </div>
+        {showActions ? (
+          <div className="flex items-center gap-4">
+            <ScoreReadout state={scoreState} value={overall} />
+            {onReset ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={onReset}
+                className="gap-1.5 text-muted-foreground"
+              >
+                <RotateCcw className="size-3.5" />
+                Reset demo
+              </Button>
+            ) : null}
+            <Button size="sm" onClick={onRunEval} disabled={evalDisabled} className="gap-1.5">
+              {scoreState === 'evaluating' ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Play className="size-3.5 fill-current" />
+              )}
+              {scoreState === 'evaluating' ? 'Running…' : 'Run Eval'}
+            </Button>
+          </div>
+        ) : null}
       </div>
     </header>
+  );
+}
+
+type ScoreReadoutProps = {
+  state: 'visible' | 'pending' | 'evaluating';
+  value: number;
+};
+
+function ScoreReadout({ state, value }: ScoreReadoutProps) {
+  if (state === 'pending') {
+    return <span className="font-mono text-base font-medium text-muted-foreground/60">—</span>;
+  }
+  if (state === 'evaluating') {
+    return (
+      <span className="font-mono text-base font-medium text-muted-foreground">…</span>
+    );
+  }
+  return (
+    <span className={cn('font-mono text-base font-medium', scoreColor(value))}>{value}%</span>
   );
 }
