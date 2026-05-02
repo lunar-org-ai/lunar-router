@@ -56,7 +56,7 @@ const reducer = (state: State, action: Action): State => {
     case 'open-modal':
       return { ...state, phase: 'modal', modalStep: 1 };
     case 'close-modal':
-      return { ...state, phase: state.framework ? state.phase : 'empty' };
+      return { ...state, phase: 'empty', modalStep: 1 };
     case 'select-framework':
       return { ...state, framework: action.framework };
     case 'advance-step':
