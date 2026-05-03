@@ -31,22 +31,12 @@ export function ExpandedTrafficView({ agent, onClose }: Props) {
   });
 
   return (
-    <>
-      <motion.div
-        key="traffic-backdrop"
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        transition={{ duration: 0.25 }}
-        className="fixed inset-0 z-40 bg-background/80 backdrop-blur-sm"
-        onClick={onClose}
-      />
-      <motion.div
-        key="traffic-panel"
-        layoutId="agent-traffic-panel"
-        transition={SPRING}
-        className="fixed inset-4 z-50 flex flex-col overflow-hidden rounded-2xl border border-border/50 bg-card/95 shadow-2xl md:inset-8"
-      >
+    <motion.div
+      key="traffic-panel"
+      layoutId="agent-traffic-panel"
+      transition={SPRING}
+      className="absolute inset-0 flex flex-col overflow-hidden rounded-xl border border-border/50 bg-card/95"
+    >
         <motion.div
           initial={{ opacity: 0, y: -6 }}
           animate={{ opacity: 1, y: 0 }}
@@ -132,8 +122,7 @@ export function ExpandedTrafficView({ agent, onClose }: Props) {
             </div>
           </div>
         </motion.div>
-      </motion.div>
-    </>
+    </motion.div>
   );
 }
 

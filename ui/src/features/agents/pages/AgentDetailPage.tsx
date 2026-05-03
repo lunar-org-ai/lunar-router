@@ -118,48 +118,50 @@ export default function AgentDetailPage() {
         onReset={handleReset}
         evaluating={evaluating}
       />
-      <div className="flex-1 overflow-y-auto">
-        <OverviewTab
-          agent={agent}
-          metrics={metrics}
-          evalRunId={evalRunId}
-          evaluating={evaluating}
-          expanded={expanded}
-          onExpand={setExpanded}
-        />
-      </div>
-
-      <AnimatePresence>
-        {expanded === 'evals' ? (
-          <ExpandedEvalsView
+      <div className="relative min-h-0 flex-1">
+        <div className="absolute inset-0 overflow-y-auto">
+          <OverviewTab
+            agent={agent}
             metrics={metrics}
-            evalScore={evalScore}
             evalRunId={evalRunId}
             evaluating={evaluating}
-            onRunEval={handleRunEval}
-            onClose={closeExpanded}
+            expanded={expanded}
+            onExpand={setExpanded}
           />
-        ) : null}
-        {expanded === 'topology' ? (
-          <ExpandedTopologyView
-            framework={agent.framework}
-            agentName={agent.name}
-            stack={agent.stack}
-            onClose={closeExpanded}
-          />
-        ) : null}
-        {expanded === 'traces' ? (
-          <ExpandedTracesView
-            traces={agent.recentTraces}
-            agentName={agent.name}
-            totalToday={agent.traces24h}
-            onClose={closeExpanded}
-          />
-        ) : null}
-        {expanded === 'traffic' ? (
-          <ExpandedTrafficView agent={agent} onClose={closeExpanded} />
-        ) : null}
-      </AnimatePresence>
+        </div>
+
+        <AnimatePresence>
+          {expanded === 'evals' ? (
+            <ExpandedEvalsView
+              metrics={metrics}
+              evalScore={evalScore}
+              evalRunId={evalRunId}
+              evaluating={evaluating}
+              onRunEval={handleRunEval}
+              onClose={closeExpanded}
+            />
+          ) : null}
+          {expanded === 'topology' ? (
+            <ExpandedTopologyView
+              framework={agent.framework}
+              agentName={agent.name}
+              stack={agent.stack}
+              onClose={closeExpanded}
+            />
+          ) : null}
+          {expanded === 'traces' ? (
+            <ExpandedTracesView
+              traces={agent.recentTraces}
+              agentName={agent.name}
+              totalToday={agent.traces24h}
+              onClose={closeExpanded}
+            />
+          ) : null}
+          {expanded === 'traffic' ? (
+            <ExpandedTrafficView agent={agent} onClose={closeExpanded} />
+          ) : null}
+        </AnimatePresence>
+      </div>
     </div>
   );
 }
