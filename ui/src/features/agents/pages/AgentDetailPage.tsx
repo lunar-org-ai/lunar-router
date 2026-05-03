@@ -1,23 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence } from 'framer-motion';
 import { useNavigate, useParams } from 'react-router-dom';
 
 import { Button } from '@/components/ui/button';
 import { AgentHeader } from '@/features/agents/components/AgentHeader';
-import { OverviewTab } from '@/features/agents/components/OverviewTab';
+import { ExpandedEvalsView } from '@/features/agents/components/ExpandedEvalsView';
+import { OverviewTab, type ExpandedSection } from '@/features/agents/components/OverviewTab';
 import { useAgentsList } from '@/features/agents/hooks/useAgentsList';
-import { cn } from '@/lib/utils';
 import type { EvalMetric } from '@/features/agents/types';
 
 const EVAL_DURATION_MS = 2200;
-
-type TabKey = 'overview' | 'traces' | 'topology' | 'evals';
-
-const TABS: { key: TabKey; label: string; enabled: boolean }[] = [
-  { key: 'overview', label: 'Overview', enabled: true },
-  { key: 'traces', label: 'Traces', enabled: false },
-  { key: 'topology', label: 'Topology', enabled: false },
-  { key: 'evals', label: 'Evals', enabled: false },
-];
 
 const perturbMetric = (metric: EvalMetric): EvalMetric => {
   if (typeof metric.value !== 'number') return metric;
@@ -46,6 +38,7 @@ export default function AgentDetailPage() {
   const [metrics, setMetrics] = useState<EvalMetric[]>(() => agent?.metrics ?? []);
   const [evalScore, setEvalScore] = useState<number>(() => agent?.evalScore ?? 0);
   const [evalRunId, setEvalRunId] = useState(0);
+  const [expanded, setExpanded] = useState<ExpandedSection>(null);
   const evalTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -59,6 +52,15 @@ export default function AgentDetailPage() {
       if (evalTimeoutRef.current) clearTimeout(evalTimeoutRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (expanded === null) return;
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(null);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [expanded]);
 
   const handleRunEval = useCallback(() => {
     if (!agent || evaluating) return;
@@ -111,52 +113,29 @@ export default function AgentDetailPage() {
         onReset={handleReset}
         evaluating={evaluating}
       />
-      <DetailTabs activeTab="overview" />
       <div className="flex-1 overflow-y-auto">
         <OverviewTab
           agent={agent}
           metrics={metrics}
           evalRunId={evalRunId}
           evaluating={evaluating}
+          expanded={expanded}
+          onExpand={setExpanded}
         />
       </div>
-    </div>
-  );
-}
 
-type DetailTabsProps = {
-  activeTab: TabKey;
-};
-
-function DetailTabs({ activeTab }: DetailTabsProps) {
-  return (
-    <div className="flex items-center gap-1 border-b border-border/40 px-6">
-      {TABS.map((tab) => {
-        const isActive = tab.key === activeTab;
-        return (
-          <button
-            key={tab.key}
-            type="button"
-            disabled={!tab.enabled}
-            className={cn(
-              'relative -mb-px flex items-center gap-2 border-b-2 px-3 py-3 text-sm transition-colors',
-              isActive
-                ? 'border-foreground text-foreground'
-                : 'border-transparent text-muted-foreground/60',
-              !tab.enabled
-                ? 'cursor-not-allowed'
-                : !isActive && 'hover:text-foreground'
-            )}
-          >
-            {tab.label}
-            {!tab.enabled ? (
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/40">
-                Soon
-              </span>
-            ) : null}
-          </button>
-        );
-      })}
+      <AnimatePresence>
+        {expanded === 'evals' ? (
+          <ExpandedEvalsView
+            metrics={metrics}
+            evalScore={evalScore}
+            evalRunId={evalRunId}
+            evaluating={evaluating}
+            onRunEval={handleRunEval}
+            onClose={() => setExpanded(null)}
+          />
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }

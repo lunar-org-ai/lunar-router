@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import { Maximize2 } from 'lucide-react';
 
 import { MetricBar } from '@/features/agents/components/MetricBar';
 import { MetricTile } from '@/features/agents/components/MetricTile';
@@ -13,11 +14,15 @@ const formatLatency = (ms: number): string =>
 const formatErrorRate = (rate: number): string => `${(rate * 100).toFixed(1)}%`;
 const formatCost = (n: number): string => `$${n.toFixed(4)}`;
 
+export type ExpandedSection = 'evals' | null;
+
 type OverviewTabProps = {
   agent: AgentSummary;
   metrics?: EvalMetric[];
   evalRunId?: number;
   evaluating?: boolean;
+  expanded?: ExpandedSection;
+  onExpand?: (section: ExpandedSection) => void;
 };
 
 export function OverviewTab({
@@ -25,8 +30,11 @@ export function OverviewTab({
   metrics,
   evalRunId = 0,
   evaluating = false,
+  expanded = null,
+  onExpand,
 }: OverviewTabProps) {
   const displayMetrics = metrics ?? agent.metrics;
+  const evalsExpanded = expanded === 'evals';
 
   return (
     <div className="flex flex-col gap-6 px-6 py-6">
@@ -95,25 +103,35 @@ export function OverviewTab({
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
             Eval breakdown
           </span>
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{
-              opacity: evaluating ? 0.55 : 1,
-              y: 0,
-            }}
-            transition={{ duration: 0.4, delay: 0.44, ease: [0.16, 1, 0.3, 1] }}
-            className="relative flex flex-col gap-3 rounded-xl border border-border/40 bg-card/30 px-4 py-4"
-          >
-            {evaluating ? <ShimmerOverlay /> : null}
-            {displayMetrics.map((metric, i) => (
-              <MetricBar
-                key={`${metric.name}-${evalRunId}`}
-                metric={metric}
-                index={i}
-                runId={evalRunId}
-              />
-            ))}
-          </motion.div>
+          {evalsExpanded ? (
+            <div className="h-full min-h-[14rem] rounded-xl border border-dashed border-border/30 bg-card/10" />
+          ) : (
+            <motion.button
+              type="button"
+              layoutId="agent-evals-panel"
+              onClick={() => onExpand?.('evals')}
+              transition={{ type: 'spring', stiffness: 280, damping: 32 }}
+              whileHover={{ borderColor: 'hsl(var(--border))' }}
+              className="group relative flex flex-col gap-3 rounded-xl border border-border/40 bg-card/30 px-4 py-4 text-left transition-colors hover:border-border/70 hover:bg-card/45"
+            >
+              {evaluating ? <ShimmerOverlay /> : null}
+              <Maximize2 className="absolute right-3 top-3 size-3 text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100" />
+              <motion.div
+                animate={{ opacity: evaluating ? 0.55 : 1 }}
+                transition={{ duration: 0.25 }}
+                className="flex flex-col gap-3"
+              >
+                {displayMetrics.map((metric, i) => (
+                  <MetricBar
+                    key={`${metric.name}-${evalRunId}`}
+                    metric={metric}
+                    index={i}
+                    runId={evalRunId}
+                  />
+                ))}
+              </motion.div>
+            </motion.button>
+          )}
         </div>
       </div>
     </div>
