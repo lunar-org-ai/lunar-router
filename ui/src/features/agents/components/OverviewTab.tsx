@@ -6,6 +6,7 @@ import { MetricTile } from '@/features/agents/components/MetricTile';
 import { RecentTracesList } from '@/features/agents/components/RecentTracesList';
 import { Sparkline } from '@/features/agents/components/Sparkline';
 import { FrameworkChip, StackChip } from '@/features/agents/components/StackChip';
+import { cn } from '@/lib/utils';
 import type { AgentSummary, EvalMetric } from '@/features/agents/types';
 
 const formatTraces = (n: number): string => n.toLocaleString();
@@ -14,7 +15,9 @@ const formatLatency = (ms: number): string =>
 const formatErrorRate = (rate: number): string => `${(rate * 100).toFixed(1)}%`;
 const formatCost = (n: number): string => `$${n.toFixed(4)}`;
 
-export type ExpandedSection = 'evals' | null;
+const SPRING = { type: 'spring' as const, stiffness: 280, damping: 32 };
+
+export type ExpandedSection = 'evals' | 'topology' | 'traces' | 'traffic' | null;
 
 type OverviewTabProps = {
   agent: AgentSummary;
@@ -35,30 +38,44 @@ export function OverviewTab({
 }: OverviewTabProps) {
   const displayMetrics = metrics ?? agent.metrics;
   const evalsExpanded = expanded === 'evals';
+  const topologyExpanded = expanded === 'topology';
+  const tracesExpanded = expanded === 'traces';
+  const trafficExpanded = expanded === 'traffic';
 
   return (
     <div className="flex flex-col gap-6 px-6 py-6">
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-        className="flex flex-col gap-2"
-      >
+      <div className="flex flex-col gap-2">
         <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
           Stack
         </span>
-        <div className="flex flex-wrap items-center gap-2">
-          <FrameworkChip framework={agent.framework} delay={0.04} />
-          {agent.stack.map((chip, i) => (
-            <StackChip
-              key={`${chip.kind}-${chip.label}`}
-              kind={chip.kind}
-              label={chip.label}
-              delay={0.08 + i * 0.04}
-            />
-          ))}
-        </div>
-      </motion.div>
+        {topologyExpanded ? (
+          <Placeholder height="min-h-[3.5rem]" />
+        ) : (
+          <ExpandableShell
+            layoutId="agent-topology-panel"
+            onClick={() => onExpand?.('topology')}
+            className="px-4 py-3"
+          >
+            <Affordance />
+            <motion.div
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+              className="flex flex-wrap items-center gap-2"
+            >
+              <FrameworkChip framework={agent.framework} delay={0.04} />
+              {agent.stack.map((chip, i) => (
+                <StackChip
+                  key={`${chip.kind}-${chip.label}`}
+                  kind={chip.kind}
+                  label={chip.label}
+                  delay={0.08 + i * 0.04}
+                />
+              ))}
+            </motion.div>
+          </ExpandableShell>
+        )}
+      </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <MetricTile label="Traces 24h" value={formatTraces(agent.traces24h)} delay={0.12} />
@@ -75,47 +92,59 @@ export function OverviewTab({
         <MetricTile label="$ / trace" value={formatCost(agent.costPerTrace)} delay={0.27} />
       </div>
 
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.4, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
-        className="rounded-xl border border-border/40 bg-card/30 px-5 py-4"
-      >
-        <div className="flex items-baseline justify-between">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            Trace volume · 24h
-          </span>
-          <span className="font-mono text-[11px] text-muted-foreground/60">30min buckets</span>
-        </div>
-        <div className="mt-3 text-foreground/55">
-          <Sparkline values={agent.traceVolume} width={800} height={64} delay={0.36} />
-        </div>
-      </motion.div>
+      {trafficExpanded ? (
+        <Placeholder height="min-h-[7rem]" />
+      ) : (
+        <ExpandableShell
+          layoutId="agent-traffic-panel"
+          onClick={() => onExpand?.('traffic')}
+          className="px-5 py-4"
+        >
+          <Affordance />
+          <div className="flex items-baseline justify-between">
+            <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              Trace volume · 24h
+            </span>
+            <span className="font-mono text-[11px] text-muted-foreground/60">30min buckets</span>
+          </div>
+          <div className="mt-3 text-foreground/55">
+            <Sparkline values={agent.traceVolume} width={800} height={64} delay={0.36} />
+          </div>
+        </ExpandableShell>
+      )}
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
         <div className="flex flex-col gap-3 md:col-span-2">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
             Recent traces
           </span>
-          <RecentTracesList traces={agent.recentTraces} delay={0.4} />
+          {tracesExpanded ? (
+            <Placeholder height="min-h-[14rem]" />
+          ) : (
+            <ExpandableShell
+              layoutId="agent-traces-panel"
+              onClick={() => onExpand?.('traces')}
+              className=""
+            >
+              <Affordance />
+              <RecentTracesList traces={agent.recentTraces} delay={0.4} />
+            </ExpandableShell>
+          )}
         </div>
         <div className="flex flex-col gap-3">
           <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
             Eval breakdown
           </span>
           {evalsExpanded ? (
-            <div className="h-full min-h-[14rem] rounded-xl border border-dashed border-border/30 bg-card/10" />
+            <Placeholder height="min-h-[14rem]" />
           ) : (
-            <motion.button
-              type="button"
+            <ExpandableShell
               layoutId="agent-evals-panel"
               onClick={() => onExpand?.('evals')}
-              transition={{ type: 'spring', stiffness: 280, damping: 32 }}
-              whileHover={{ borderColor: 'hsl(var(--border))' }}
-              className="group relative flex flex-col gap-3 rounded-xl border border-border/40 bg-card/30 px-4 py-4 text-left transition-colors hover:border-border/70 hover:bg-card/45"
+              className="px-4 py-4"
             >
               {evaluating ? <ShimmerOverlay /> : null}
-              <Maximize2 className="absolute right-3 top-3 size-3 text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100" />
+              <Affordance />
               <motion.div
                 animate={{ opacity: evaluating ? 0.55 : 1 }}
                 transition={{ duration: 0.25 }}
@@ -130,11 +159,56 @@ export function OverviewTab({
                   />
                 ))}
               </motion.div>
-            </motion.button>
+            </ExpandableShell>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+type ExpandableShellProps = {
+  layoutId: string;
+  onClick: () => void;
+  className?: string;
+  children: React.ReactNode;
+};
+
+function ExpandableShell({ layoutId, onClick, className, children }: ExpandableShellProps) {
+  return (
+    <motion.button
+      type="button"
+      layoutId={layoutId}
+      onClick={onClick}
+      transition={SPRING}
+      className={cn(
+        'group relative flex flex-col gap-3 rounded-xl border border-border/40 bg-card/30 text-left transition-colors hover:border-border/70 hover:bg-card/45',
+        className
+      )}
+    >
+      {children}
+    </motion.button>
+  );
+}
+
+function Affordance() {
+  return (
+    <Maximize2 className="absolute right-3 top-3 size-3 text-muted-foreground/40 opacity-0 transition-opacity group-hover:opacity-100" />
+  );
+}
+
+type PlaceholderProps = {
+  height: string;
+};
+
+function Placeholder({ height }: PlaceholderProps) {
+  return (
+    <div
+      className={cn(
+        'rounded-xl border border-dashed border-border/30 bg-card/10',
+        height
+      )}
+    />
   );
 }
 

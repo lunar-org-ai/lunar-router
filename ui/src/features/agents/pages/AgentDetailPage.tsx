@@ -5,6 +5,9 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { AgentHeader } from '@/features/agents/components/AgentHeader';
 import { ExpandedEvalsView } from '@/features/agents/components/ExpandedEvalsView';
+import { ExpandedTopologyView } from '@/features/agents/components/ExpandedTopologyView';
+import { ExpandedTracesView } from '@/features/agents/components/ExpandedTracesView';
+import { ExpandedTrafficView } from '@/features/agents/components/ExpandedTrafficView';
 import { OverviewTab, type ExpandedSection } from '@/features/agents/components/OverviewTab';
 import { useAgentsList } from '@/features/agents/hooks/useAgentsList';
 import type { EvalMetric } from '@/features/agents/types';
@@ -101,6 +104,8 @@ export default function AgentDetailPage() {
     );
   }
 
+  const closeExpanded = () => setExpanded(null);
+
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col bg-background">
       <AgentHeader
@@ -132,8 +137,27 @@ export default function AgentDetailPage() {
             evalRunId={evalRunId}
             evaluating={evaluating}
             onRunEval={handleRunEval}
-            onClose={() => setExpanded(null)}
+            onClose={closeExpanded}
           />
+        ) : null}
+        {expanded === 'topology' ? (
+          <ExpandedTopologyView
+            framework={agent.framework}
+            agentName={agent.name}
+            stack={agent.stack}
+            onClose={closeExpanded}
+          />
+        ) : null}
+        {expanded === 'traces' ? (
+          <ExpandedTracesView
+            traces={agent.recentTraces}
+            agentName={agent.name}
+            totalToday={agent.traces24h}
+            onClose={closeExpanded}
+          />
+        ) : null}
+        {expanded === 'traffic' ? (
+          <ExpandedTrafficView agent={agent} onClose={closeExpanded} />
         ) : null}
       </AnimatePresence>
     </div>

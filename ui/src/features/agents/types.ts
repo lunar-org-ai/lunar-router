@@ -15,6 +15,9 @@ export type RecentTrace = {
   durationMs: number;
   costUsd: number;
   agoLabel: string;
+  model?: string;
+  tokensIn?: number;
+  tokensOut?: number;
 };
 
 export type StackKind = 'model' | 'tool' | 'vectorstore' | 'memory' | 'guardrail';
@@ -22,6 +25,10 @@ export type StackKind = 'model' | 'tool' | 'vectorstore' | 'memory' | 'guardrail
 export type StackComponent = {
   kind: StackKind;
   label: string;
+  callCount?: number;
+  successRate?: number;
+  avgLatencyMs?: number;
+  costShare?: number;
 };
 
 export type AgentSummary = {

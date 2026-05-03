@@ -17,19 +17,14 @@ const formatCost = (n: number): string => `$${n.toFixed(4)}`;
 
 export function RecentTracesList({ traces, delay = 0 }: RecentTracesListProps) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay, ease: [0.16, 1, 0.3, 1] }}
-      className="flex flex-col gap-px rounded-xl border border-border/40 bg-card/30 p-1"
-    >
+    <div className="flex flex-col gap-px p-1">
       {traces.map((trace, i) => (
         <motion.div
           key={trace.id}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: 0.25, delay: delay + 0.08 + i * 0.04, ease: 'easeOut' }}
-          className="flex items-center justify-between gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-card/60"
+          className="flex items-center justify-between gap-3 rounded-lg px-3 py-2"
         >
           <div className="flex min-w-0 items-center gap-3">
             <span
@@ -49,6 +44,6 @@ export function RecentTracesList({ traces, delay = 0 }: RecentTracesListProps) {
           </div>
         </motion.div>
       ))}
-    </motion.div>
+    </div>
   );
 }
