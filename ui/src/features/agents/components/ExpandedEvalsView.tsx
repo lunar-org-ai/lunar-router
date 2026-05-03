@@ -90,7 +90,7 @@ export function ExpandedEvalsView({
       key="evals-panel"
       layoutId="agent-evals-panel"
       transition={SPRING}
-      className="absolute inset-0 flex flex-col overflow-hidden rounded-xl border border-border/50 bg-card/95"
+      className="absolute inset-0 flex flex-col overflow-hidden rounded-xl border border-border/50 bg-background"
     >
         <motion.div
           initial={{ opacity: 0, y: -6 }}

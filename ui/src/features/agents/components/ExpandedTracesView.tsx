@@ -29,7 +29,7 @@ export function ExpandedTracesView({ traces, agentName, totalToday, onClose }: P
       key="traces-panel"
       layoutId="agent-traces-panel"
       transition={SPRING}
-      className="absolute inset-0 flex flex-col overflow-hidden rounded-xl border border-border/50 bg-card/95"
+      className="absolute inset-0 flex flex-col overflow-hidden rounded-xl border border-border/50 bg-background"
     >
         <motion.div
           initial={{ opacity: 0, y: -6 }}
