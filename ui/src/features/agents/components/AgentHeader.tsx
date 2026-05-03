@@ -1,8 +1,11 @@
+import { useEffect, useState } from 'react';
+import { animate, motion, useMotionValue } from 'framer-motion';
 import { Loader2, Play, RotateCcw } from 'lucide-react';
 import { CrewAI, LangChain, LangGraph, OpenAI } from '@lobehub/icons';
 
 import { Button } from '@/components/ui/button';
 import { StatusPill } from '@/features/agents/components/StatusPill';
+import { cn } from '@/lib/utils';
 import type { AgentFramework, AgentStatus } from '@/features/agents/types';
 
 const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: number }>> = {
@@ -16,6 +19,8 @@ type AgentHeaderProps = {
   agentName: string;
   framework: AgentFramework;
   status: AgentStatus;
+  evalScore?: number;
+  evalRunId?: number;
   onRunEval?: () => void;
   onReset?: () => void;
   evaluating?: boolean;
@@ -25,6 +30,8 @@ export function AgentHeader({
   agentName,
   framework,
   status,
+  evalScore,
+  evalRunId = 0,
   onRunEval,
   onReset,
   evaluating = false,
@@ -43,7 +50,14 @@ export function AgentHeader({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-4">
+        {typeof evalScore === 'number' ? (
+          <EvalScoreReadout
+            score={evalScore}
+            runId={evalRunId}
+            evaluating={evaluating}
+          />
+        ) : null}
         {onReset ? (
           <Button
             variant="ghost"
@@ -67,5 +81,46 @@ export function AgentHeader({
         ) : null}
       </div>
     </header>
+  );
+}
+
+type EvalScoreReadoutProps = {
+  score: number;
+  runId: number;
+  evaluating: boolean;
+};
+
+function scoreColor(value: number): string {
+  if (value >= 80) return 'text-emerald-500';
+  if (value >= 50) return 'text-amber-500';
+  return 'text-rose-500';
+}
+
+function EvalScoreReadout({ score, runId, evaluating }: EvalScoreReadoutProps) {
+  const motionVal = useMotionValue(score);
+  const [display, setDisplay] = useState(score);
+
+  useEffect(() => {
+    const controls = animate(motionVal, score, {
+      duration: 0.85,
+      ease: [0.16, 1, 0.3, 1],
+      onUpdate: (latest) => setDisplay(Math.round(latest)),
+    });
+    return () => controls.stop();
+  }, [score, runId, motionVal]);
+
+  return (
+    <div className="flex flex-col items-end gap-0.5 leading-none">
+      <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
+        Eval score
+      </span>
+      <motion.span
+        animate={{ opacity: evaluating ? 0.55 : 1 }}
+        transition={{ duration: 0.25 }}
+        className={cn('font-mono text-base font-medium tabular-nums', scoreColor(display))}
+      >
+        {display}%
+      </motion.span>
+    </div>
   );
 }

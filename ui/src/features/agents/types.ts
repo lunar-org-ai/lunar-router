@@ -17,6 +17,13 @@ export type RecentTrace = {
   agoLabel: string;
 };
 
+export type StackKind = 'model' | 'tool' | 'vectorstore' | 'memory' | 'guardrail';
+
+export type StackComponent = {
+  kind: StackKind;
+  label: string;
+};
+
 export type AgentSummary = {
   id: string;
   name: string;
@@ -32,5 +39,6 @@ export type AgentSummary = {
   traceVolume: number[];
   metrics: EvalMetric[];
   recentTraces: RecentTrace[];
+  stack: StackComponent[];
   isMock: boolean;
 };

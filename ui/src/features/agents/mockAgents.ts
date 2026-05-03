@@ -4,6 +4,7 @@ import type {
   AgentSummary,
   EvalMetric,
   RecentTrace,
+  StackComponent,
 } from '@/features/agents/types';
 
 const buildVolume = (
@@ -43,6 +44,7 @@ type MockSeed = {
   lastSeenMinutesAgo: number;
   metrics: EvalMetric[];
   recentTraces: RecentTrace[];
+  stack: StackComponent[];
   volume: { base: number; peak: number; shape: 'business' | 'even' | 'spiky' };
 };
 
@@ -72,6 +74,12 @@ const SEEDS: MockSeed[] = [
       { id: 't_5e02', status: 'error', durationMs: 412, costUsd: 0.00031, agoLabel: '2m' },
       { id: 't_4f8a', status: 'ok', durationMs: 1310, costUsd: 0.00098, agoLabel: '3m' },
     ],
+    stack: [
+      { kind: 'model', label: 'gpt-4o-mini' },
+      { kind: 'tool', label: 'KB Search' },
+      { kind: 'vectorstore', label: 'Pinecone' },
+      { kind: 'tool', label: 'Slack escalation' },
+    ],
     volume: { base: 80, peak: 720, shape: 'business' },
   },
   {
@@ -98,6 +106,12 @@ const SEEDS: MockSeed[] = [
       { id: 't_9c7b', status: 'ok', durationMs: 1622, costUsd: 0.00388, agoLabel: '4m' },
       { id: 't_8d49', status: 'ok', durationMs: 1985, costUsd: 0.00472, agoLabel: '5m' },
       { id: 't_7e10', status: 'ok', durationMs: 1543, costUsd: 0.00367, agoLabel: '7m' },
+    ],
+    stack: [
+      { kind: 'model', label: 'gpt-4o-mini' },
+      { kind: 'tool', label: 'Vector Search' },
+      { kind: 'vectorstore', label: 'Pinecone' },
+      { kind: 'tool', label: 'Query Rewriter' },
     ],
     volume: { base: 60, peak: 220, shape: 'even' },
   },
@@ -126,6 +140,13 @@ const SEEDS: MockSeed[] = [
       { id: 't_c521', status: 'ok', durationMs: 3680, costUsd: 0.01345, agoLabel: '47m' },
       { id: 't_b440', status: 'ok', durationMs: 4120, costUsd: 0.01589, agoLabel: '1h' },
     ],
+    stack: [
+      { kind: 'model', label: 'o3-mini' },
+      { kind: 'tool', label: 'Web Search' },
+      { kind: 'tool', label: 'Reader' },
+      { kind: 'tool', label: 'Citation Validator' },
+      { kind: 'guardrail', label: 'PII redaction' },
+    ],
     volume: { base: 4, peak: 38, shape: 'spiky' },
   },
 ];
@@ -150,6 +171,7 @@ export const MOCK_AGENTS: AgentSummary[] = SEEDS.map((seed) => ({
   traceVolume: buildVolume(48, seed.volume.base, seed.volume.peak, seed.volume.shape),
   metrics: seed.metrics,
   recentTraces: seed.recentTraces,
+  stack: seed.stack,
   isMock: true,
 }));
 
@@ -172,6 +194,11 @@ const FRESH_TRACES: RecentTrace[] = [
   { id: 't_new1', status: 'ok', durationMs: 1320, costUsd: 0.00102, agoLabel: '1m' },
 ];
 
+const FRESH_STACK: StackComponent[] = [
+  { kind: 'model', label: 'gpt-4o-mini' },
+  { kind: 'tool', label: 'Custom tool' },
+];
+
 export function buildFreshAgent(slug: string, name: string, framework: AgentFramework): AgentSummary {
   const now = new Date().toISOString();
   return {
@@ -189,6 +216,7 @@ export function buildFreshAgent(slug: string, name: string, framework: AgentFram
     traceVolume: buildVolume(48, 8, 64, 'business'),
     metrics: FRESH_METRICS,
     recentTraces: FRESH_TRACES,
+    stack: FRESH_STACK,
     isMock: false,
   };
 }
