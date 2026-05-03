@@ -1,7 +1,5 @@
 export type AgentFramework = 'langchain' | 'langgraph' | 'crewai' | 'openai-agents';
 
-export type OnboardingMode = 'import' | 'create';
-
 export type AgentPhase = 'empty' | 'modal' | 'discovering' | 'evaluating' | 'ready';
 
 export const DEFAULT_PROJECT_NAME = 'my-agent';
@@ -72,9 +70,7 @@ OpenAIAgentsInstrumentor().instrument(tracer_provider=provider)
 export const STORAGE_KEY = 'opentracy.agents.support-bot';
 
 export type StoredOnboarding = {
-  mode: OnboardingMode;
   framework: AgentFramework | null;
-  templateId: string | null;
   name: string;
   importedAt: string;
 };
@@ -85,7 +81,7 @@ export function loadStoredOnboarding(): StoredOnboarding | null {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as StoredOnboarding;
-    if (parsed && (parsed.mode === 'import' || parsed.mode === 'create')) {
+    if (parsed && typeof parsed.name === 'string') {
       return parsed;
     }
     return null;

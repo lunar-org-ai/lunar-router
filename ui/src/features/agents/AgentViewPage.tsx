@@ -7,64 +7,42 @@ import { EvalPanel } from '@/features/agents/components/EvalPanel';
 import { OnboardingFlow } from '@/features/agents/components/OnboardingFlow';
 import { useAgentImport } from '@/features/agents/hooks/useAgentImport';
 import { DEFAULT_PROJECT_NAME } from '@/features/agents/state';
-import {
-  AGENT_TEMPLATES,
-  SUPPORT_TEMPLATE_ID,
-  findTemplate,
-} from '@/features/agents/templates';
+import { SUPPORT_TEMPLATE } from '@/features/agents/templates';
 import type { AgentRun } from '@/features/agents/types';
 
 export default function AgentViewPage() {
-  const fallbackTemplate = AGENT_TEMPLATES[0];
-
   const {
     phase,
-    mode,
     modalStep,
     framework,
-    templateId,
     name,
     revealedCount,
     runId,
     openImport,
-    openCreate,
     closeModal,
     selectFramework,
-    selectTemplate,
     setName,
     advanceStep,
     runSimulation,
     runEval,
     reset,
-  } = useAgentImport(fallbackTemplate.nodes.length);
-
-  const activeTemplate = useMemo(() => {
-    if (mode === 'create') {
-      return findTemplate(templateId) ?? fallbackTemplate;
-    }
-    return findTemplate(SUPPORT_TEMPLATE_ID) ?? fallbackTemplate;
-  }, [mode, templateId, fallbackTemplate]);
+  } = useAgentImport(SUPPORT_TEMPLATE.nodes.length);
 
   const trimmedName = name.trim();
-  const displayName =
-    trimmedName.length > 0
-      ? trimmedName
-      : mode === 'import'
-        ? DEFAULT_PROJECT_NAME
-        : activeTemplate.name;
+  const displayName = trimmedName.length > 0 ? trimmedName : DEFAULT_PROJECT_NAME;
 
   const run: AgentRun = useMemo(
     () => ({
-      id: activeTemplate.id,
+      id: SUPPORT_TEMPLATE.id,
       agentName: displayName,
       version: 'v1',
       runLabel: `Run ${runId || 1}`,
-      nodes: activeTemplate.nodes,
-      metrics: activeTemplate.metrics,
-      overall: activeTemplate.overall,
-      warning: activeTemplate.warning,
+      nodes: SUPPORT_TEMPLATE.nodes,
+      metrics: SUPPORT_TEMPLATE.metrics,
+      overall: SUPPORT_TEMPLATE.overall,
+      warning: SUPPORT_TEMPLATE.warning,
     }),
-    [activeTemplate, displayName, runId]
+    [displayName, runId]
   );
 
   const showEmpty = phase === 'empty';
@@ -88,17 +66,14 @@ export default function AgentViewPage() {
 
       <div className="flex min-h-0 flex-1">
         <main className="flex min-w-0 flex-1">
-          {showEmpty ? <EmptyState onImport={openImport} onCreate={openCreate} /> : null}
+          {showEmpty ? <EmptyState onImport={openImport} /> : null}
 
-          {showOnboarding && mode ? (
+          {showOnboarding ? (
             <OnboardingFlow
-              mode={mode}
               step={modalStep}
               framework={framework}
-              templateId={templateId}
               name={name}
               onSelectFramework={selectFramework}
-              onSelectTemplate={selectTemplate}
               onSetName={setName}
               onAdvance={advanceStep}
               onRunSimulation={runSimulation}
@@ -110,18 +85,8 @@ export default function AgentViewPage() {
             <>
               <AgentGraph
                 nodes={run.nodes}
-                revealedCount={
-                  phase === 'discovering' && mode === 'import'
-                    ? revealedCount
-                    : run.nodes.length
-                }
-                flowMode={
-                  phase === 'discovering'
-                    ? mode === 'create'
-                      ? 'build'
-                      : 'discovery'
-                    : 'static'
-                }
+                revealedCount={phase === 'discovering' ? revealedCount : run.nodes.length}
+                flowMode={phase === 'discovering' ? 'discovery' : 'static'}
               />
               <EvalPanel run={run} evaluating={evaluating} runId={runId} />
             </>
