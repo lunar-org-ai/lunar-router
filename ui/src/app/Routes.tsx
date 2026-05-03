@@ -18,8 +18,8 @@ const Harness = lazy(() => import('@/features/harness/HarnessPage'));
 const NewDistillationJob = lazy(() => import('@/views/NewDistillationJob'));
 const DistillationJobView = lazy(() => import('@/views/DistillationJobView'));
 const DistillationResults = lazy(() => import('@/views/DistillationResults'));
-const AgentsIndex = lazy(() => import('@/features/agents/pages/AgentsIndexPage'));
-const AgentDetail = lazy(() => import('@/features/agents/pages/AgentDetailPage'));
+const AgentsIndex = lazy(() => import('@/features/agents'));
+const AgentDetail = lazy(() => import('@/features/agents/components/AgentDetailPage'));
 
 export function AppRoutes() {
   return (
