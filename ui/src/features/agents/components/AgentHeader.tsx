@@ -1,82 +1,71 @@
 import { Loader2, Play, RotateCcw } from 'lucide-react';
+import { CrewAI, LangChain, LangGraph, OpenAI } from '@lobehub/icons';
 
 import { Button } from '@/components/ui/button';
-import { cn } from '@/lib/utils';
+import { StatusPill } from '@/features/agents/components/StatusPill';
+import type { AgentFramework, AgentStatus } from '@/features/agents/types';
+
+const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: number }>> = {
+  langchain: LangChain.Avatar,
+  langgraph: LangGraph.Avatar,
+  crewai: CrewAI.Avatar,
+  'openai-agents': OpenAI.Avatar,
+};
 
 type AgentHeaderProps = {
   agentName: string;
-  overall: number;
-  showActions?: boolean;
-  scoreState?: 'visible' | 'pending' | 'evaluating';
+  framework: AgentFramework;
+  status: AgentStatus;
   onRunEval?: () => void;
   onReset?: () => void;
-  evalDisabled?: boolean;
+  evaluating?: boolean;
 };
-
-function scoreColor(value: number) {
-  if (value >= 80) return 'text-emerald-500';
-  if (value >= 50) return 'text-amber-500';
-  return 'text-rose-500';
-}
 
 export function AgentHeader({
   agentName,
-  overall,
-  showActions = true,
-  scoreState = 'visible',
+  framework,
+  status,
   onRunEval,
   onReset,
-  evalDisabled = false,
+  evaluating = false,
 }: AgentHeaderProps) {
-  return (
-    <header className="flex flex-col gap-3 border-b border-border/40 px-6 py-5">
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-medium tracking-tight">{agentName}</h1>
+  const Icon = FRAMEWORK_ICONS[framework];
 
-        {showActions ? (
-          <div className="flex items-center gap-4">
-            <ScoreReadout state={scoreState} value={overall} />
-            {onReset ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onReset}
-                className="gap-1.5 text-muted-foreground"
-              >
-                <RotateCcw className="size-3.5" />
-                Reset demo
-              </Button>
-            ) : null}
-            <Button size="sm" onClick={onRunEval} disabled={evalDisabled} className="gap-1.5">
-              {scoreState === 'evaluating' ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <Play className="size-3.5 fill-current" />
-              )}
-              {scoreState === 'evaluating' ? 'Running…' : 'Run Eval'}
-            </Button>
-          </div>
+  return (
+    <header className="flex items-center justify-between border-b border-border/40 px-6 py-5">
+      <div className="flex items-center gap-3">
+        <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg">
+          <Icon size={36} />
+        </span>
+        <div className="flex flex-col gap-0.5">
+          <h1 className="text-lg font-medium tracking-tight">{agentName}</h1>
+          <StatusPill status={status} />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2">
+        {onReset ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onReset}
+            className="gap-1.5 text-muted-foreground"
+          >
+            <RotateCcw className="size-3.5" />
+            Reset
+          </Button>
+        ) : null}
+        {onRunEval ? (
+          <Button size="sm" onClick={onRunEval} disabled={evaluating} className="gap-1.5">
+            {evaluating ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <Play className="size-3.5 fill-current" />
+            )}
+            {evaluating ? 'Running…' : 'Run Eval'}
+          </Button>
         ) : null}
       </div>
     </header>
-  );
-}
-
-type ScoreReadoutProps = {
-  state: 'visible' | 'pending' | 'evaluating';
-  value: number;
-};
-
-function ScoreReadout({ state, value }: ScoreReadoutProps) {
-  if (state === 'pending') {
-    return <span className="font-mono text-base font-medium text-muted-foreground/60">—</span>;
-  }
-  if (state === 'evaluating') {
-    return (
-      <span className="font-mono text-base font-medium text-muted-foreground">…</span>
-    );
-  }
-  return (
-    <span className={cn('font-mono text-base font-medium', scoreColor(value))}>{value}%</span>
   );
 }

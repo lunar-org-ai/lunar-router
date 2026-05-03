@@ -113,9 +113,9 @@ export const MENU_SECTIONS: MenuSection[] = [
       {
         label: 'Agents',
         value: 'agents',
-        path: '/agents/support-bot',
+        path: '/agents',
         icon: <Workflow size={20} />,
-        description: 'Agent topology and evaluation scores',
+        description: 'Imported agents and observability',
       },
     ],
   },

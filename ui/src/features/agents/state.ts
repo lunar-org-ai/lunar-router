@@ -1,6 +1,4 @@
-export type AgentFramework = 'langchain' | 'langgraph' | 'crewai' | 'openai-agents';
-
-export type AgentPhase = 'empty' | 'modal' | 'discovering' | 'evaluating' | 'ready';
+import type { AgentFramework } from '@/features/agents/types';
 
 export const DEFAULT_PROJECT_NAME = 'my-agent';
 
@@ -67,36 +65,53 @@ OpenAIAgentsInstrumentor().instrument(tracer_provider=provider)
   },
 ];
 
-export const STORAGE_KEY = 'opentracy.agents.support-bot';
+export const STORAGE_KEY = 'opentracy.agents.list';
 
-export type StoredOnboarding = {
-  framework: AgentFramework | null;
+export type StoredAgent = {
+  slug: string;
   name: string;
+  framework: AgentFramework;
   importedAt: string;
 };
 
-export function loadStoredOnboarding(): StoredOnboarding | null {
-  if (typeof window === 'undefined') return null;
+export function loadStoredAgents(): StoredAgent[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as StoredOnboarding;
-    if (parsed && typeof parsed.name === 'string') {
-      return parsed;
-    }
-    return null;
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is StoredAgent =>
+        entry &&
+        typeof entry.slug === 'string' &&
+        typeof entry.name === 'string' &&
+        typeof entry.framework === 'string' &&
+        typeof entry.importedAt === 'string'
+    );
   } catch {
-    return null;
+    return [];
   }
 }
 
-export function saveStoredOnboarding(value: Omit<StoredOnboarding, 'importedAt'>): void {
+export function saveStoredAgents(agents: StoredAgent[]): void {
   if (typeof window === 'undefined') return;
-  const stored: StoredOnboarding = { ...value, importedAt: new Date().toISOString() };
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(agents));
 }
 
-export function clearStoredOnboarding(): void {
+export function clearStoredAgents(): void {
   if (typeof window === 'undefined') return;
   window.localStorage.removeItem(STORAGE_KEY);
+}
+
+export function slugify(input: string): string {
+  return (
+    input
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '') || DEFAULT_PROJECT_NAME
+  );
 }

@@ -18,7 +18,8 @@ const Harness = lazy(() => import('@/features/harness/HarnessPage'));
 const NewDistillationJob = lazy(() => import('@/views/NewDistillationJob'));
 const DistillationJobView = lazy(() => import('@/views/DistillationJobView'));
 const DistillationResults = lazy(() => import('@/views/DistillationResults'));
-const AgentView = lazy(() => import('@/features/agents'));
+const AgentsIndex = lazy(() => import('@/features/agents/pages/AgentsIndexPage'));
+const AgentDetail = lazy(() => import('@/features/agents/pages/AgentDetailPage'));
 
 export function AppRoutes() {
   return (
@@ -43,7 +44,8 @@ export function AppRoutes() {
           <Route path="production" element={<Production />} />
           <Route path="deployments" element={<Navigate to="/production" replace />} />
           <Route path="harness" element={<Harness />} />
-          <Route path="agents/:agentId" element={<AgentView />} />
+          <Route path="agents" element={<AgentsIndex />} />
+          <Route path="agents/:agentId" element={<AgentDetail />} />
         </Route>
 
         <Route path="*" element={<Navigate to="/traces" replace />} />

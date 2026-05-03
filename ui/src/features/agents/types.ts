@@ -1,15 +1,4 @@
-export type NodeType = 'agent' | 'tool' | 'llm' | 'router' | 'output';
-
-export type AgentNode = {
-  id: string;
-  type: NodeType;
-  title: string;
-  subtitle?: string;
-  meta?: string;
-  badge?: 'NEW';
-  cost?: string;
-  latency?: string;
-};
+export type AgentFramework = 'langchain' | 'langgraph' | 'crewai' | 'openai-agents';
 
 export type MetricStatus = 'pass' | 'fail';
 
@@ -18,13 +7,30 @@ export type EvalMetric = {
   value: number | MetricStatus;
 };
 
-export type AgentRun = {
+export type AgentStatus = 'healthy' | 'degraded' | 'silent';
+
+export type RecentTrace = {
   id: string;
-  agentName: string;
-  version: string;
-  runLabel: string;
-  nodes: AgentNode[];
+  status: 'ok' | 'error';
+  durationMs: number;
+  costUsd: number;
+  agoLabel: string;
+};
+
+export type AgentSummary = {
+  id: string;
+  name: string;
+  framework: AgentFramework;
+  importedAt: string;
+  lastSeenAt: string;
+  status: AgentStatus;
+  traces24h: number;
+  p95LatencyMs: number;
+  errorRate: number;
+  costPerTrace: number;
+  evalScore: number;
+  traceVolume: number[];
   metrics: EvalMetric[];
-  overall: number;
-  warning?: string;
+  recentTraces: RecentTrace[];
+  isMock: boolean;
 };

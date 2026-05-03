@@ -1,16 +1,17 @@
 import { useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
-import { ArrowLeft, ArrowRight, Check, Copy, Play, Plug, Terminal } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, Copy, Plug, Terminal } from 'lucide-react';
 import { CrewAI, LangChain, LangGraph, OpenAI } from '@lobehub/icons';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import {
-  type AgentFramework,
   FRAMEWORK_OPTIONS,
   type FrameworkOption,
 } from '@/features/agents/state';
+import type { AgentFramework } from '@/features/agents/types';
+import type { ImportPhase } from '@/features/agents/hooks/useAgentImport';
 
 const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: number }>> = {
   langchain: LangChain.Avatar,
@@ -20,29 +21,36 @@ const FRAMEWORK_ICONS: Record<AgentFramework, React.ComponentType<{ size?: numbe
 };
 
 type OnboardingFlowProps = {
+  phase: Exclude<ImportPhase, 'closed'>;
   step: 1 | 2;
   framework: AgentFramework | null;
   name: string;
   onSelectFramework: (framework: AgentFramework) => void;
   onSetName: (name: string) => void;
   onAdvance: () => void;
-  onRunSimulation: () => void;
+  onBack: () => void;
+  onSubmit: () => void;
   onCancel: () => void;
 };
 
 export function OnboardingFlow({
+  phase,
   step,
   framework,
   name,
   onSelectFramework,
   onSetName,
   onAdvance,
-  onRunSimulation,
+  onBack,
+  onSubmit,
   onCancel,
 }: OnboardingFlowProps) {
+  if (phase === 'connecting') {
+    return <ConnectingPane />;
+  }
+
   const selectedFramework =
     FRAMEWORK_OPTIONS.find((option) => option.id === framework) ?? null;
-
   const advanceDisabled = step === 1 && !framework;
 
   return (
@@ -82,9 +90,9 @@ export function OnboardingFlow({
               Cancel
             </Button>
           ) : (
-            <Button variant="ghost" onClick={onCancel} className="gap-1.5 text-muted-foreground">
+            <Button variant="ghost" onClick={onBack} className="gap-1.5 text-muted-foreground">
               <ArrowLeft className="size-3.5" />
-              Cancel
+              Back
             </Button>
           )}
 
@@ -94,13 +102,42 @@ export function OnboardingFlow({
               <ArrowRight className="size-3.5" />
             </Button>
           ) : (
-            <Button onClick={onRunSimulation} className="gap-1.5">
-              <Play className="size-3.5 fill-current" />
-              Run Simulation
+            <Button onClick={onSubmit} className="gap-1.5">
+              <Plug className="size-3.5" />
+              Connect
             </Button>
           )}
         </Footer>
       </div>
+    </div>
+  );
+}
+
+function ConnectingPane() {
+  return (
+    <div className="flex flex-1 items-center justify-center px-8 py-12">
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+        className="flex flex-col items-center gap-5"
+      >
+        <div className="relative flex size-16 items-center justify-center">
+          <motion.div
+            aria-hidden
+            className="absolute inset-0 rounded-full border-2 border-border/30 border-t-foreground/70"
+            animate={{ rotate: 360 }}
+            transition={{ duration: 1.4, ease: 'linear', repeat: Infinity }}
+          />
+          <Plug className="size-5 text-foreground/80" />
+        </div>
+        <div className="flex flex-col items-center gap-1">
+          <span className="text-sm font-medium tracking-tight">Instrumenting your agent</span>
+          <span className="font-mono text-[11px] text-muted-foreground/70">
+            Connecting to OpenTracy…
+          </span>
+        </div>
+      </motion.div>
     </div>
   );
 }
