@@ -29,6 +29,8 @@ help: ## Show this help
 	@echo "    make gateway        Gateway only — no ClickHouse, no UI (fastest)"
 	@echo "    make gateway-db     Gateway + ClickHouse (foreground, no UI/Python API)"
 	@echo "    make stop           Stop all running services"
+	@echo "    make reset          Stop → clear DB → seed 300 traces → start all services"
+	@echo "    make seed           Seed 300 fake traces (ClickHouse must be running)"
 	@echo ""
 	@echo "  \033[1mAll commands:\033[0m"
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | \
@@ -195,6 +197,28 @@ db-down: ## Stop ClickHouse container
 
 db-shell: ## Open ClickHouse SQL shell
 	docker compose exec clickhouse clickhouse-client --database opentracy --password opentracy
+
+db-clear: ## Truncate all trace data from ClickHouse (keeps schema)
+	docker compose exec -T clickhouse clickhouse-client --database opentracy --password opentracy \
+	    -q "TRUNCATE TABLE llm_traces"
+	@echo "  \033[32m✓ llm_traces truncated\033[0m"
+
+seed: ## Seed 300 fake traces into ClickHouse (clears existing data first)
+	@docker compose up clickhouse -d
+	@until docker compose exec -T clickhouse clickhouse-client --password opentracy -q "SELECT 1" > /dev/null 2>&1; do sleep 1; done
+	OPENTRACY_CH_ENABLED=true OPENTRACY_CH_HOST=localhost OPENTRACY_CH_PASSWORD=opentracy \
+	    OPENTRACY_CH_DATABASE=opentracy python3 scripts/seed_traces.py --count 300
+
+reset: stop ## Full reset: stop services, clear DB, seed 300 traces, start all services
+	@echo ""
+	@echo "  \033[1mResetting stack …\033[0m"
+	@docker compose up clickhouse -d
+	@until docker compose exec -T clickhouse clickhouse-client --password opentracy -q "SELECT 1" > /dev/null 2>&1; do sleep 1; done
+	@echo "  \033[32m✓ ClickHouse ready\033[0m"
+	OPENTRACY_CH_ENABLED=true OPENTRACY_CH_HOST=localhost OPENTRACY_CH_PASSWORD=opentracy \
+	    OPENTRACY_CH_DATABASE=opentracy python3 scripts/seed_traces.py --count 300
+	@echo ""
+	@$(MAKE) up
 
 # Cleanup
 clean: ## Remove build artifacts (binaries, caches, egg-info)

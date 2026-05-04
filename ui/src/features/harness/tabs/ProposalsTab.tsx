@@ -223,30 +223,29 @@ export function ProposalsTab({ onSetupChange, onProposalsChange }: ProposalsTabP
       ) : (
         <Card>
           <CardContent className="p-0">
-            <Table>
+            <Table className="w-full">
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-32">Kind</TableHead>
-                  <TableHead>Summary</TableHead>
-                  <TableHead className="w-44">Objective</TableHead>
-                  <TableHead className="w-32">Status</TableHead>
-                  <TableHead className="w-20 text-right">Cost</TableHead>
-                  <TableHead className="w-40">Created</TableHead>
-                  <TableHead className="w-40 text-right">Actions</TableHead>
+                  <TableHead className="w-36 pl-4">Kind</TableHead>
+                  <TableHead className="min-w-0">Summary</TableHead>
+                  <TableHead className="w-28 shrink-0">Status</TableHead>
+                  <TableHead className="w-16 shrink-0 text-right">Cost</TableHead>
+                  <TableHead className="w-36 shrink-0">Created</TableHead>
+                  <TableHead className="w-36 shrink-0 pr-4 text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {loading ? (
                   Array.from({ length: 4 }).map((_, i) => (
                     <TableRow key={i}>
-                      <TableCell colSpan={7}>
+                      <TableCell colSpan={6} className="pl-4">
                         <Skeleton className="h-4 w-full" />
                       </TableCell>
                     </TableRow>
                   ))
                 ) : proposals.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={7} className="py-2">
+                    <TableCell colSpan={6} className="py-2">
                       <Empty className="border-0">
                         <EmptyHeader>
                           <EmptyMedia variant="icon">
@@ -271,7 +270,7 @@ export function ProposalsTab({ onSetupChange, onProposalsChange }: ProposalsTabP
                 ) : (
                   proposals.map((p) => {
                     const kind = ((p.data ?? {}) as Record<string, unknown>).kind ?? '—';
-                    const summary = ((p.data ?? {}) as Record<string, unknown>).summary ?? '';
+                    const summaryText = ((p.data ?? {}) as Record<string, unknown>).summary ?? '';
                     return (
                       <TableRow
                         key={p.id}
@@ -279,48 +278,58 @@ export function ProposalsTab({ onSetupChange, onProposalsChange }: ProposalsTabP
                           setDrawerId(p.id);
                           setDrawerOpen(true);
                         }}
-                        className="cursor-pointer"
+                        className="cursor-pointer group"
                       >
-                        <TableCell className="font-mono text-xs">{String(kind)}</TableCell>
-                        <TableCell className="max-w-xs truncate text-sm">
-                          {String(summary) || <span className="text-muted-foreground">—</span>}
+                        <TableCell className="pl-4">
+                          <span className="inline-flex items-center rounded-md bg-muted px-2 py-0.5 font-mono text-[11px] text-muted-foreground group-hover:bg-muted/80">
+                            {String(kind)}
+                          </span>
                         </TableCell>
-                        <TableCell className="font-mono text-[11px] text-muted-foreground">
-                          {p.objective_id ?? '—'}
+                        <TableCell className="py-3 min-w-0 max-w-0">
+                          <p className="truncate text-sm font-medium leading-snug">
+                            {String(summaryText) || (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </p>
+                          {p.objective_id && (
+                            <p className="mt-0.5 font-mono text-[10px] text-muted-foreground/70 truncate">
+                              {p.objective_id}
+                            </p>
+                          )}
                         </TableCell>
                         <TableCell>
                           <StatusBadge status={p.status} />
                         </TableCell>
-                        <TableCell className="text-right font-mono text-xs tabular-nums">
+                        <TableCell className="text-right font-mono text-xs tabular-nums text-muted-foreground">
                           {formatUsd(p.cost_usd)}
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground tabular-nums">
                           {formatTs(p.ts)}
                         </TableCell>
-                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                        <TableCell className="pr-4 text-right" onClick={(e) => e.stopPropagation()}>
                           {p.status === 'pending' ? (
                             <div className="flex items-center justify-end gap-1">
                               <Button
                                 size="sm"
-                                variant="outline"
-                                className="h-7 px-2"
+                                variant="ghost"
+                                className="h-7 px-2 text-emerald-600 hover:text-emerald-600 hover:bg-emerald-500/10"
                                 onClick={() => openConfirm('approve', p)}
                               >
-                                <CheckCircle2 className="size-3.5 mr-1 text-emerald-500" />
+                                <CheckCircle2 className="size-3.5 mr-1" />
                                 Approve
                               </Button>
                               <Button
                                 size="sm"
-                                variant="outline"
-                                className="h-7 px-2"
+                                variant="ghost"
+                                className="h-7 px-2 text-rose-600 hover:text-rose-600 hover:bg-rose-500/10"
                                 onClick={() => openConfirm('reject', p)}
                               >
-                                <XCircle className="size-3.5 mr-1 text-rose-500" />
+                                <XCircle className="size-3.5 mr-1" />
                                 Reject
                               </Button>
                             </div>
                           ) : (
-                            <span className="text-xs text-muted-foreground">—</span>
+                            <span className="text-xs text-muted-foreground/40">—</span>
                           )}
                         </TableCell>
                       </TableRow>

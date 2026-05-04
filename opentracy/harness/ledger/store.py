@@ -12,6 +12,7 @@ are read helpers; there is no update or delete on purpose.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from pathlib import Path
@@ -177,6 +178,18 @@ class LedgerStore:
             self._conn.close()
 
 
+def _sanitize_floats(obj):
+    """Replace non-finite floats (NaN, Infinity) with None so they can be
+    serialised by strict JSON encoders such as Starlette's JSONResponse."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
+
 def _row_to_entry(row: sqlite3.Row) -> LedgerEntry:
     return LedgerEntry(
         id=row["id"],
@@ -185,8 +198,8 @@ def _row_to_entry(row: sqlite3.Row) -> LedgerEntry:
         objective_id=row["objective_id"],
         subject=row["subject"],
         agent=row["agent"],
-        parameters_in=json.loads(row["parameters_in"] or "{}"),
-        data=json.loads(row["data"] or "{}"),
+        parameters_in=_sanitize_floats(json.loads(row["parameters_in"] or "{}")),
+        data=_sanitize_floats(json.loads(row["data"] or "{}")),
         parent_id=row["parent_id"],
         tags=json.loads(row["tags"] or "[]"),
         duration_ms=row["duration_ms"],
