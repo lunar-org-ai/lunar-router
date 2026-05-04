@@ -40,7 +40,7 @@ Providers (13):
     Cerebras, Sambanova, Perplexity, Cohere, Bedrock.
 """
 
-__version__ = "0.3.2"
+__version__ = "0.4.1"
 
 # ---------------------------------------------------------------------------
 # Public SDK — eager imports only. Everything here must be cheap to load.
