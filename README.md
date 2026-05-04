@@ -147,7 +147,7 @@ pip install opentracy[distill]
 ```bash
 git clone https://github.com/OpenTracy/opentracy.git
 cd opentracy
-make start-full   # Gateway + ClickHouse analytics + Python API + UI
+make up   # Gateway + ClickHouse analytics + Python API + UI
 ```
 
 Engine at `http://localhost:8080`, Python API at `http://localhost:8000`, UI at `http://localhost:3000`.
@@ -318,12 +318,13 @@ client.chat.completions.create(model="mistral/mistral-small-latest", messages=[.
 
 ## Running
 
-| Command             | What                                   | Requires     |
-| ------------------- | -------------------------------------- | ------------ |
-| `make start`        | Gateway proxy (no weights needed)      | Go           |
-| `make start-full`   | Gateway + ClickHouse + Python API      | Go + Docker  |
-| `make start-router` | Full semantic routing (`model="auto"`) | Go + weights |
-| `make dev-python`   | Python API only (uvicorn --reload)     | Python       |
+| Command               | What                                                   | Requires                    |
+| --------------------- | ------------------------------------------------------ | --------------------------- |
+| `make gateway`        | Gateway proxy (no weights needed)                      | Go                          |
+| `make gateway-db`     | Gateway + ClickHouse                                   | Go + Docker                 |
+| `make gateway-router` | Full semantic routing (`model="auto"`)                 | Go + weights                |
+| `make up`             | Full stack (ClickHouse + engine + API + UI) background | Go + Docker + Python + Node |
+| `make api`            | Python API only (uvicorn --reload)                     | Python                      |
 
 ### API Keys
 
@@ -504,7 +505,7 @@ With pre-trained weights, the router picks the best model per prompt:
 
 ```bash
 make download-weights   # download from HuggingFace
-make start-router       # start with semantic routing enabled
+make gateway-router     # start with semantic routing enabled
 ```
 
 ```python
@@ -560,10 +561,9 @@ Tools: `opentracy_route`, `opentracy_generate`, `opentracy_smart_generate`, `ope
 ```bash
 make help               # show all commands
 make install            # install Python SDK + Go deps
-make install-all        # install everything (Python + Go + UI)
 make install-train      # install training/distillation deps (CUDA)
-make dev-all            # start full local stack (ClickHouse + Go + API + UI)
-make stop-all           # stop all local services
+make up                 # start full local stack (ClickHouse + engine + API + UI)
+make stop               # stop all local services
 make test               # run all tests
 make lint               # lint all code
 ```

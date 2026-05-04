@@ -165,10 +165,12 @@ def _signed_delta_pct(
     """
     if baseline == 0:
         # Degenerate case: can't compute % change from zero. Treat any
-        # nonzero current as infinite regression in the bad direction.
+        # nonzero current as a large regression in the bad direction.
+        # We cap at 9999.0 (well above any practical threshold) rather
+        # than returning float("inf") which is not valid JSON.
         if direction == "lower_is_better":
-            return 0.0 if current <= 0 else float("inf")
-        return 0.0 if current >= 0 else float("inf")
+            return 0.0 if current <= 0 else 9999.0
+        return 0.0 if current >= 0 else 9999.0
 
     raw = (current - baseline) / baseline * 100
     if direction == "lower_is_better":

@@ -71,29 +71,25 @@ const ROLE_META: Record<
     label: 'Inspectors',
     description: 'Read-only — surface findings, no writes',
     Icon: Eye,
-    badgeClass:
-      'bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/30',
+    badgeClass: 'bg-violet-500/10 text-violet-700 dark:text-violet-400 border-violet-500/30',
   },
   proposer: {
     label: 'Proposers',
     description: 'Suggest writes — gated through the critic',
     Icon: Lightbulb,
-    badgeClass:
-      'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30',
+    badgeClass: 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30',
   },
   critic: {
     label: 'Critics',
     description: 'Judge proposals before they execute',
     Icon: Scale,
-    badgeClass:
-      'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30',
+    badgeClass: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30',
   },
   narrator: {
     label: 'Narrators',
     description: 'Summarize ledger activity for humans',
     Icon: BookOpen,
-    badgeClass:
-      'bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/30',
+    badgeClass: 'bg-sky-500/10 text-sky-700 dark:text-sky-400 border-sky-500/30',
   },
   agent: {
     label: 'Other',
@@ -144,16 +140,12 @@ function AgentRow({
       }`}
     >
       <Icon
-        className={`size-3.5 shrink-0 ${
-          isSelected ? 'text-primary' : 'text-muted-foreground'
-        }`}
+        className={`size-3.5 shrink-0 ${isSelected ? 'text-primary' : 'text-muted-foreground'}`}
       />
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium font-mono">{agent.name}</div>
         {agent.description && (
-          <div className="truncate text-[11px] text-muted-foreground">
-            {agent.description}
-          </div>
+          <div className="truncate text-[11px] text-muted-foreground">{agent.description}</div>
         )}
       </div>
     </button>
@@ -200,13 +192,18 @@ function OutputSchemaViewer({
         <Wrench className="size-3" />
         Output Schema
       </span>
-      <div className="grid gap-1">
+      <div className="grid gap-1.5">
         {Object.entries(fields).map(([name, spec]) => (
-          <div key={name} className="flex items-center gap-2 text-xs">
-            <code className="bg-muted px-1.5 py-0.5 rounded font-mono">{name}</code>
-            <span className="text-muted-foreground">{spec.type}</span>
+          <div
+            key={name}
+            className="grid grid-cols-[auto_auto_1fr] items-baseline gap-x-2 text-xs min-w-0"
+          >
+            <code className="bg-muted px-1.5 py-0.5 rounded font-mono shrink-0">{name}</code>
+            <span className="text-muted-foreground shrink-0">{spec.type}</span>
             {spec.description && (
-              <span className="text-muted-foreground/60">— {spec.description}</span>
+              <span className="text-muted-foreground/60 wrap-break-word min-w-0">
+                — {spec.description}
+              </span>
             )}
           </div>
         ))}
@@ -287,9 +284,7 @@ export function AgentsTab() {
     const q = search.trim().toLowerCase();
     if (!q) return agents;
     return agents.filter(
-      (a) =>
-        a.name.toLowerCase().includes(q) ||
-        (a.description ?? '').toLowerCase().includes(q),
+      (a) => a.name.toLowerCase().includes(q) || (a.description ?? '').toLowerCase().includes(q)
     );
   }, [agents, search]);
 
@@ -304,7 +299,7 @@ export function AgentsTab() {
       list.sort((a, b) => a.name.localeCompare(b.name));
     }
     return ROLE_ORDER.map((role) => ({ role, agents: buckets.get(role)! })).filter(
-      (g) => g.agents.length > 0,
+      (g) => g.agents.length > 0
     );
   }, [filtered]);
 
@@ -403,19 +398,21 @@ export function AgentsTab() {
           <>
             <Card>
               <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-3 flex-wrap">
-                  <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-start gap-3 flex-wrap">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
                     <SelectedIcon className="size-5 text-primary shrink-0" />
-                    <CardTitle className="font-mono truncate">{selected.name}</CardTitle>
+                    <CardTitle className="font-mono break-all leading-tight">
+                      {selected.name}
+                    </CardTitle>
                   </div>
-                  <div className="flex items-center gap-1.5 flex-wrap">
+                  <div className="flex items-center gap-1.5 flex-wrap shrink-0">
                     <Badge
                       variant="outline"
                       className={`font-mono text-[10px] ${ROLE_META[selectedRole].badgeClass}`}
                     >
                       {ROLE_META[selectedRole].label.replace(/s$/, '').toLowerCase()}
                     </Badge>
-                    <Badge variant="secondary" className="font-mono text-[10px]">
+                    <Badge variant="secondary" className="font-mono text-[10px] max-w-45 truncate">
                       {selected.model}
                     </Badge>
                     <Badge variant="outline" className="font-mono text-[10px]">
@@ -427,9 +424,7 @@ export function AgentsTab() {
                   </div>
                 </div>
                 {selected.description && (
-                  <p className="text-sm text-muted-foreground pt-2">
-                    {selected.description}
-                  </p>
+                  <p className="text-sm text-muted-foreground pt-2">{selected.description}</p>
                 )}
               </CardHeader>
               <CardContent className="space-y-3">
@@ -454,11 +449,7 @@ export function AgentsTab() {
                     htmlFor="use-tools"
                     className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer"
                   >
-                    <Switch
-                      id="use-tools"
-                      checked={useTools}
-                      onCheckedChange={setUseTools}
-                    />
+                    <Switch id="use-tools" checked={useTools} onCheckedChange={setUseTools} />
                     Enable tools (multi-turn)
                   </Label>
                   <Button size="sm" onClick={handleRun} disabled={running || !input.trim()}>
@@ -483,8 +474,8 @@ export function AgentsTab() {
               </EmptyMedia>
               <EmptyTitle>Select an agent</EmptyTitle>
               <EmptyDescription>
-                Pick an agent on the left to view its prompt, output schema,
-                and run it manually with custom input.
+                Pick an agent on the left to view its prompt, output schema, and run it manually
+                with custom input.
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
