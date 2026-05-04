@@ -76,10 +76,7 @@ interface ProposalsTabProps {
   onProposalsChange?: () => void;
 }
 
-export function ProposalsTab({
-  onSetupChange,
-  onProposalsChange,
-}: ProposalsTabProps = {}) {
+export function ProposalsTab({ onSetupChange, onProposalsChange }: ProposalsTabProps = {}) {
   const service = useHarnessService();
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [loading, setLoading] = useState(true);
@@ -180,9 +177,7 @@ export function ProposalsTab({
 
         <Select
           value={statusFilter || '__all__'}
-          onValueChange={(v) =>
-            setStatusFilter((v === '__all__' ? '' : v) as ProposalStatus | '')
-          }
+          onValueChange={(v) => setStatusFilter((v === '__all__' ? '' : v) as ProposalStatus | '')}
         >
           <SelectTrigger className="h-8 w-44">
             <SelectValue placeholder="Status" />
@@ -218,35 +213,40 @@ export function ProposalsTab({
         </span>
       </div>
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-32">Kind</TableHead>
-                <TableHead>Summary</TableHead>
-                <TableHead className="w-44">Objective</TableHead>
-                <TableHead className="w-32">Status</TableHead>
-                <TableHead className="w-20 text-right">Cost</TableHead>
-                <TableHead className="w-40">Created</TableHead>
-                <TableHead className="w-40 text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {loading ? (
-                Array.from({ length: 4 }).map((_, i) => (
-                  <TableRow key={i}>
-                    <TableCell colSpan={7}>
-                      <Skeleton className="h-4 w-full" />
-                    </TableCell>
-                  </TableRow>
-                ))
-              ) : proposals.length === 0 ? (
+      {/* When no key is configured, skip the table and show setup inline */}
+      {!loading && setup && !setup.critic.ready ? (
+        <Card>
+          <CardContent className="p-6">
+            <SetupGuide onConfigured={handleSetupConfigured} />
+          </CardContent>
+        </Card>
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
                 <TableRow>
-                  <TableCell colSpan={7} className="py-2">
-                    {setup && !setup.critic.ready ? (
-                      <SetupGuide onConfigured={handleSetupConfigured} />
-                    ) : (
+                  <TableHead className="w-32">Kind</TableHead>
+                  <TableHead>Summary</TableHead>
+                  <TableHead className="w-44">Objective</TableHead>
+                  <TableHead className="w-32">Status</TableHead>
+                  <TableHead className="w-20 text-right">Cost</TableHead>
+                  <TableHead className="w-40">Created</TableHead>
+                  <TableHead className="w-40 text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {loading ? (
+                  Array.from({ length: 4 }).map((_, i) => (
+                    <TableRow key={i}>
+                      <TableCell colSpan={7}>
+                        <Skeleton className="h-4 w-full" />
+                      </TableCell>
+                    </TableRow>
+                  ))
+                ) : proposals.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={7} className="py-2">
                       <Empty className="border-0">
                         <EmptyHeader>
                           <EmptyMedia variant="icon">
@@ -254,12 +254,9 @@ export function ProposalsTab({
                           </EmptyMedia>
                           <EmptyTitle>No proposals match</EmptyTitle>
                           <EmptyDescription>
-                            Once the autonomous loop or Claude Code (via MCP)
-                            posts to{' '}
-                            <code className="font-mono">
-                              /v1/harness/proposals
-                            </code>
-                            , they'll appear here for approval.
+                            Once the autonomous loop or Claude Code (via MCP) posts to{' '}
+                            <code className="font-mono">/v1/harness/proposals</code>, they'll appear
+                            here for approval.
                           </EmptyDescription>
                         </EmptyHeader>
                         <EmptyContent>
@@ -269,90 +266,76 @@ export function ProposalsTab({
                           </Button>
                         </EmptyContent>
                       </Empty>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ) : (
-                proposals.map((p) => {
-                  const kind =
-                    ((p.data ?? {}) as Record<string, unknown>).kind ?? '—';
-                  const summary =
-                    ((p.data ?? {}) as Record<string, unknown>).summary ?? '';
-                  return (
-                    <TableRow
-                      key={p.id}
-                      onClick={() => {
-                        setDrawerId(p.id);
-                        setDrawerOpen(true);
-                      }}
-                      className="cursor-pointer"
-                    >
-                      <TableCell className="font-mono text-xs">{String(kind)}</TableCell>
-                      <TableCell className="max-w-xs truncate text-sm">
-                        {String(summary) || (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="font-mono text-[11px] text-muted-foreground">
-                        {p.objective_id ?? '—'}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={p.status} />
-                      </TableCell>
-                      <TableCell className="text-right font-mono text-xs tabular-nums">
-                        {formatUsd(p.cost_usd)}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground tabular-nums">
-                        {formatTs(p.ts)}
-                      </TableCell>
-                      <TableCell
-                        className="text-right"
-                        onClick={(e) => e.stopPropagation()}
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  proposals.map((p) => {
+                    const kind = ((p.data ?? {}) as Record<string, unknown>).kind ?? '—';
+                    const summary = ((p.data ?? {}) as Record<string, unknown>).summary ?? '';
+                    return (
+                      <TableRow
+                        key={p.id}
+                        onClick={() => {
+                          setDrawerId(p.id);
+                          setDrawerOpen(true);
+                        }}
+                        className="cursor-pointer"
                       >
-                        {p.status === 'pending' ? (
-                          <div className="flex items-center justify-end gap-1">
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 px-2"
-                              onClick={() => openConfirm('approve', p)}
-                            >
-                              <CheckCircle2 className="size-3.5 mr-1 text-emerald-500" />
-                              Approve
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-7 px-2"
-                              onClick={() => openConfirm('reject', p)}
-                            >
-                              <XCircle className="size-3.5 mr-1 text-rose-500" />
-                              Reject
-                            </Button>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  );
-                })
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+                        <TableCell className="font-mono text-xs">{String(kind)}</TableCell>
+                        <TableCell className="max-w-xs truncate text-sm">
+                          {String(summary) || <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className="font-mono text-[11px] text-muted-foreground">
+                          {p.objective_id ?? '—'}
+                        </TableCell>
+                        <TableCell>
+                          <StatusBadge status={p.status} />
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs tabular-nums">
+                          {formatUsd(p.cost_usd)}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground tabular-nums">
+                          {formatTs(p.ts)}
+                        </TableCell>
+                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
+                          {p.status === 'pending' ? (
+                            <div className="flex items-center justify-end gap-1">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2"
+                                onClick={() => openConfirm('approve', p)}
+                              >
+                                <CheckCircle2 className="size-3.5 mr-1 text-emerald-500" />
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2"
+                                onClick={() => openConfirm('reject', p)}
+                              >
+                                <XCircle className="size-3.5 mr-1 text-rose-500" />
+                                Reject
+                              </Button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      )}
 
-      <ChainDrawer
-        open={drawerOpen}
-        rootEntryId={drawerId}
-        onClose={() => setDrawerOpen(false)}
-      />
+      <ChainDrawer open={drawerOpen} rootEntryId={drawerId} onClose={() => setDrawerOpen(false)} />
 
-      <Dialog
-        open={confirm.action !== null}
-        onOpenChange={(open) => !open && closeConfirm()}
-      >
+      <Dialog open={confirm.action !== null} onOpenChange={(open) => !open && closeConfirm()}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>
@@ -371,9 +354,7 @@ export function ProposalsTab({
             <Input
               placeholder="Reason (optional)"
               value={confirm.reason}
-              onChange={(e) =>
-                setConfirm((c) => ({ ...c, reason: e.target.value }))
-              }
+              onChange={(e) => setConfirm((c) => ({ ...c, reason: e.target.value }))}
             />
           )}
 
@@ -386,11 +367,7 @@ export function ProposalsTab({
               disabled={confirm.busy}
               variant={confirm.action === 'reject' ? 'destructive' : 'default'}
             >
-              {confirm.busy
-                ? 'Working…'
-                : confirm.action === 'approve'
-                  ? 'Approve'
-                  : 'Reject'}
+              {confirm.busy ? 'Working…' : confirm.action === 'approve' ? 'Approve' : 'Reject'}
             </Button>
           </DialogFooter>
         </DialogContent>

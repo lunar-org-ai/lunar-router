@@ -24,10 +24,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import {
-  useHarnessService,
-  type HarnessSetupStatus,
-} from '@/services/harnessService';
+import { useHarnessService, type HarnessSetupStatus } from '@/services/harnessService';
 
 interface SetupGuideProps {
   /** Called when both `mcp` and `critic.ready` are satisfied so the
@@ -120,7 +117,13 @@ export function SetupGuide({ onConfigured, compact = false }: SetupGuideProps) {
     return (
       <div className="flex items-center gap-2 text-xs">
         <StepDot done={criticReady} />
-        <span className={criticReady ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}>
+        <span
+          className={
+            criticReady
+              ? 'text-emerald-600 dark:text-emerald-400'
+              : 'text-amber-600 dark:text-amber-400'
+          }
+        >
           {criticReady
             ? `Critic ready — ${status?.critic.model}`
             : `Critic offline — missing ${criticProvider} key`}
@@ -132,167 +135,152 @@ export function SetupGuide({ onConfigured, compact = false }: SetupGuideProps) {
   return (
     <div className="space-y-6">
       <div className="flex justify-end">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={refresh}
-          disabled={loading}
-          className="h-7"
-        >
+        <Button variant="ghost" size="sm" onClick={refresh} disabled={loading} className="h-7">
           <RefreshCw className={`size-3.5 mr-1 ${loading ? 'animate-spin' : ''}`} />
           Refresh status
         </Button>
       </div>
-        {/* Step 1: Provider key — foundation for both driver modes */}
-        <Step
-          n={1}
-          done={criticReady}
-          title="Add a provider key"
-          subtitle={
-            criticReady
-              ? `${status?.critic.provider} key configured — the critic gate is live and the autonomous loop can run.`
-              : `Powers the budget critic (pinned to ${status?.critic.model ?? '—'}) and the autonomous loop. Without it, every write returns rejected_by_critic.`
-          }
-        >
-          {!criticReady && (
-            <div className="space-y-2">
-              <Label className="text-xs text-muted-foreground">
-                {PROVIDER_LABEL} API key
-              </Label>
-              <div className="flex items-center gap-2">
-                <Input
-                  type="password"
-                  placeholder="sk-ant-…"
-                  autoComplete="off"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && apiKey && !savingKey) handleSaveKey();
-                  }}
-                  className="h-9 font-mono flex-1"
-                />
-                <Button
-                  onClick={handleSaveKey}
-                  disabled={savingKey || apiKey.length === 0}
-                  className="h-9"
-                >
-                  {savingKey && <Loader2 className="size-3.5 mr-1 animate-spin" />}
-                  Save key
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Stored in{' '}
-                <code className="font-mono">~/.opentracy/secrets.json</code>{' '}
-                on the server. Only sent to {PROVIDER_LABEL}.
-              </p>
+      {/* Step 1: Provider key — foundation for both driver modes */}
+      <Step
+        n={1}
+        done={criticReady}
+        title="Add a provider key"
+        subtitle={
+          criticReady
+            ? `${status?.critic.provider} key configured — the critic gate is live and the autonomous loop can run.`
+            : `Powers the budget critic (pinned to ${status?.critic.model ?? '—'}) and the autonomous loop. Without it, every write returns rejected_by_critic.`
+        }
+      >
+        {!criticReady && (
+          <div className="space-y-2">
+            <Label className="text-xs text-muted-foreground">{PROVIDER_LABEL} API key</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                type="password"
+                placeholder="sk-ant-…"
+                autoComplete="off"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && apiKey && !savingKey) handleSaveKey();
+                }}
+                className="h-9 font-mono flex-1"
+              />
+              <Button
+                onClick={handleSaveKey}
+                disabled={savingKey || apiKey.length === 0}
+                className="h-9"
+              >
+                {savingKey && <Loader2 className="size-3.5 mr-1 animate-spin" />}
+                Save key
+              </Button>
             </div>
-          )}
-          {criticReady && (
-            <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-400">
-              <Check className="size-3.5" />
-              <span>
-                {status?.critic.provider} key configured · model{' '}
-                <code className="font-mono">{status?.critic.model}</code>
-              </span>
-            </div>
-          )}
-          {missing.length > 0 && missing.some((p) => p !== criticProvider) && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              Other agents reference: {missing.join(', ')}. The critic alone is enough to start; add others later as needed.
+            <p className="text-xs text-muted-foreground">
+              Stored in <code className="font-mono">~/.opentracy/secrets.json</code> on the server.
+              Only sent to {PROVIDER_LABEL}.
             </p>
-          )}
-        </Step>
+          </div>
+        )}
+        {criticReady && (
+          <div className="flex items-center gap-2 text-xs text-emerald-700 dark:text-emerald-400">
+            <Check className="size-3.5" />
+            <span>
+              {status?.critic.provider} key configured · model{' '}
+              <code className="font-mono">{status?.critic.model}</code>
+            </span>
+          </div>
+        )}
+        {missing.length > 0 && missing.some((p) => p !== criticProvider) && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            Other agents reference: {missing.join(', ')}. The critic alone is enough to start; add
+            others later as needed.
+          </p>
+        )}
+      </Step>
 
-        {/* Step 2: Pick a driver mode (or both) */}
-        <Step
-          n={2}
-          done={false}
-          title="Pick how the harness runs"
-          subtitle="Either — or both — can drive. They share the same critic gate and ledger."
-        >
-          <div className="grid gap-3 md:grid-cols-2">
-            {/* A. Autonomous loop */}
-            <div className="rounded-md border bg-muted/20 p-3 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Workflow className="size-4 text-primary" />
-                  <div className="text-sm font-medium">Autonomous loop</div>
-                </div>
-                <Badge
-                  variant="outline"
-                  className={
-                    criticReady
-                      ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[10px]'
-                      : 'bg-muted text-muted-foreground font-mono text-[10px]'
-                  }
-                >
-                  {criticReady ? 'live' : 'needs key'}
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                Trigger engine fires on its tick, sensors emit signals,
-                policies dispatch recipes — all using the saved key. No extra
-                setup once step 1 is done.
-              </p>
-            </div>
-
-            {/* B. Claude Code via MCP */}
-            <div className="rounded-md border bg-muted/20 p-3 space-y-2">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2">
-                  <Bot className="size-4 text-primary" />
-                  <div className="text-sm font-medium">Claude Code (MCP)</div>
-                </div>
-                <Badge
-                  variant="outline"
-                  className="bg-muted text-muted-foreground font-mono text-[10px]"
-                >
-                  optional
-                </Badge>
-              </div>
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                Operator-in-the-loop. Run once on the machine where Claude
-                Code lives — HTTP transport, user scope.
-              </p>
+      {/* Step 2: Pick a driver mode (or both) */}
+      <Step
+        n={2}
+        done={false}
+        title="Pick how the harness runs"
+        subtitle="Either — or both — can drive. They share the same critic gate and ledger."
+      >
+        <div className="grid gap-3 md:grid-cols-2">
+          {/* A. Autonomous loop */}
+          <div className="rounded-md border bg-muted p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <code className="flex-1 truncate rounded-md bg-background border px-2 py-1.5 font-mono text-[11px]">
-                  {mcpCommand}
-                </code>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCopy}
-                  className="h-8 shrink-0"
-                  aria-label="Copy MCP command"
-                >
-                  {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-                </Button>
+                <Workflow className="size-4 text-primary" />
+                <div className="text-sm font-medium">Autonomous loop</div>
               </div>
-              <p className="text-[11px] text-muted-foreground">
-                Verify with <code className="font-mono">claude mcp list</code>{' '}
-                — you should see{' '}
-                <code className="font-mono">
-                  {status?.mcp.name ?? 'opentracy-harness'}
-                </code>{' '}
-                ✓ Connected.
-              </p>
+              <Badge
+                variant="outline"
+                className={
+                  criticReady
+                    ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border-emerald-600 font-mono text-[10px]'
+                    : 'bg-muted text-muted-foreground font-mono text-[10px]'
+                }
+              >
+                {criticReady ? 'live' : 'needs key'}
+              </Badge>
             </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Trigger engine fires on its tick, sensors emit signals, policies dispatch recipes —
+              all using the saved key. No extra setup once step 1 is done.
+            </p>
           </div>
-        </Step>
 
-        {/* Step 3: Try it — works for either mode */}
-        <Step
-          n={3}
-          done={criticReady}
-          title="Try it"
-          subtitle="In Claude Code, ask one of these. The autonomous loop will surface the same kinds of proposals on its own cadence."
-        >
-          <div className="space-y-1.5 text-sm">
-            <SamplePrompt text="list pending harness proposals" />
-            <SamplePrompt text="list_objectives — show their current trends" />
-            <SamplePrompt text="propose a run_eval action against cost_per_successful_completion" />
+          {/* B. Claude Code via MCP */}
+          <div className="rounded-md border bg-muted p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Bot className="size-4 text-primary" />
+                <div className="text-sm font-medium">Claude Code (MCP)</div>
+              </div>
+              <Badge variant="outline" className="font-mono text-[10px]">
+                optional
+              </Badge>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Operator-in-the-loop. Run once on the machine where Claude Code lives — HTTP
+              transport, user scope.
+            </p>
+            <div className="flex items-center gap-2">
+              <code className="flex-1 truncate rounded-md bg-background border px-2 py-1.5 font-mono text-[11px]">
+                {mcpCommand}
+              </code>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleCopy}
+                className="h-8 shrink-0"
+                aria-label="Copy MCP command"
+              >
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              Verify with <code className="font-mono">claude mcp list</code> — you should see{' '}
+              <code className="font-mono">{status?.mcp.name ?? 'opentracy-harness'}</code> ✓
+              Connected.
+            </p>
           </div>
-        </Step>
+        </div>
+      </Step>
+
+      {/* Step 3: Try it — works for either mode */}
+      <Step
+        n={3}
+        done={criticReady}
+        title="Try it"
+        subtitle="In Claude Code, ask one of these. The autonomous loop will surface the same kinds of proposals on its own cadence."
+      >
+        <div className="space-y-1.5 text-sm">
+          <SamplePrompt text="list pending harness proposals" />
+          <SamplePrompt text="list_objectives — show their current trends" />
+          <SamplePrompt text="propose a run_eval action against cost_per_successful_completion" />
+        </div>
+      </Step>
     </div>
   );
 }
@@ -324,7 +312,7 @@ function Step({
             {done && (
               <Badge
                 variant="outline"
-                className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-mono text-[10px]"
+                className="bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400 border-emerald-600 font-mono text-[10px]"
               >
                 done
               </Badge>
@@ -341,14 +329,11 @@ function Step({
 function StepDot({ n, done }: { n?: number; done: boolean }) {
   if (done)
     return (
-      <div className="flex size-6 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-400">
+      <div className="flex size-6 items-center justify-center rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-400">
         <Check className="size-3.5" />
       </div>
     );
-  if (n === undefined)
-    return (
-      <div className="size-2 rounded-full bg-amber-500" />
-    );
+  if (n === undefined) return <div className="size-2 rounded-full bg-amber-500" />;
   return (
     <div className="flex size-6 items-center justify-center rounded-full border bg-muted text-xs font-mono text-muted-foreground">
       {n}
@@ -368,7 +353,7 @@ function SamplePrompt({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="group flex w-full items-center gap-2 rounded-md border bg-muted/30 px-3 py-1.5 text-left font-mono text-xs hover:bg-muted/60 hover:border-primary/40 transition-colors"
+      className="group flex w-full items-center gap-2 rounded-md border bg-muted px-3 py-1.5 text-left font-mono text-xs hover:border-foreground transition-colors"
       title="Click to copy"
     >
       <Terminal className="size-3 text-muted-foreground shrink-0" />
