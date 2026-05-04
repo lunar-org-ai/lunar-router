@@ -1,10 +1,9 @@
 /**
- * Harness page — four tabs over the same underlying ledger:
+ * Harness page — three tabs over the same underlying ledger:
  *
  *   Objectives  what the system is optimizing for
  *   Ledger      what the system did (newest first) + chain drill-down
  *   Proposals   pending writes awaiting approval (Phase 1.5)
- *   Agents      browse + manually trigger a single agent (existing UX)
  *
  * Two orchestrators share the same provider key + critic gate:
  *   - autonomous loop (Anthropic API, trigger engine drives recipes)
@@ -33,7 +32,6 @@ import {
   type HarnessSetupStatus,
 } from '@/services/harnessService';
 import { SetupGuide } from './components/SetupGuide';
-import { AgentsTab } from './tabs/AgentsTab';
 import { LedgerTab } from './tabs/LedgerTab';
 import { ObjectivesTab } from './tabs/ObjectivesTab';
 import { ProposalsTab } from './tabs/ProposalsTab';
@@ -102,7 +100,6 @@ export default function HarnessPage() {
                 </Badge>
               )}
             </TabsTrigger>
-            <TabsTrigger value="agents">Agents</TabsTrigger>
           </TabsList>
 
           <TabsContent value="objectives">
@@ -118,10 +115,6 @@ export default function HarnessPage() {
               onSetupChange={refreshStatus}
               onProposalsChange={refreshPending}
             />
-          </TabsContent>
-
-          <TabsContent value="agents">
-            <AgentsTab />
           </TabsContent>
         </Tabs>
       </div>
