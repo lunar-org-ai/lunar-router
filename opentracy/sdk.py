@@ -98,10 +98,61 @@ _MODEL_PREFIX_MAP: dict[str, str] = {
     "sonar": "perplexity",
 }
 
-# Engine URL (Go engine). Engine routing is opt-in: traffic goes direct to the
-# provider unless LUNAR_ENGINE_URL is explicitly set or force_engine=True.
-ENGINE_URL: str = env("ENGINE_URL", "http://localhost:8080")
-_ENGINE_EXPLICITLY_SET: bool = env_in_environ("ENGINE_URL")
+# OpenTracy engine URL — single source of truth. Defaults to the local Go
+# engine for self-hosted users; point it at the OpenTracy cloud (or any
+# other reachable engine) by setting OPENTRACY_ENGINE_URL.
+#
+#   Local self-host:  unset OPENTRACY_ENGINE_URL — defaults to localhost
+#                     (or set explicitly to make engine routing kick in).
+#
+#   Cloud SaaS:       OPENTRACY_ENGINE_URL=https://api.dev.opentracy.cloud
+#                     OPENTRACY_API_KEY=ot_…
+#
+# Engine routing is opt-in: when OPENTRACY_ENGINE_URL is unset, traffic
+# goes direct to the provider. The SDK never silently probes localhost.
+#
+# OPENTRACY_API_KEY is a Bearer token attached to every engine request
+# when present. Required when pointing at the cloud (the cloud engine
+# rejects unauthenticated calls); harmless when self-host engines don't
+# enforce auth.
+#
+# Both vars are read **on every access** — not frozen at import time —
+# so notebooks and REPL sessions can change them after import without
+# having to reload the module:
+#
+#     >>> import opentracy as ot, opentracy.sdk as sdk
+#     >>> os.environ["OPENTRACY_ENGINE_URL"] = "https://api.dev.opentracy.cloud"
+#     >>> sdk.ENGINE_URL
+#     'https://api.dev.opentracy.cloud'        # picks it up immediately
+
+_DEFAULT_ENGINE_URL = "http://localhost:8080"
+
+
+def _engine_url() -> str:
+    """Live reader for ENGINE_URL — re-checks the env on every call so
+    runtime env changes (Jupyter cells setting it after import) are
+    honored without a kernel restart."""
+    val = env("ENGINE_URL", _DEFAULT_ENGINE_URL)
+    return str(val) if val else _DEFAULT_ENGINE_URL
+
+
+def _engine_explicitly_set() -> bool:
+    """Live reader for the explicit-set check — same rationale."""
+    return env_in_environ("ENGINE_URL")
+
+
+def __getattr__(name: str):
+    """Module-level dynamic attributes. Reading `sdk.ENGINE_URL` (or the
+    private `_ENGINE_EXPLICITLY_SET`) hits the env *now*, not at import
+    time. We rely on Python's behavior of falling back to module
+    `__getattr__` only when the name isn't already a module global —
+    which is why both names below are deliberately NOT defined as
+    globals."""
+    if name == "ENGINE_URL":
+        return _engine_url()
+    if name == "_ENGINE_EXPLICITLY_SET":
+        return _engine_explicitly_set()
+    raise AttributeError(f"module 'opentracy.sdk' has no attribute {name!r}")
 
 # ---------------------------------------------------------------------------
 # Response types (OpenAI-compatible with attribute access)
@@ -166,25 +217,28 @@ _engine_available: Optional[bool] = None
 
 
 def _check_engine() -> bool:
-    """Probe the engine (cached). On first successful connect, triggers key reload.
+    """Probe the engine (cached). On first successful connect, ping the
+    engine's `/v1/config/reload` so it picks up freshly-saved provider
+    keys from `~/.opentracy/secrets.json` (a no-op if the engine doesn't
+    expose that endpoint, which is fine for cloud).
 
     Only called when engine routing has been explicitly opted into (via
-    LUNAR_ENGINE_URL or force_engine=True). We no longer silently probe
-    localhost — that made behavior depend on whether an unrelated server
-    happened to be running on :8080.
+    OPENTRACY_ENGINE_URL or force_engine=True). The SDK never silently
+    probes localhost — that made behavior depend on whether an unrelated
+    server happened to be running on :8080.
     """
     global _engine_available
     if _engine_available is not None:
         return _engine_available
     try:
-        req = urllib.request.Request(f"{ENGINE_URL}/health", method="GET")
-        with urllib.request.urlopen(req, timeout=1) as resp:
+        base = _engine_url()
+        req = urllib.request.Request(f"{base}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
             _engine_available = resp.status == 200
         if _engine_available:
-            # Tell engine to reload keys from ~/.opentracy/secrets.json
             try:
                 reload_req = urllib.request.Request(
-                    f"{ENGINE_URL}/v1/config/reload", method="POST",
+                    f"{base}/v1/config/reload", method="POST",
                     headers={"Content-Type": "application/json"},
                     data=b"{}",
                 )
@@ -481,17 +535,19 @@ def _resolve_target(
 
     Resolution order:
       1. Explicit ``api_base`` override — always wins.
-      2. Engine routing — only if ``LUNAR_ENGINE_URL`` is explicitly set.
-         (Previously we silently probed localhost:8080 and used it if up,
-         which made behavior non-deterministic across machines.)
+      2. Engine routing — when ``OPENTRACY_ENGINE_URL`` is explicitly set
+         (whether localhost or the OpenTracy cloud), all traffic flows
+         through it. The Bearer key from ``OPENTRACY_API_KEY`` is
+         attached if present; the cloud requires it, self-host typically
+         doesn't.
       3. Direct provider call — requires a known provider and API key.
     """
     if api_base:
-        return api_base, api_key or "none"
+        return api_base, api_key or env("API_KEY", "none")
 
-    if _ENGINE_EXPLICITLY_SET:
+    if _engine_explicitly_set():
         _check_engine()  # side effect: reload keys on first use
-        return f"{ENGINE_URL}/v1", api_key or env("API_KEY", "none")
+        return f"{_engine_url()}/v1", api_key or env("API_KEY", "none")
 
     if not provider_name:
         raise ValueError(
@@ -587,9 +643,10 @@ def _prepare_request(
         (base_url, api_key, body, provider_name, effective_model_name)
     """
     provider_name, model_name = parse_model(model)
+    engine_base = _engine_url()
 
     if force_engine:
-        base_url = f"{ENGINE_URL}/v1"
+        base_url = f"{engine_base}/v1"
         key = api_key or env("API_KEY", "none")
         effective_model = model  # pass full "provider/model" to engine
     elif force_direct:
@@ -601,8 +658,10 @@ def _prepare_request(
         effective_model = model_name
     else:
         base_url, key = _resolve_target(provider_name, model_name, api_key, api_base)
-        # When routing through the engine, it expects the full "provider/model" string
-        effective_model = model if base_url.startswith(ENGINE_URL) else model_name
+        # When routing through the engine, pass the full "provider/model"
+        # string so the engine's prefix-based router can reach the right
+        # provider. Direct provider calls just take the model_name half.
+        effective_model = model if base_url.startswith(engine_base) else model_name
 
     body = _build_body(
         effective_model, messages, temperature, max_tokens,
@@ -1183,7 +1242,7 @@ def add_traces(
             {"input": "Bye!", "output": "Goodbye!", "model": "gpt-4o-mini"},
         ])
     """
-    url = (engine_url or ENGINE_URL) + "/v1/traces"
+    url = (engine_url or _engine_url()) + "/v1/traces"
 
     # Clean None values from traces
     clean = []
@@ -1192,6 +1251,14 @@ def add_traces(
 
     payload = json.dumps({"traces": clean}).encode()
     headers = {"Content-Type": "application/json"}
+
+    # Attach the Bearer key if one is configured. Required when the engine
+    # URL points at the OpenTracy cloud (which gates /v1/traces behind
+    # auth); harmless when it points at a self-host engine that doesn't
+    # check it.
+    api_key = env("API_KEY", "")
+    if isinstance(api_key, str) and api_key.strip():
+        headers["Authorization"] = f"Bearer {api_key.strip()}"
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
