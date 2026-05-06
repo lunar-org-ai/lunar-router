@@ -2,6 +2,7 @@ import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 
 import { AppLayout } from '@/app/AppLayout';
+import { PostHogPageView } from '@/app/PostHogPageView';
 import { FullScreenSpinner } from '@/components/shared/FullScreenSpinner';
 
 const Intelligence = lazy(() => import('@/features/intelligence'));
@@ -22,6 +23,7 @@ const DistillationResults = lazy(() => import('@/views/DistillationResults'));
 export function AppRoutes() {
   return (
     <Suspense fallback={<FullScreenSpinner />}>
+      <PostHogPageView />
       <Routes>
         <Route index element={<Navigate to="/traces" replace />} />
 
