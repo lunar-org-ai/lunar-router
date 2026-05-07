@@ -17,13 +17,27 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from dataclasses import dataclass
+
 from experiments.branching import create_candidate
 from experiments.runner import CandidateResult, run_candidate
+from harness.approver import ApprovalDecision, Policy, decide
 from harness.critics import Critic, CriticStage, make_critic
+from harness.executor import promote
 from harness.types import CriticContext, CriticVerdict, LoopOutcome, Proposal
 
 DEFAULT_PRE_CRITICS = ["scope"]
 DEFAULT_POST_CRITICS = ["eval_lift"]
+
+
+@dataclass
+class LoopRound:
+    """One full pass through the loop for a single proposal."""
+
+    outcome: LoopOutcome
+    decision: ApprovalDecision
+    promoted_version: Optional[str] = None
+    promoted_lesson_id: Optional[str] = None
 
 
 def _split_critics(
@@ -102,3 +116,64 @@ def propose_and_score(
         outcomes.append(outcome)
 
     return outcomes
+
+
+def run_loop(
+    proposals: list[Proposal],
+    suite_path: Path | str,
+    pre_critics: Optional[list[str]] = None,
+    post_critics: Optional[list[str]] = None,
+    policy: Optional[Policy] = None,
+    auto_promote: bool = False,
+    promote_strategy: str = "best",   # "best" | "all" | "none"
+) -> list[LoopRound]:
+    """Full pipeline including approver + executor.
+
+    Steps:
+      1. propose_and_score (Proposal → critics → branch → score → critics)
+      2. For each outcome, ask the approver (mode in policies/auto_approve.yaml)
+      3. If decision is AUTO_APPROVE *and* `auto_promote=True`, promote according
+         to `promote_strategy`:
+           - "best": only the single highest-Δoverall outcome promotes
+           - "all":  every AUTO_APPROVE outcome promotes (sequential)
+           - "none": don't promote even on AUTO_APPROVE (records-only run)
+
+    Returns one LoopRound per input proposal.
+    """
+    if promote_strategy not in {"best", "all", "none"}:
+        raise ValueError(f"promote_strategy must be best|all|none, got {promote_strategy!r}")
+
+    outcomes = propose_and_score(proposals, suite_path, pre_critics, post_critics)
+    pol = policy or Policy.from_yaml()
+
+    decisions = [decide(o, pol) for o in outcomes]
+    rounds = [LoopRound(outcome=o, decision=d) for o, d in zip(outcomes, decisions)]
+
+    if not auto_promote or promote_strategy == "none":
+        return rounds
+
+    eligible_idxs = [
+        i for i, r in enumerate(rounds) if r.decision == ApprovalDecision.AUTO_APPROVE
+    ]
+    if not eligible_idxs:
+        return rounds
+
+    if promote_strategy == "best":
+        best_idx = max(
+            eligible_idxs,
+            key=lambda i: (
+                rounds[i].outcome.candidate_result.delta["overall_score"]
+                if rounds[i].outcome.candidate_result is not None
+                else float("-inf")
+            ),
+        )
+        version, lesson_id = promote(rounds[best_idx].outcome)
+        rounds[best_idx].promoted_version = version
+        rounds[best_idx].promoted_lesson_id = lesson_id
+    else:  # "all" — sequential promotions
+        for i in eligible_idxs:
+            version, lesson_id = promote(rounds[i].outcome)
+            rounds[i].promoted_version = version
+            rounds[i].promoted_lesson_id = lesson_id
+
+    return rounds

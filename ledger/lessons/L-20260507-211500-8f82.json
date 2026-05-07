@@ -1,0 +1,27 @@
+{
+  "id": "L-20260507-211500-8f82",
+  "version": "v0.0.2",
+  "kind": "rag",
+  "status": "auto_promoted",
+  "title": "pipeline/retrieve.yaml:knobs.k=12",
+  "summary": "Candidate scored Δoverall=+0.0000 vs baseline (v0.0.1); all critics passed.",
+  "proposal_source": "heuristic_sweep",
+  "delta": {
+    "overall_score": 0.0,
+    "pass_rate": 0.0,
+    "per_rubric": {
+      "pipeline_succeeded": 0.0,
+      "under_budget": 0.0,
+      "keywords_match": 0.0,
+      "response_nonempty": 0.0
+    }
+  },
+  "mutations": [
+    "pipeline/retrieve.yaml:knobs.k=12"
+  ],
+  "parent_version": "v0.0.1",
+  "candidate_id": "cand_20260507T211500_3f51",
+  "promoted_at": "2026-05-07T21:15:00Z",
+  "ledger_entry_id": "led_20260507T211500_ad5fa8",
+  "voice": "I tweaked rag: pipeline/retrieve.yaml:knobs.k=12. Δoverall on the suite came out to +0.0000, so I promoted it."
+}
