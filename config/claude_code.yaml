@@ -1,0 +1,31 @@
+# config/claude_code.yaml
+# The boundary. Enforced by harness/claude_code/.
+
+mutable:
+  - agent/**
+  - evals/golden/**
+  - corpora/ingested/**
+  - experiments/candidates/**
+
+read_only:
+  - techniques/**
+  - runtime/**
+  - harness/**
+  - backend/**
+  - ml/**
+  - policies/**
+  - config/**
+  - ui/**
+
+append_only:
+  - traces/**
+  - ledger/**
+  - experiments/results/**
+
+# Rules of engagement (enforced by harness/critics/)
+rules:
+  one_mutation_per_experiment: true
+  require_eval_lift: true
+  require_no_critical_regression: true
+  custom_code_path: agent/custom/   # last-resort path for new variants
+  max_concurrent_experiments: 4

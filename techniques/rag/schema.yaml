@@ -1,0 +1,53 @@
+# techniques/rag/schema.yaml
+# Defines what knobs the rag technique exposes to agent.yaml.
+# Validated by runtime/compiler/ before any candidate runs.
+
+technique: rag
+description: "Retrieval-augmented generation. Pulls context from corpora/."
+
+variants:
+  - name: dense
+    description: "Vector similarity only"
+  - name: sparse
+    description: "BM25 only"
+  - name: hybrid
+    description: "Dense + BM25 with weighted fusion"
+
+knobs:
+  chunk_size:
+    type: int
+    range: [128, 2048]
+    default: 512
+    description: "Token chunk size for indexing"
+
+  k:
+    type: int
+    range: [1, 50]
+    default: 8
+    description: "Number of chunks to retrieve"
+
+  embedder:
+    type: enum
+    values: [text-embed-3-small, text-embed-3-large, custom]
+    default: text-embed-3-small
+
+  bm25_weight:
+    type: float
+    range: [0.0, 1.0]
+    default: 0.3
+    description: "Weight of BM25 score in hybrid fusion (0 = dense only, 1 = sparse only)"
+    applies_when:
+      variant: hybrid
+
+  rerank_inline:
+    type: bool
+    default: false
+    description: "Apply reranking within retrieve stage instead of as separate stage"
+
+inputs:
+  - { name: query, type: string }
+  - { name: corpus, type: ref, target: corpora/indexed }
+
+outputs:
+  - { name: documents, type: list[Document] }
+  - { name: scores, type: list[float] }
