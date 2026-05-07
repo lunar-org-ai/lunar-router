@@ -1,0 +1,9 @@
+id: golden_007
+input:
+  request: "Is the blue size-M shirt back in stock?"
+expected:
+  contains: ["stock"]
+  category: product
+metadata:
+  source: seed
+  difficulty: medium

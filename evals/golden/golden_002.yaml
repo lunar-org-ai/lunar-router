@@ -1,0 +1,9 @@
+id: golden_002
+input:
+  request: "Where is my order #12345?"
+expected:
+  contains: ["order"]
+  category: order_status
+metadata:
+  source: seed
+  difficulty: easy

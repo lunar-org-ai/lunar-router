@@ -1,0 +1,9 @@
+id: golden_004
+input:
+  request: "I want to cancel my order"
+expected:
+  contains: ["cancel", "order"]
+  category: order_action
+metadata:
+  source: seed
+  difficulty: easy

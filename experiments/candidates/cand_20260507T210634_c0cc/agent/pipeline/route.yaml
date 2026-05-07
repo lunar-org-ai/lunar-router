@@ -1,0 +1,8 @@
+stage: route
+technique: routing
+variant: small_first
+knobs:
+  confidence_threshold: 0.5
+  small: claude-haiku-4-5
+  big: claude-sonnet-4-6
+  escalate_on_failure: true

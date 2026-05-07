@@ -1,0 +1,217 @@
+{
+  "suite": "smoke_v0",
+  "agent_version": "v0.0.1",
+  "started_at": "2026-05-07T20:51:38.794Z",
+  "finished_at": "2026-05-07T20:51:38.797Z",
+  "cases": [
+    {
+      "golden_id": "golden_001",
+      "request": "What is your refund policy?",
+      "response": "[stub response] Would have called claude-haiku-4-5 (max_tokens=2048, temperature=0.3) with prompt template '../prompts/system.md' and 4 retrieved doc(s). Request was: 'What is your refund policy?'",
+      "duration_ms": 0.083,
+      "success": true,
+      "error": null,
+      "trace_id": "a6189ea7-afe5-4ae9-9dd1-f42fccb8c70d",
+      "rubric_results": [
+        {
+          "rubric": "pipeline_succeeded",
+          "type": "pipeline_success",
+          "score": 1.0,
+          "passed": true,
+          "detail": null
+        },
+        {
+          "rubric": "response_nonempty",
+          "type": "response_nonempty",
+          "score": 1.0,
+          "passed": true,
+          "detail": "len=196"
+        },
+        {
+          "rubric": "keywords_match",
+          "type": "contains_keywords",
+          "score": 1.0,
+          "passed": true,
+          "detail": "1/1 hit: ['refund']"
+        },
+        {
+          "rubric": "under_budget",
+          "type": "latency_under_budget",
+          "score": 1.0,
+          "passed": true,
+          "detail": "0.08ms vs budget 2000.0ms"
+        }
+      ]
+    },
+    {
+      "golden_id": "golden_002",
+      "request": "Where is my order #12345?",
+      "response": "[stub response] Would have called claude-haiku-4-5 (max_tokens=2048, temperature=0.3) with prompt template '../prompts/system.md' and 4 retrieved doc(s). Request was: 'Where is my order #12345?'",
+      "duration_ms": 0.051,
+      "success": true,
+      "error": null,
+      "trace_id": "d5391607-5a7a-41d4-93d5-6a47110ed024",
+      "rubric_results": [
+        {
+          "rubric": "pipeline_succeeded",
+          "type": "pipeline_success",
+          "score": 1.0,
+          "passed": true,
+          "detail": null
+        },
+        {
+          "rubric": "response_nonempty",
+          "type": "response_nonempty",
+          "score": 1.0,
+          "passed": true,
+          "detail": "len=194"
+        },
+        {
+          "rubric": "keywords_match",
+          "type": "contains_keywords",
+          "score": 1.0,
+          "passed": true,
+          "detail": "1/1 hit: ['order']"
+        },
+        {
+          "rubric": "under_budget",
+          "type": "latency_under_budget",
+          "score": 1.0,
+          "passed": true,
+          "detail": "0.05ms vs budget 2000.0ms"
+        }
+      ]
+    },
+    {
+      "golden_id": "golden_003",
+      "request": "How long does shipping take to Brazil?",
+      "response": "[stub response] Would have called claude-haiku-4-5 (max_tokens=2048, temperature=0.3) with prompt template '../prompts/system.md' and 4 retrieved doc(s). Request was: 'How long does shipping take to Brazil?'",
+      "duration_ms": 0.042,
+      "success": true,
+      "error": null,
+      "trace_id": "a7015a29-c2e5-400e-931d-57486a37fa1a",
+      "rubric_results": [
+        {
+          "rubric": "pipeline_succeeded",
+          "type": "pipeline_success",
+          "score": 1.0,
+          "passed": true,
+          "detail": null
+        },
+        {
+          "rubric": "response_nonempty",
+          "type": "response_nonempty",
+          "score": 1.0,
+          "passed": true,
+          "detail": "len=207"
+        },
+        {
+          "rubric": "keywords_match",
+          "type": "contains_keywords",
+          "score": 1.0,
+          "passed": true,
+          "detail": "1/1 hit: ['shipping']"
+        },
+        {
+          "rubric": "under_budget",
+          "type": "latency_under_budget",
+          "score": 1.0,
+          "passed": true,
+          "detail": "0.04ms vs budget 2000.0ms"
+        }
+      ]
+    },
+    {
+      "golden_id": "golden_004",
+      "request": "I want to cancel my order",
+      "response": "[stub response] Would have called claude-haiku-4-5 (max_tokens=2048, temperature=0.3) with prompt template '../prompts/system.md' and 4 retrieved doc(s). Request was: 'I want to cancel my order'",
+      "duration_ms": 0.038,
+      "success": true,
+      "error": null,
+      "trace_id": "c2ebd13c-f2b7-446f-8955-e084c2635c9e",
+      "rubric_results": [
+        {
+          "rubric": "pipeline_succeeded",
+          "type": "pipeline_success",
+          "score": 1.0,
+          "passed": true,
+          "detail": null
+        },
+        {
+          "rubric": "response_nonempty",
+          "type": "response_nonempty",
+          "score": 1.0,
+          "passed": true,
+          "detail": "len=194"
+        },
+        {
+          "rubric": "keywords_match",
+          "type": "contains_keywords",
+          "score": 1.0,
+          "passed": true,
+          "detail": "2/2 hit: ['cancel', 'order']"
+        },
+        {
+          "rubric": "under_budget",
+          "type": "latency_under_budget",
+          "score": 1.0,
+          "passed": true,
+          "detail": "0.04ms vs budget 2000.0ms"
+        }
+      ]
+    },
+    {
+      "golden_id": "golden_005",
+      "request": "My item arrived damaged. What do I do?",
+      "response": "[stub response] Would have called claude-haiku-4-5 (max_tokens=2048, temperature=0.3) with prompt template '../prompts/system.md' and 4 retrieved doc(s). Request was: 'My item arrived damaged. What do I do?'",
+      "duration_ms": 0.037,
+      "success": true,
+      "error": null,
+      "trace_id": "5253f58e-fc53-4335-bdbd-1e88ea750d22",
+      "rubric_results": [
+        {
+          "rubric": "pipeline_succeeded",
+          "type": "pipeline_success",
+          "score": 1.0,
+          "passed": true,
+          "detail": null
+        },
+        {
+          "rubric": "response_nonempty",
+          "type": "response_nonempty",
+          "score": 1.0,
+          "passed": true,
+          "detail": "len=207"
+        },
+        {
+          "rubric": "keywords_match",
+          "type": "contains_keywords",
+          "score": 1.0,
+          "passed": true,
+          "detail": "1/1 hit: ['damaged']"
+        },
+        {
+          "rubric": "under_budget",
+          "type": "latency_under_budget",
+          "score": 1.0,
+          "passed": true,
+          "detail": "0.04ms vs budget 2000.0ms"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "overall_score": 1.0,
+    "pass_rate": 1.0,
+    "per_rubric": {
+      "pipeline_succeeded": 1.0,
+      "response_nonempty": 1.0,
+      "keywords_match": 1.0,
+      "under_budget": 1.0
+    },
+    "n_goldens": 5,
+    "n_rubrics": 4,
+    "n_passed": 20,
+    "n_total": 20
+  }
+}
