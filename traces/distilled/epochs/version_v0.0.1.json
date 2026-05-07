@@ -1,0 +1,86 @@
+{
+  "epoch_id": "version:v0.0.1",
+  "kind": "version",
+  "started_at": "2026-05-07T21:13:06.355Z",
+  "ended_at": "2026-05-07T21:52:26.098Z",
+  "counts": {
+    "n_proposals": 0,
+    "n_branched": 0,
+    "n_promoted": 0,
+    "n_rolled_back": 0,
+    "n_rejected_by_critic": 0,
+    "n_rejected_by_policy": 0
+  },
+  "top_events": [
+    {
+      "kind": "promotion",
+      "when": "2026-05-07T21:13:06.355Z",
+      "summary": "auto-promoted",
+      "candidate_id": "cand_xyz",
+      "version": "v0.0.2",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T211306_bba999"
+    },
+    {
+      "kind": "promotion",
+      "when": "2026-05-07T21:15:00.480Z",
+      "summary": "promoted with Δoverall=+0.0000",
+      "candidate_id": "cand_20260507T211500_3f51",
+      "version": "v0.0.2",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T211500_ad5fa8"
+    },
+    {
+      "kind": "rollback",
+      "when": "2026-05-07T21:15:00.506Z",
+      "summary": "rolled back: v0.0.2 → v0.0.1 (smoke test)",
+      "candidate_id": null,
+      "version": "v0.0.1",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T211500_ea75af"
+    },
+    {
+      "kind": "promotion",
+      "when": "2026-05-07T21:16:39.324Z",
+      "summary": "promoted with Δoverall=+0.0000",
+      "candidate_id": "cand_20260507T211639_d080",
+      "version": "v0.0.2",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T211639_682e13"
+    },
+    {
+      "kind": "rollback",
+      "when": "2026-05-07T21:16:39.823Z",
+      "summary": "rolled back: v0.0.2 → v0.0.1 (smoke test of P6.4)",
+      "candidate_id": null,
+      "version": "v0.0.1",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T211639_7dfc1a"
+    },
+    {
+      "kind": "promotion",
+      "when": "2026-05-07T21:50:54.943Z",
+      "summary": "promoted with Δoverall=+0.0000",
+      "candidate_id": "cand_20260507T215054_4498",
+      "version": "v0.0.2",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T215054_d58f31"
+    },
+    {
+      "kind": "rollback",
+      "when": "2026-05-07T21:52:26.098Z",
+      "summary": "rolled back: v0.0.2 → v0.0.1 (validation suite)",
+      "candidate_id": null,
+      "version": "v0.0.1",
+      "lesson_id": null,
+      "ledger_entry_id": "led_20260507T215226_5291bd"
+    }
+  ],
+  "avg_overall_score": null,
+  "avg_delta_when_promoted": null,
+  "sessions": [],
+  "referenced_versions": [
+    "v0.0.1"
+  ],
+  "summary": "Version epoch v0.0.1:, 0 promotion(s)."
+}

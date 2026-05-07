@@ -1,19 +1,14 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { Icon } from '../components/Icon';
+import { ApiError, runAgent, type HistoryMessage } from '../api';
 
 interface Msg {
   who: 'agent' | 'user';
   text: string;
+  traceId?: string;
+  durationMs?: number;
+  error?: boolean;
 }
-
-const canned: Record<string, string> = {
-  'why did you change':
-    "I noticed 47 failed traces in the last 7 days where customers sent order IDs with dashes. The lookup tool wants canonical form, so the model kept failing. I wrote a small wrapper that normalizes inputs at the edge — projected lift is +25 points on order-lookup success. It's waiting for your review.",
-  'what are you learning':
-    "Two things this week:\n\n1. Order ID formats vary more than I assumed — I drafted a normalizer.\n2. My empathy phrasing was too long. I shortened it after seeing CSAT drop on long preambles.\n\nI also tried 'concise mode' but rolled it back when CSAT dropped 0.6 in 24 hours.",
-  rollback:
-    'Sure — I can roll the live agent back to v0.39 (Small-model routing). That undoes the empathy prompt change. Want me to do it now or schedule it?',
-};
 
 export const TalkToAgent = () => {
   const [msgs, setMsgs] = useState<Msg[]>([
@@ -30,27 +25,45 @@ export const TalkToAgent = () => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [msgs]);
 
-  const ask = (q: string) => {
+  const ask = async (q: string) => {
     if (!q.trim() || loading) return;
     setMsgs((m) => [...m, { who: 'user', text: q }]);
     setInput('');
     setLoading(true);
-    setTimeout(() => {
-      const lower = q.toLowerCase();
-      const key = Object.keys(canned).find((k) => lower.includes(k));
-      const reply =
-        (key && canned[key]) ||
-        "I'd look at the relevant traces, evals, and recent decisions to answer that. (This is a prototype — in the full product I'd reason over the live data.)";
-      setMsgs((m) => [...m, { who: 'agent', text: reply }]);
+
+    // Build history from prior turns (skip the initial greeting)
+    const history: HistoryMessage[] = msgs
+      .slice(1)
+      .map((m) => ({ role: m.who === 'user' ? 'user' : 'assistant', content: m.text }));
+
+    try {
+      const result = await runAgent(q, history);
+      setMsgs((m) => [
+        ...m,
+        {
+          who: 'agent',
+          text: result.response ?? '(empty response)',
+          traceId: result.trace_id,
+          durationMs: result.duration_ms,
+          error: !result.success,
+        },
+      ]);
+    } catch (e) {
+      const message =
+        e instanceof ApiError
+          ? `Backend ${e.status}: ${e.message}`
+          : `Network error: ${e instanceof Error ? e.message : String(e)}`;
+      setMsgs((m) => [...m, { who: 'agent', text: message, error: true }]);
+    } finally {
       setLoading(false);
-    }, 700);
+    }
   };
 
   const quick = [
-    'Why did you change the empathy prompt?',
-    'What are you learning right now?',
-    'Show me your last rollback',
-    'How did you decide on small-model routing?',
+    'Where is order #555?',
+    "What's your refund policy?",
+    'I want to cancel my order',
+    'How long does shipping take to Brazil?',
   ];
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -84,8 +97,13 @@ export const TalkToAgent = () => {
               <div className="body">
                 <div className="who">{m.who === 'agent' ? 'Agent' : 'You'}</div>
                 {m.text.split('\n').map((line, j) => (
-                  <p key={j}>{line}</p>
+                  <p key={j} className={m.error ? 'dim' : ''}>{line}</p>
                 ))}
+                {m.traceId && (
+                  <p className="dim" style={{ fontSize: 11, marginTop: 4 }}>
+                    trace {m.traceId.slice(0, 8)}… · {m.durationMs?.toFixed(1)}ms
+                  </p>
+                )}
               </div>
             </div>
           ))}

@@ -1,4 +1,4 @@
-"""Harness data types: Proposal, CriticVerdict, CriticContext."""
+"""Harness data types: Proposal, Prediction, Critic*, LoopOutcome."""
 
 from __future__ import annotations
 
@@ -9,17 +9,86 @@ from experiments.types import Mutation
 
 
 @dataclass
+class Prediction:
+    """A falsifiable claim about what a Proposal will do (AHE pillar 3).
+
+    `rubric` may be a specific eval rubric name (e.g. "keywords_match") or
+    the special string "overall" to predict the aggregate score. Direction is
+    encoded in the sign of expected_delta.
+    """
+
+    rubric: str                  # rubric name or "overall"
+    expected_delta: float        # signed; positive = improvement
+    rationale: str
+    confidence: float = 0.5      # optional 0-1; future routing use
+
+
+@dataclass
+class VerificationOutcome:
+    """Did reality match the Prediction? Computed post-eval."""
+
+    rubric: str
+    expected_delta: float
+    actual_delta: float
+    direction_correct: bool      # sign(actual) == sign(expected)
+    magnitude_met: bool           # abs(actual) >= abs(expected)
+    verdict: str                  # "verified" | "partial" | "wrong" | "no_change"
+
+    @classmethod
+    def evaluate(
+        cls, prediction: Prediction, actual_delta: float
+    ) -> "VerificationOutcome":
+        expected = prediction.expected_delta
+        if expected == 0:
+            verdict = "verified" if actual_delta == 0 else "no_change"
+            return cls(
+                rubric=prediction.rubric,
+                expected_delta=expected,
+                actual_delta=actual_delta,
+                direction_correct=True,
+                magnitude_met=actual_delta == 0,
+                verdict=verdict,
+            )
+
+        same_sign = (actual_delta > 0 and expected > 0) or (
+            actual_delta < 0 and expected < 0
+        )
+        magnitude_met = abs(actual_delta) >= abs(expected)
+
+        if not same_sign and actual_delta != 0:
+            verdict = "wrong"
+        elif same_sign and magnitude_met:
+            verdict = "verified"
+        elif same_sign:
+            verdict = "partial"
+        else:
+            verdict = "no_change"
+
+        return cls(
+            rubric=prediction.rubric,
+            expected_delta=expected,
+            actual_delta=actual_delta,
+            direction_correct=same_sign,
+            magnitude_met=magnitude_met,
+            verdict=verdict,
+        )
+
+
+@dataclass
 class Proposal:
     """A candidate mutation the proposer wants to test.
 
     A Proposal does not yet have a candidate_id — it's pre-branching. The loop
-    orchestrator turns approved Proposals into branched candidates.
+    orchestrator turns approved Proposals into branched candidates. If a
+    Prediction is attached, the loop verifies it post-eval and records the
+    outcome in the ledger (AHE: decision observability).
     """
 
     mutations: list[Mutation]
     description: Optional[str] = None
     source: str = "heuristic"     # "heuristic" | "claude_code" | "human" | …
     metadata: dict[str, Any] = field(default_factory=dict)
+    prediction: Optional[Prediction] = None
 
 
 @dataclass
@@ -52,6 +121,7 @@ class LoopOutcome:
     candidate_id: Optional[str]            # set if the Proposal got branched
     verdicts: list[CriticVerdict] = field(default_factory=list)
     candidate_result: Optional[Any] = None # experiments.runner.CandidateResult
+    verification: Optional[VerificationOutcome] = None   # if proposal had prediction
     final: str = "pending"                 # "approved" | "rejected" | "pending"
 
     @property

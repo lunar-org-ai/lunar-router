@@ -1,0 +1,14 @@
+agent:
+  version: v0.0.2
+  description: "default harness \u2014 to be molded by usage"
+  pipeline:
+  - $ref: pipeline/retrieve.yaml
+  - $ref: pipeline/rerank.yaml
+  - $ref: pipeline/route.yaml
+  - $ref: pipeline/generate.yaml
+  cross_cutting:
+    memory:
+      $ref: pipeline/memory.yaml
+  budget:
+    max_latency_ms: 4000
+    max_cost_usd: 0.05

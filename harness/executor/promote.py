@@ -130,20 +130,40 @@ def promote(
     # 4. Ledger entry
     delta = outcome.candidate_result.delta if outcome.candidate_result else {}
     delta_overall = delta.get("overall_score", 0.0) if delta else 0.0
+
+    payload: dict = {
+        "mutations": [m.describe() for m in outcome.proposal.mutations],
+        "delta": delta,
+        "verdicts": [
+            {"critic": v.critic, "approved": v.approved, "reason": v.reason}
+            for v in outcome.verdicts
+        ],
+    }
+    # AHE pillar 3 — record prediction + verification when present
+    if outcome.proposal.prediction is not None:
+        payload["prediction"] = {
+            "rubric": outcome.proposal.prediction.rubric,
+            "expected_delta": outcome.proposal.prediction.expected_delta,
+            "rationale": outcome.proposal.prediction.rationale,
+            "confidence": outcome.proposal.prediction.confidence,
+        }
+    if outcome.verification is not None:
+        payload["verification"] = {
+            "rubric": outcome.verification.rubric,
+            "expected_delta": outcome.verification.expected_delta,
+            "actual_delta": outcome.verification.actual_delta,
+            "direction_correct": outcome.verification.direction_correct,
+            "magnitude_met": outcome.verification.magnitude_met,
+            "verdict": outcome.verification.verdict,
+        }
+
     entry = write_entry(
         kind="promote",
         candidate_id=outcome.candidate_id,
         agent_version_before=old_version,
         agent_version_after=new_version,
         summary=f"promoted with Δoverall={delta_overall:+.4f}",
-        payload={
-            "mutations": [m.describe() for m in outcome.proposal.mutations],
-            "delta": delta,
-            "verdicts": [
-                {"critic": v.critic, "approved": v.approved, "reason": v.reason}
-                for v in outcome.verdicts
-            ],
-        },
+        payload=payload,
     )
 
     # 5. Lesson

@@ -24,7 +24,13 @@ from experiments.runner import CandidateResult, run_candidate
 from harness.approver import ApprovalDecision, Policy, decide
 from harness.critics import Critic, CriticStage, make_critic
 from harness.executor import promote
-from harness.types import CriticContext, CriticVerdict, LoopOutcome, Proposal
+from harness.types import (
+    CriticContext,
+    CriticVerdict,
+    LoopOutcome,
+    Proposal,
+    VerificationOutcome,
+)
 
 DEFAULT_PRE_CRITICS = ["scope"]
 DEFAULT_POST_CRITICS = ["eval_lift"]
@@ -107,6 +113,13 @@ def propose_and_score(
         result: CandidateResult = run_candidate(manifest.id, suite_path)
         outcome.candidate_result = result
 
+        # Verify prediction (AHE pillar 3) — opt-in: only when proposal made one
+        if proposal.prediction is not None:
+            actual_delta = _actual_delta_for_rubric(result, proposal.prediction.rubric)
+            outcome.verification = VerificationOutcome.evaluate(
+                proposal.prediction, actual_delta
+            )
+
         # Post-eval critics
         ctx_post = CriticContext(proposal=proposal, candidate_result=result)
         post_verdicts, post_blocked = _run_critics(post, ctx_post)
@@ -116,6 +129,13 @@ def propose_and_score(
         outcomes.append(outcome)
 
     return outcomes
+
+
+def _actual_delta_for_rubric(result: "CandidateResult", rubric: str) -> float:
+    """Pull the realized delta for a predicted rubric from a CandidateResult."""
+    if rubric == "overall":
+        return float(result.delta["overall_score"])
+    return float(result.delta.get("per_rubric", {}).get(rubric, 0.0))
 
 
 def run_loop(

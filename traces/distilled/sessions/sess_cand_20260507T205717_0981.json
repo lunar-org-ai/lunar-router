@@ -1,0 +1,33 @@
+{
+  "session_id": "sess_cand_20260507T205717_0981",
+  "kind": "experiment",
+  "started_at": "2026-05-07T20:57:17Z",
+  "ended_at": "2026-05-07T20:57:17Z",
+  "candidate_id": "cand_20260507T205717_0981",
+  "parent_version": "v0.0.1",
+  "suite": "smoke_v0",
+  "proposal_source": null,
+  "mutations": [
+    "pipeline/retrieve.yaml:knobs.k=20"
+  ],
+  "prediction": null,
+  "actual": null,
+  "prediction_verified": null,
+  "aggregate": {
+    "n_traces": 20,
+    "n_passed": 20,
+    "n_failed": 0,
+    "avg_latency_ms": 0.0,
+    "p95_latency_ms": 0.0
+  },
+  "overall_score": 1.0,
+  "pass_rate": 1.0,
+  "delta_overall": 0.0,
+  "final_decision": "queue_human_or_rejected",
+  "promoted_version": null,
+  "blocking_critic": null,
+  "ledger_entries": [],
+  "trace_ids": [],
+  "lesson_id": null,
+  "summary": "Candidate cand_20260507T205717_0981 mutated [pipeline/retrieve.yaml:knobs.k=20] from v0.0.1. Suite=smoke_v0: overall=1.000, Δ=+0.0000 vs baseline. Outcome: queue_human_or_rejected."
+}
