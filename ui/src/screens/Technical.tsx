@@ -66,6 +66,7 @@ const useAutoToast = (toast: string | null, setToast: (v: string | null) => void
 
 const PAGE_SIZE = 50;
 type Verdict = 'pass' | 'fail';
+type FilterMode = 'all' | 'pass' | 'flag' | 'fail';
 
 const fmtDuration = (ms: number): string => {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
@@ -198,7 +199,7 @@ const buildSessionTranscript = (
 export const Traces = () => {
   const [page, setPage] = useState<TracesPage | null>(null);
   const [date, setDate] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | Verdict>('all');
+  const [filter, setFilter] = useState<FilterMode>('all');
   const [versionFilter, setVersionFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -208,6 +209,11 @@ export const Traces = () => {
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
+  // Local-only flag set — persisting flag state to the ledger is deferred
+  // (no flag concept on the backend yet). When you flag a trace from the
+  // drawer, it joins this set; refresh wipes. Sufficient for triage; real
+  // persistence wires later alongside the auto-rollback signals.
+  const [flagged, setFlagged] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
 
@@ -222,6 +228,9 @@ export const Traces = () => {
     try {
       const opts: Parameters<typeof listTraces>[0] = { limit: PAGE_SIZE, offset };
       if (date) opts.date = date;
+      // Flag is a client-side overlay — backend doesn't know about it. We
+      // still send the success filter for pass/fail; flagged traces are
+      // filtered post-fetch via the `flagged` set.
       if (filter === 'pass') opts.success = true;
       else if (filter === 'fail') opts.success = false;
       if (versionFilter !== 'all') opts.agent_version = versionFilter;
@@ -266,17 +275,37 @@ export const Traces = () => {
   };
 
   const flagAsFail = (id: string) => {
-    setToast(`Flagged ${id.slice(0, 12)}…  (UI state only — flag persistence not wired yet)`);
+    setFlagged((f) => {
+      const next = { ...f, [id]: !f[id] };
+      setToast(
+        next[id]
+          ? `Flagged ${id.slice(0, 8)}… (local only until persistence lands)`
+          : `Unflagged ${id.slice(0, 8)}…`,
+      );
+      return next;
+    });
   };
 
+  const flaggedCount = Object.values(flagged).filter(Boolean).length;
+
   const counts = useMemo(() => {
-    if (!page) return { all: 0, pass: 0, fail: 0 };
+    if (!page) return { all: 0, pass: 0, flag: flaggedCount, fail: 0 };
     return {
       all: page.total_filtered,
       pass: page.items.filter((t) => verdictOf(t) === 'pass').length,
+      flag: flaggedCount,
       fail: page.items.filter((t) => verdictOf(t) === 'fail').length,
     };
-  }, [page]);
+  }, [page, flaggedCount]);
+
+  // The "flag" filter applies client-side over the page the backend already
+  // returned. When `filter === 'flag'`, we drop traces that aren't in the
+  // flagged set.
+  const visibleItems = useMemo(() => {
+    if (!page) return [];
+    if (filter !== 'flag') return page.items;
+    return page.items.filter((t) => flagged[t.trace_id]);
+  }, [page, filter, flagged]);
 
   const showing = page?.items.length ?? 0;
   const total = page?.total_filtered ?? 0;
@@ -304,13 +333,14 @@ export const Traces = () => {
             [
               ['all', 'All', counts.all],
               ['pass', 'Passed', counts.pass],
+              ['flag', 'Flagged', counts.flag],
               ['fail', 'Failed', counts.fail],
             ] as const
           ).map(([id, label, n]) => (
             <button
               key={id}
               className={`pill ${filter === id ? 'on' : ''}`}
-              onClick={() => setFilter(id as 'all' | Verdict)}
+              onClick={() => setFilter(id as FilterMode)}
             >
               {label}{' '}
               <span className="dim mono" style={{ fontSize: 11 }}>
@@ -429,10 +459,12 @@ export const Traces = () => {
             <div>Cost</div>
             <div></div>
           </div>
-          {page.items.length === 0 ? (
+          {visibleItems.length === 0 ? (
             <div className="empty-state">
               <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
-                No traces match those filters.
+                {filter === 'flag'
+                  ? 'No flagged traces yet. Flag one from the drawer to triage it later.'
+                  : 'No traces match those filters.'}
               </div>
               <button
                 className="btn sm ghost"
@@ -447,7 +479,7 @@ export const Traces = () => {
               </button>
             </div>
           ) : (
-            page.items.map((t) => {
+            visibleItems.map((t) => {
               const v = verdictOf(t);
               return (
                 <div
@@ -459,13 +491,18 @@ export const Traces = () => {
                     <div className="id-row">
                       <span className="id">{t.trace_id.slice(0, 8)}…</span>
                       {pinned[t.trace_id] && <Icon name="pin" size={11} />}
+                      {flagged[t.trace_id] && <Icon name="flag" size={11} />}
                     </div>
                     <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
                       {fmtRelative(t.timestamp)} · webhook
                     </div>
                   </div>
                   <div className="cell-excerpt">
-                    <Tag kind={v === 'pass' ? 'success' : 'bad'}>
+                    <Tag
+                      kind={
+                        flagged[t.trace_id] ? 'warn' : v === 'pass' ? 'success' : 'bad'
+                      }
+                    >
                       <span className="dot" />
                     </Tag>
                     <span className="preview">{excerptOf(t)}</span>
@@ -508,6 +545,7 @@ export const Traces = () => {
         <TraceDrawer
           traceId={openId}
           pinned={!!pinned[openId]}
+          flagged={!!flagged[openId]}
           onClose={() => setOpenId(null)}
           onTogglePin={() => togglePin(openId)}
           onFlag={() => flagAsFail(openId)}
@@ -522,12 +560,14 @@ export const Traces = () => {
 const TraceDrawer = ({
   traceId,
   pinned,
+  flagged,
   onClose,
   onTogglePin,
   onFlag,
 }: {
   traceId: string;
   pinned: boolean;
+  flagged: boolean;
   onClose: () => void;
   onTogglePin: () => void;
   onFlag: () => void;
@@ -952,8 +992,8 @@ const TraceDrawer = ({
               <button className={`btn sm ${pinned ? '' : 'ghost'}`} onClick={onTogglePin}>
                 <Icon name="pin" size={12} /> {pinned ? 'Pinned' : 'Pin for learning'}
               </button>
-              <button className="btn sm ghost" onClick={onFlag}>
-                <Icon name="flag" size={12} /> Flag as failure
+              <button className={`btn sm ${flagged ? '' : 'ghost'}`} onClick={onFlag}>
+                <Icon name="flag" size={12} /> {flagged ? 'Flagged' : 'Flag as failure'}
               </button>
               <button className="btn sm ghost" style={{ marginLeft: 'auto' }} onClick={copyJson}>
                 <Icon name="copy" size={12} /> Copy trace
