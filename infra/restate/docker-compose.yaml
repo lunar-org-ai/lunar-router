@@ -1,0 +1,23 @@
+services:
+  # Restate server. Single-node, persistent volume.
+  #
+  #   8080 — ingress  (caller hits this to invoke handlers)
+  #   9070 — admin    (curl /deployments to register the Python service)
+  #   9071 — node-to-node (unused in single-node, exposed for future scale)
+  restate:
+    image: docker.io/restatedev/restate:latest
+    container_name: opentracy-restate
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+      - "9070:9070"
+      - "9071:9071"
+    volumes:
+      - restate-data:/restate-data
+    environment:
+      RESTATE_NODE_NAME: opentracy-restate
+      RESTATE_LOG_FORMAT: pretty
+
+volumes:
+  restate-data:
+    name: opentracy-restate-data
