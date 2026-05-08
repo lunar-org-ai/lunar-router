@@ -175,6 +175,22 @@ export async function getPolicy(): Promise<PolicyView> {
   return (await res.json()) as PolicyView;
 }
 
+export async function updatePolicy(p: {
+  mode: string;
+  auto_min_lift: number;
+}): Promise<PolicyView> {
+  const res = await fetch('/v1/policy', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as PolicyView;
+}
+
 export async function getLesson(id: string): Promise<LessonSummary> {
   const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}`);
   if (!res.ok) {

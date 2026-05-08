@@ -19,6 +19,7 @@ Endpoints:
   GET  /lessons/{id}/traces            — eval cases the candidate ran through.
   GET  /metrics/overview               — derived dashboard metrics.
   GET  /policy                         — current approval policy.
+  PUT  /policy                         — update approval policy YAML.
 """
 
 from __future__ import annotations
@@ -651,6 +652,47 @@ async def get_policy() -> PolicyView:
 
     pol = Policy.from_yaml()
     return PolicyView(mode=pol.mode, auto_min_lift=pol.auto_min_lift)
+
+
+class PolicyUpdateRequest(BaseModel):
+    mode: str
+    auto_min_lift: float
+
+
+@app.put("/policy", response_model=PolicyView)
+async def update_policy(payload: PolicyUpdateRequest) -> PolicyView:
+    """Persist policy changes to policies/auto_approve.yaml. Validates mode
+    is one of the modes the approver actually understands; rejects anything
+    else with 400 so the UI can't write garbage."""
+    import yaml
+    from pathlib import Path
+
+    if payload.mode not in ("auto", "review", "off"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be auto|review|off, got {payload.mode!r}",
+        )
+    if payload.auto_min_lift < 0 or payload.auto_min_lift > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"auto_min_lift must be in [0, 1], got {payload.auto_min_lift}",
+        )
+
+    yaml_path = (
+        Path(__file__).resolve().parent.parent / "policies" / "auto_approve.yaml"
+    )
+    if yaml_path.exists():
+        with yaml_path.open() as f:
+            doc = yaml.safe_load(f) or {}
+    else:
+        doc = {}
+    doc["mode"] = payload.mode
+    doc.setdefault("thresholds", {})["auto_min_lift"] = float(payload.auto_min_lift)
+    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+    with yaml_path.open("w") as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+
+    return PolicyView(mode=payload.mode, auto_min_lift=payload.auto_min_lift)
 
 
 @app.post("/run", response_model=RunResponse)

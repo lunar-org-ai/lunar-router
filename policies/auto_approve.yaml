@@ -1,16 +1,3 @@
-# policies/auto_approve.yaml
-# Default policy for the harness. Conservative: require human review for any
-# change. Loosen later (mode=auto) as confidence in evals grows. Set mode=off
-# to freeze promotions entirely.
-
-mode: review              # auto | review | off
-
+mode: review
 thresholds:
-  auto_min_lift: 0.01     # only relevant in mode=auto: candidate must lift
-                          # overall_score by ≥ this much to auto-promote
-
-# Future: per-kind overrides
-#   overrides:
-#     rag: review
-#     prompt: review
-#     router: auto
+  auto_min_lift: 0.01
