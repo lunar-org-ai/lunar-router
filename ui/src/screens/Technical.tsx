@@ -126,14 +126,37 @@ const normalizeRole = (raw: string): Role => {
   return 'agent';
 };
 
+// Stub responses from techniques/prompt_strategies/impl.py look like:
+//   [stub response] Would have called <model> (max_tokens=…, temperature=…)
+//   with prompt template '…' and N retrieved doc(s). Request was: '…'
+// Until P1.9 wires the real LLM, every agent response in production traces
+// is one of these. Reformat them in the UI so the conversation reads as
+// dialog rather than debug output.
+const STUB_PREFIX = '[stub response]';
+const reformatStubResponse = (text: string | null): string => {
+  if (!text) return '';
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(STUB_PREFIX)) return trimmed;
+  // Pull out the model name; fall back to a generic label.
+  const m = trimmed.match(/Would have called ([^\s(]+)/);
+  if (m && m[1]) {
+    return `[Stub reply — would call ${m[1]}. Real LLM lands in P1.9.]`;
+  }
+  return '[Stub reply — pipeline ran without calling the LLM.]';
+};
+
 const buildTranscript = (t: TraceDetail): { role: Role; text: string }[] => {
   const out: { role: Role; text: string }[] = [];
   for (const h of t.history || []) {
-    out.push({ role: normalizeRole(h.role), text: h.content });
+    const role = normalizeRole(h.role);
+    out.push({
+      role,
+      text: role === 'agent' ? reformatStubResponse(h.content) : h.content,
+    });
   }
   out.push({ role: 'user', text: t.request || '(empty request)' });
   if (t.response) {
-    out.push({ role: 'agent', text: t.response });
+    out.push({ role: 'agent', text: reformatStubResponse(t.response) });
   } else if (t.error) {
     out.push({ role: 'agent', text: `[error] ${t.error}` });
   }
@@ -154,7 +177,12 @@ const buildSessionTranscript = (
       isCurrent,
     });
     if (turn.response) {
-      out.push({ role: 'agent', text: turn.response, trace_id: turn.trace_id, isCurrent });
+      out.push({
+        role: 'agent',
+        text: reformatStubResponse(turn.response),
+        trace_id: turn.trace_id,
+        isCurrent,
+      });
     } else if (turn.error) {
       out.push({
         role: 'agent',
