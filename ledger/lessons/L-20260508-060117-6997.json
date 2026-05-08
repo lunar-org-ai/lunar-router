@@ -1,0 +1,27 @@
+{
+  "id": "L-20260508-060117-6997",
+  "kind": "rag",
+  "status": "auto_promoted",
+  "title": "Adjusted how much context I read per question",
+  "summary": "Auto-promoted from v0.0.3. Eval didn't move much, but the change was non-regressing and the policy auto-approved it.",
+  "proposal_source": "heuristic_sweep",
+  "delta": {
+    "overall_score": 0.0,
+    "pass_rate": 0.0,
+    "per_rubric": {
+      "response_nonempty": 0.0,
+      "keywords_match": 0.0,
+      "under_budget": 0.0,
+      "pipeline_succeeded": 0.0
+    }
+  },
+  "mutations": [
+    "pipeline/retrieve.yaml:knobs.k=18"
+  ],
+  "parent_version": "v0.0.3",
+  "candidate_id": "cand_20260508T060116_b047",
+  "version": "v0.0.4",
+  "promoted_at": "2026-05-08T06:01:17Z",
+  "ledger_entry_id": "led_20260508T060117_d80d5f",
+  "voice": "I noticed I was sometimes either missing useful context or getting distracted by less relevant retrieval. I adjusted how much I read per question. The eval barely moved, but I'm leaving it in for now to see how real traffic responds."
+}

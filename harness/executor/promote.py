@@ -24,7 +24,7 @@ from typing import Any, Optional
 import yaml
 
 from experiments.branching import candidate_agent_path
-from harness.types import LoopOutcome
+from harness.types import LoopOutcome, kind_from_mutations
 from ledger.types import Lesson
 from ledger.versioning import LIVE_AGENT, read_version, snapshot_agent
 from ledger.writer import read_lesson, update_lesson, write_entry, write_lesson
@@ -51,19 +51,7 @@ def _set_version(agent_yaml: Path, new_version: str) -> None:
         yaml.safe_dump(doc, f, sort_keys=False)
 
 
-def _kind_from_mutations(mutations: list[str]) -> str:
-    files = {m.split(":")[0] for m in mutations}
-    if any("retrieve" in f for f in files):
-        return "rag"
-    if any("rerank" in f for f in files):
-        return "rerank"
-    if any("route" in f for f in files):
-        return "router"
-    if any("generate" in f or "prompts/" in f for f in files):
-        return "prompt"
-    if any("memory" in f for f in files):
-        return "memory"
-    return "other"
+_kind_from_mutations = kind_from_mutations  # kept for callers below
 
 
 def _parse_mutation(describe: str) -> tuple[str, str, str]:

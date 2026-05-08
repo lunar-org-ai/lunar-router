@@ -161,9 +161,20 @@ export async function getMetricsOverview(): Promise<MetricsOverview> {
 
 // ---------- policy ----------
 
+export type PolicyMode = 'auto' | 'review' | 'off';
+
+export interface AutoRollbackView {
+  csat_drop: number;
+  resolution_drop: number;
+  window_hours: number;
+  notify_channels: string[];
+}
+
 export interface PolicyView {
-  mode: 'auto' | 'review' | 'off' | string;
+  mode: PolicyMode | string;
   auto_min_lift: number;
+  overrides: Record<string, PolicyMode | string>;
+  auto_rollback: AutoRollbackView;
 }
 
 export async function getPolicy(): Promise<PolicyView> {
@@ -178,6 +189,8 @@ export async function getPolicy(): Promise<PolicyView> {
 export async function updatePolicy(p: {
   mode: string;
   auto_min_lift: number;
+  overrides?: Record<string, string>;
+  auto_rollback?: AutoRollbackView;
 }): Promise<PolicyView> {
   const res = await fetch('/v1/policy', {
     method: 'PUT',

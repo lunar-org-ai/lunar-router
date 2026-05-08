@@ -8,6 +8,24 @@ from typing import Any, Optional
 from experiments.types import Mutation
 
 
+def kind_from_mutations(mutations: list[str]) -> str:
+    """Map a candidate's mutations to one of the change kinds the policy
+    overrides table can target. Used by both the executor (lesson labeling)
+    and the approver (per-kind policy overrides)."""
+    files = {m.split(":")[0] for m in mutations}
+    if any("retrieve" in f for f in files):
+        return "rag"
+    if any("rerank" in f for f in files):
+        return "rerank"
+    if any("route" in f for f in files):
+        return "router"
+    if any("generate" in f or "prompts/" in f for f in files):
+        return "prompt"
+    if any("memory" in f for f in files):
+        return "memory"
+    return "other"
+
+
 @dataclass
 class Prediction:
     """A falsifiable claim about what a Proposal will do (AHE pillar 3).

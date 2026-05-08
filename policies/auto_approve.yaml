@@ -1,3 +1,10 @@
 mode: review
 thresholds:
   auto_min_lift: 0.01
+overrides: {}
+auto_rollback:
+  csat_drop: 0.3
+  resolution_drop: 0.05
+  window_hours: 24
+  notify_channels:
+  - email
