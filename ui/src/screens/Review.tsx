@@ -16,6 +16,7 @@ import {
   approveLesson,
   listLessons,
   rejectLesson,
+  requeueLesson,
   type LessonSummary,
 } from '../api';
 
@@ -86,7 +87,7 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
       <h1 className="page-title">Pending review</h1>
       <p className="page-sub">
         The agent has proposed changes based on what it learned. Approve to ship them, reject to
-        discard. Anything left untouched stays queued — no auto-decision unless your policy says so.
+        discard, or wait — anything untouched in 24h follows your default policy.
       </p>
 
       {error && (
@@ -269,10 +270,7 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
               </div>
               <div className="actions">
                 <span className="left">
-                  Queued by policy.{' '}
-                  <span className="dim" style={{ fontSize: 12 }}>
-                    {l.proposal_source ? `Proposed via ${l.proposal_source}` : 'Source unknown'}
-                  </span>
+                  Auto-decision in <span className="mono">24h</span> per policy
                 </span>
                 <button
                   className="btn danger"
@@ -307,7 +305,7 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
               fontWeight: 500,
             }}
           >
-            Decided this session
+            Decided just now
           </div>
           {decided.map(({ id, title, action }) => (
             <div
@@ -326,9 +324,29 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
                 <span className="dot" /> {action === 'approve' ? 'Approved' : 'Rejected'}
               </Tag>
               <span>{title}</span>
-              <span className="mono dim" style={{ marginLeft: 'auto', fontSize: 11.5 }}>
-                {id}
-              </span>
+              <button
+                className="btn ghost sm"
+                style={{ marginLeft: 'auto' }}
+                disabled={!!acting[id]}
+                onClick={async () => {
+                  setActing((s) => ({ ...s, [id]: 'approve' }));
+                  try {
+                    await requeueLesson(id);
+                    setDecided((d) => d.filter((x) => x.id !== id));
+                    await refresh();
+                  } catch (e) {
+                    setError(
+                      e instanceof ApiError
+                        ? `Undo failed: ${e.status} — ${e.message}`
+                        : `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
+                    );
+                  } finally {
+                    setActing((s) => ({ ...s, [id]: null }));
+                  }
+                }}
+              >
+                {acting[id] ? 'Undoing…' : 'Undo'}
+              </button>
             </div>
           ))}
         </div>

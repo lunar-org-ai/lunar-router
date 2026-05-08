@@ -15,6 +15,7 @@ Endpoints:
   GET  /lessons/{id}                   — single lesson by id.
   POST /lessons/{id}/approve           — approve a queued review lesson + promote.
   POST /lessons/{id}/reject            — reject a queued review lesson.
+  POST /lessons/{id}/requeue           — undo an approve/reject; back to queue.
   GET  /metrics/overview               — derived dashboard metrics.
 """
 
@@ -337,6 +338,19 @@ async def reject_lesson(
 
     try:
         lesson = reject_queued(lesson_id, reason=(payload.reason if payload else None))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _lesson_to_summary(lesson)
+
+
+@app.post("/lessons/{lesson_id}/requeue", response_model=LessonSummary)
+async def requeue_lesson(lesson_id: str) -> LessonSummary:
+    from harness.executor.promote import requeue
+
+    try:
+        lesson = requeue(lesson_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

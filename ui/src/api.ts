@@ -198,6 +198,19 @@ export async function rejectLesson(
   return (await res.json()) as LessonSummary;
 }
 
+export async function requeueLesson(id: string): Promise<LessonSummary> {
+  const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}/requeue`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{}',
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonSummary;
+}
+
 export async function rollbackVersion(version: string, reason?: string): Promise<RollbackResult> {
   const res = await fetch(`/v1/versions/${encodeURIComponent(version)}/rollback`, {
     method: 'POST',

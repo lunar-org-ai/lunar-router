@@ -394,3 +394,47 @@ def reject_queued(lesson_id: str, *, reason: Optional[str] = None) -> Lesson:
     return update_lesson(
         lesson.id, status="human_rejected", ledger_entry_id=entry.entry_id
     )
+
+
+def requeue(lesson_id: str, *, agent_dir: Path | str = LIVE_AGENT) -> Lesson:
+    """Undo an approve or reject — put the lesson back into the review queue.
+
+    For human_rejected: flip status, write a fresh queued_review entry.
+    For approved: rollback the live agent to parent_version first, then flip
+    status and clear version/promoted_at. Useful for the Undo button right
+    after a hasty click.
+    """
+    lesson = read_lesson(lesson_id)
+    if lesson is None:
+        raise FileNotFoundError(f"lesson {lesson_id!r} not found")
+    if lesson.status not in ("human_rejected", "approved"):
+        raise ValueError(
+            f"lesson {lesson_id!r} has status {lesson.status!r}; only approved or human_rejected can be requeued"
+        )
+
+    # Approved → rollback live first so on-disk state matches the queue state.
+    if lesson.status == "approved":
+        if not lesson.parent_version:
+            raise ValueError(
+                f"approved lesson {lesson.id} missing parent_version; cannot rollback"
+            )
+        from harness.rollback import rollback_to
+
+        rollback_to(lesson.parent_version, reason=f"undo approve of lesson {lesson.id}")
+
+    entry = write_entry(
+        kind="queued_review",
+        candidate_id=lesson.candidate_id or None,
+        agent_version_before=read_version(Path(agent_dir)),
+        parent_entry_id=lesson.ledger_entry_id,
+        summary=f"requeued lesson {lesson.id} (was {lesson.status})",
+        payload={"lesson_id": lesson.id, "previous_status": lesson.status},
+    )
+
+    return update_lesson(
+        lesson.id,
+        status="awaiting_review",
+        version=None,
+        promoted_at=None,
+        ledger_entry_id=entry.entry_id,
+    )

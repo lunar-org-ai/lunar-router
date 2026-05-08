@@ -74,7 +74,7 @@ lessonsRouter.get('/:id', async (c) => {
   }
 })
 
-const reviewAction = (action: 'approve' | 'reject') =>
+const reviewAction = (action: 'approve' | 'reject' | 'requeue') =>
   async (c: import('hono').Context) => {
     const id = c.req.param('id')
     if (!id) return c.json({ error: 'missing id' }, 400)
@@ -121,3 +121,4 @@ const reviewAction = (action: 'approve' | 'reject') =>
 
 lessonsRouter.post('/:id/approve', reviewAction('approve'))
 lessonsRouter.post('/:id/reject', reviewAction('reject'))
+lessonsRouter.post('/:id/requeue', reviewAction('requeue'))
