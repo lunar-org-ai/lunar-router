@@ -21,8 +21,10 @@ import {
   ApiError,
   getLesson,
   getLessonTraces,
+  getPolicy,
   type LessonSummary,
   type LessonTracesResponse,
+  type PolicyView,
 } from '../api';
 
 const fmtDay = (iso: string | null): string => {
@@ -39,17 +41,105 @@ const proposalSourceLabel = (src: string | null): string => {
   return (
     {
       heuristic: 'Heuristic proposer (sweep)',
+      heuristic_sweep: 'Heuristic proposer (sweep)',
       claude_code: 'Claude Code proposer',
       human: 'Human proposer',
     }[src] || src
   );
 };
 
+const decisionLabel = (status: string): string => {
+  switch (status) {
+    case 'auto_promoted':
+      return 'auto_promote';
+    case 'awaiting_review':
+      return 'queue_human';
+    case 'approved':
+      return 'human_approve';
+    case 'human_rejected':
+      return 'human_reject';
+    case 'rolled_back':
+      return 'rollback';
+    default:
+      return status;
+  }
+};
+
+const renderRule = (status: string, policy: PolicyView | null) => {
+  const mode = policy?.mode || 'review';
+  const lift = policy?.auto_min_lift ?? 0.01;
+  const liftPct = (lift * 100).toFixed(0);
+
+  if (status === 'auto_promoted') {
+    return (
+      <>
+        <div className="dim">if policy.mode == "auto"</div>
+        <div className="dim">and Δoverall &gt;= {liftPct} pp</div>
+        <div>
+          → <span style={{ color: 'var(--accent-fg)' }}>auto_promote</span>
+        </div>
+      </>
+    );
+  }
+  if (status === 'awaiting_review') {
+    return (
+      <>
+        <div className="dim">if policy.mode == "{mode}"</div>
+        <div>
+          → <span style={{ color: 'var(--warn-fg)' }}>queue_human</span>
+        </div>
+      </>
+    );
+  }
+  if (status === 'approved') {
+    return (
+      <>
+        <div className="dim">if policy.mode == "{mode}" → queue_human</div>
+        <div>
+          then human →{' '}
+          <span style={{ color: 'var(--accent-fg)' }}>approve + promote</span>
+        </div>
+      </>
+    );
+  }
+  if (status === 'human_rejected') {
+    return (
+      <>
+        <div className="dim">if policy.mode == "{mode}" → queue_human</div>
+        <div>
+          then human →{' '}
+          <span style={{ color: 'var(--bad-fg)' }}>reject</span>
+        </div>
+      </>
+    );
+  }
+  if (status === 'rolled_back') {
+    return (
+      <>
+        <div className="dim">post-promote regression detected</div>
+        <div>
+          → <span style={{ color: 'var(--bad-fg)' }}>rollback</span>
+        </div>
+      </>
+    );
+  }
+  return <div className="dim">No rule recorded for status "{status}".</div>;
+};
+
 type TabId = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
 
-export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: () => void }) => {
+export const LessonDetail = ({
+  lessonId,
+  onBack,
+  onNav,
+}: {
+  lessonId: string;
+  onBack: () => void;
+  onNav?: (route: string) => void;
+}) => {
   const [lesson, setLesson] = useState<LessonSummary | null>(null);
   const [traces, setTraces] = useState<LessonTracesResponse | null>(null);
+  const [policy, setPolicy] = useState<PolicyView | null>(null);
   const [tracesLoading, setTracesLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,8 +149,12 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
     setLoading(true);
     setError(null);
     try {
-      const l = await getLesson(lessonId);
+      const [l, pol] = await Promise.all([
+        getLesson(lessonId),
+        getPolicy().catch(() => null),
+      ]);
       setLesson(l);
+      if (pol) setPolicy(pol);
     } catch (e) {
       setError(
         e instanceof ApiError
@@ -490,28 +584,41 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
       {tab === 'decision' && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div className="card card-pad">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>How this landed</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>
+              How the system decided
+            </div>
             <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, lineHeight: 1.7 }}>
               <li>
-                <span className="dim">Proposed by</span>{' '}
+                Proposal came from{' '}
                 <span className="mono">{proposalSourceLabel(l.proposal_source)}</span>
+                {l.mutations.length > 0 && (
+                  <>
+                    {' '}— {l.mutations.length === 1
+                      ? 'one mutation'
+                      : `${l.mutations.length} mutations`}{' '}
+                    on <span className="mono">{l.mutations[0].split(':')[0]}</span>
+                  </>
+                )}
               </li>
               <li>
-                <span className="dim">Started from</span>{' '}
-                <span className="mono">{l.parent_version || '—'}</span>
+                Branched candidate <span className="mono">{l.candidate_id || '—'}</span> from{' '}
+                <span className="mono">{l.parent_version || 'initial'}</span>
               </li>
               <li>
-                <span className="dim">Decision</span>{' '}
-                <span className="mono">{l.status}</span>
+                Ran offline against{' '}
+                <span className="mono">{l.n_traces ?? '—'}</span> eval cases; saw{' '}
+                {typeof overall === 'number'
+                  ? `Δoverall ${overall >= 0 ? '+' : ''}${(overall * 100).toFixed(2)} pp`
+                  : 'no recorded delta'}
               </li>
               <li>
-                <span className="dim">Promoted at</span>{' '}
-                <span className="mono">{l.promoted_at || '—'}</span>
+                Routed to{' '}
+                <span className="mono">{decisionLabel(l.status)}</span> per policy
               </li>
             </ol>
           </div>
           <div className="card card-pad">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Lineage</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Rules that fired</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div
                 style={{
@@ -520,20 +627,27 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
                   borderRadius: 8,
                   fontSize: 12.5,
                   fontFamily: 'var(--font-mono)',
+                  lineHeight: 1.7,
                 }}
               >
-                <div className="dim">version: {l.version || '—'}</div>
-                <div className="dim">parent: {l.parent_version || 'initial'}</div>
-                {l.ledger_entry_id && (
-                  <div className="dim">ledger: {l.ledger_entry_id}</div>
-                )}
+                {renderRule(l.status, policy)}
               </div>
-              <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
-                Falsifiable predictions and verification outcomes (AHE pillar 3) attach to the
-                ledger entry — they'll surface here once the proposer pipeline records them on
-                lessons directly.
-              </div>
+              <button
+                className="btn sm ghost"
+                style={{ alignSelf: 'flex-start' }}
+                onClick={() => onNav?.('policies')}
+              >
+                <Icon name="settings" size={12} /> Edit policies
+              </button>
             </div>
+            {l.ledger_entry_id && (
+              <div
+                className="dim mono"
+                style={{ fontSize: 11.5, marginTop: 14, fontFamily: 'var(--font-mono)' }}
+              >
+                Ledger entry: {l.ledger_entry_id}
+              </div>
+            )}
           </div>
         </div>
       )}

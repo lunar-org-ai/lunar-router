@@ -106,7 +106,13 @@ export const App = () => {
       break;
     case 'lesson': {
       crumbs = ['Evolution', 'Lesson'];
-      content = <LessonDetail lessonId={route.params.id} onBack={() => goTo('evolution')} />;
+      content = (
+        <LessonDetail
+          lessonId={route.params.id}
+          onBack={() => goTo('evolution')}
+          onNav={(r) => goTo(r as RouteName)}
+        />
+      );
       break;
     }
     case 'review':

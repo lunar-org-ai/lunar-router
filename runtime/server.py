@@ -18,6 +18,7 @@ Endpoints:
   POST /lessons/{id}/requeue           — undo an approve/reject; back to queue.
   GET  /lessons/{id}/traces            — eval cases the candidate ran through.
   GET  /metrics/overview               — derived dashboard metrics.
+  GET  /policy                         — current approval policy.
 """
 
 from __future__ import annotations
@@ -634,6 +635,22 @@ async def metrics_overview() -> MetricsOverview:
         csat=None,
         computed_at=now.isoformat(),
     )
+
+
+# ---------- policy ----------
+
+
+class PolicyView(BaseModel):
+    mode: str
+    auto_min_lift: float
+
+
+@app.get("/policy", response_model=PolicyView)
+async def get_policy() -> PolicyView:
+    from harness.approver import Policy
+
+    pol = Policy.from_yaml()
+    return PolicyView(mode=pol.mode, auto_min_lift=pol.auto_min_lift)
 
 
 @app.post("/run", response_model=RunResponse)

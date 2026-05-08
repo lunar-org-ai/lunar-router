@@ -159,6 +159,22 @@ export async function getMetricsOverview(): Promise<MetricsOverview> {
   return (await res.json()) as MetricsOverview;
 }
 
+// ---------- policy ----------
+
+export interface PolicyView {
+  mode: 'auto' | 'review' | 'off' | string;
+  auto_min_lift: number;
+}
+
+export async function getPolicy(): Promise<PolicyView> {
+  const res = await fetch('/v1/policy');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as PolicyView;
+}
+
 export async function getLesson(id: string): Promise<LessonSummary> {
   const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}`);
   if (!res.ok) {
