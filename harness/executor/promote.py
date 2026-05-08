@@ -361,6 +361,83 @@ def promote_queued(
     )
 
 
+def record_manual_change(
+    apply_edit: Any,
+    *,
+    kind: str,
+    summary: str,
+    mutations_desc: list[str],
+    voice: Optional[str] = None,
+    agent_dir: Path | str = LIVE_AGENT,
+) -> Lesson:
+    """Apply a human-driven change to the agent surface and record it like a
+    proposer-driven promotion.
+
+    AutoHarness paper (arxiv 2603.03329) treats the agent's editable surface
+    as a single line of history regardless of who proposed each edit.
+    Operator edits via AgentSheet go through the same snapshot + version
+    bump + ledger + Lesson dance the auto loop uses for candidates, so:
+
+      - rolling back a manual edit works exactly like rolling back a
+        candidate-promoted lesson
+      - the Evolution timeline shows manual edits alongside auto edits
+      - lesson.proposal_source = "human" makes the source legible
+      - lesson.candidate_id is empty (no eval suite ran)
+
+    `apply_edit` is invoked between the old-version snapshot and the
+    version bump so the snapshot captures pre-edit state.
+    """
+    agent_dir = Path(agent_dir)
+
+    old_version, _ = snapshot_agent(agent_dir)
+
+    apply_edit()  # caller writes whatever file(s) the edit touches
+
+    new_version = _bump_patch(old_version)
+    _set_version(agent_dir / "agent.yaml", new_version)
+
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+    entry = write_entry(
+        kind="promote",
+        agent_version_before=old_version,
+        agent_version_after=new_version,
+        summary=f"manual edit: {summary}",
+        payload={
+            "source": "human",
+            "kind": kind,
+            "mutations": mutations_desc,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=new_version,
+        kind=kind,
+        status="approved",
+        title=summary,
+        summary=(
+            f"Manual operator edit from {old_version}. "
+            "No eval ran — applied directly to the live surface."
+        ),
+        proposal_source="human",
+        delta={},
+        mutations=mutations_desc,
+        parent_version=old_version,
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice or f"I updated my {kind} directly.",
+    )
+    write_lesson(lesson)
+    return lesson
+
+
 def reject_queued(lesson_id: str, *, reason: Optional[str] = None) -> Lesson:
     """Mark a queued review lesson as human_rejected; no live agent change."""
     lesson = read_lesson(lesson_id)

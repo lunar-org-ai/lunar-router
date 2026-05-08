@@ -1,7 +1,12 @@
 mode: review
 thresholds:
   auto_min_lift: 0.01
-overrides: {}
+overrides:
+  prompt: 'off'
+  router: auto
+  tool: 'off'
+  policy: auto
+  eval: auto
 auto_rollback:
   csat_drop: 0.3
   resolution_drop: 0.05

@@ -159,6 +159,89 @@ export async function getMetricsOverview(): Promise<MetricsOverview> {
   return (await res.json()) as MetricsOverview;
 }
 
+// ---------- agent config ----------
+
+export interface AgentPromptView {
+  path: string;
+  content: string;
+}
+
+export interface AgentModelsView {
+  small: string | null;
+  big: string | null;
+  confidence_threshold: number | null;
+}
+
+export interface IntegrationStatus {
+  name: string;
+  available: boolean;
+  detail: string | null;
+}
+
+export interface AgentKeyStatus {
+  name: string;
+  env_var: string;
+  set: boolean;
+  mask: string | null;
+}
+
+export interface AgentConfigView {
+  version: string;
+  description: string | null;
+  system_prompt: AgentPromptView;
+  models: AgentModelsView;
+  integrations: IntegrationStatus[];
+  keys: AgentKeyStatus[];
+}
+
+export interface ManualEditResult {
+  new_version: string;
+  lesson_id: string;
+  parent_version: string;
+}
+
+export type PromptUpdateResponse = AgentPromptView & ManualEditResult;
+export type RouteUpdateResponse = AgentModelsView & ManualEditResult;
+
+export async function getAgentConfig(): Promise<AgentConfigView> {
+  const res = await fetch('/v1/agent/config');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as AgentConfigView;
+}
+
+export async function updatePrompt(content: string): Promise<PromptUpdateResponse> {
+  const res = await fetch('/v1/agent/prompt', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as PromptUpdateResponse;
+}
+
+export async function updateRoute(p: {
+  small?: string;
+  big?: string;
+  confidence_threshold?: number;
+}): Promise<RouteUpdateResponse> {
+  const res = await fetch('/v1/agent/route', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(p),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as RouteUpdateResponse;
+}
+
 // ---------- policy ----------
 
 export type PolicyMode = 'auto' | 'review' | 'off';

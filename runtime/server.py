@@ -20,6 +20,10 @@ Endpoints:
   GET  /metrics/overview               — derived dashboard metrics.
   GET  /policy                         — current approval policy.
   PUT  /policy                         — update approval policy YAML.
+  GET  /agent/config                   — full AgentSheet snapshot (prompt,
+                                          models, integrations, key status).
+  PUT  /agent/prompt                   — rewrite agent/prompts/system.md.
+  PUT  /agent/route                    — rewrite route.yaml model knobs.
 """
 
 from __future__ import annotations
@@ -733,6 +737,304 @@ async def update_policy(payload: PolicyUpdateRequest) -> PolicyView:
     )
     pol.write_yaml()
     return _policy_to_view(pol)
+
+
+# ---------- agent config (AgentSheet) ----------
+#
+# Wires the four AgentSheet tabs (Brain / Hands / Channels / Keys) to real
+# disk state. Two pieces actually mutate behavior on save: the system prompt
+# and the route models. The rest are read-only status panels — claude_code
+# binary detection, MCP server availability, webhook channel URL, env-var
+# key presence. Anything we can't reach honestly is omitted from the
+# response so the UI can fall back to "Coming soon" badges.
+
+
+class AgentPromptView(BaseModel):
+    path: str
+    content: str
+
+
+class AgentModelsView(BaseModel):
+    small: Optional[str] = None
+    big: Optional[str] = None
+    confidence_threshold: Optional[float] = None
+
+
+class IntegrationStatus(BaseModel):
+    name: str
+    available: bool
+    detail: Optional[str] = None
+
+
+class AgentKeyStatus(BaseModel):
+    name: str
+    env_var: str
+    set: bool
+    mask: Optional[str] = None
+
+
+class AgentConfigView(BaseModel):
+    version: str
+    description: Optional[str] = None
+    system_prompt: AgentPromptView
+    models: AgentModelsView
+    integrations: list[IntegrationStatus]
+    keys: list[AgentKeyStatus]
+
+
+from pathlib import Path  # noqa: E402
+
+_PROJECT_ROOT_AGENT = Path(__file__).resolve().parent.parent
+_AGENT_DIR = _PROJECT_ROOT_AGENT / "agent"
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    import yaml
+
+    if not path.exists():
+        return {}
+    with path.open() as f:
+        return yaml.safe_load(f) or {}
+
+
+def _resolve_prompt_path() -> Path:
+    """Read generate.yaml's prompt knob, resolve relative to agent/."""
+    gen = _read_yaml(_AGENT_DIR / "pipeline" / "generate.yaml")
+    rel = (gen.get("knobs") or {}).get("prompt", "../prompts/system.md")
+    return (_AGENT_DIR / "pipeline" / rel).resolve()
+
+
+def _mask_key(value: str) -> str:
+    if len(value) <= 10:
+        return "•" * len(value)
+    return f"{value[:6]}…{value[-4:]}"
+
+
+@app.get("/agent/config", response_model=AgentConfigView)
+async def get_agent_config() -> AgentConfigView:
+    import os
+    import shutil
+
+    cfg = _state.get("cfg")
+    if not cfg:
+        raise HTTPException(status_code=503, detail="agent not yet loaded")
+
+    prompt_path = _resolve_prompt_path()
+    prompt_content = ""
+    if prompt_path.exists():
+        with prompt_path.open() as f:
+            prompt_content = f.read()
+
+    route = _read_yaml(_AGENT_DIR / "pipeline" / "route.yaml")
+    knobs = route.get("knobs") or {}
+    models = AgentModelsView(
+        small=knobs.get("small"),
+        big=knobs.get("big"),
+        confidence_threshold=(
+            float(knobs["confidence_threshold"])
+            if "confidence_threshold" in knobs
+            else None
+        ),
+    )
+
+    claude_bin = shutil.which("claude")
+    has_anthropic = bool(os.getenv("ANTHROPIC_API_KEY"))
+    if has_anthropic and claude_bin:
+        cc_detail = "Anthropic API + claude CLI"
+    elif has_anthropic:
+        cc_detail = "Anthropic API only"
+    elif claude_bin:
+        cc_detail = "claude CLI only (no API key)"
+    else:
+        cc_detail = "no Anthropic key, no claude CLI"
+
+    mcp_server_path = (
+        _PROJECT_ROOT_AGENT / "harness" / "introspection" / "mcp_server.py"
+    )
+
+    integrations = [
+        IntegrationStatus(
+            name="Claude Code",
+            available=bool(claude_bin or has_anthropic),
+            detail=cc_detail,
+        ),
+        IntegrationStatus(
+            name="Introspection MCP",
+            available=mcp_server_path.exists(),
+            detail=(
+                "harness/introspection/mcp_server.py · stdio transport"
+                if mcp_server_path.exists()
+                else "mcp_server.py missing"
+            ),
+        ),
+        IntegrationStatus(
+            name="Webhook channel",
+            available=True,
+            detail="POST /v1/webhook on the backend",
+        ),
+    ]
+
+    key_specs = [
+        ("Anthropic", "ANTHROPIC_API_KEY"),
+        ("OpenAI", "OPENAI_API_KEY"),
+    ]
+    keys: list[AgentKeyStatus] = []
+    for name, env_var in key_specs:
+        v = os.getenv(env_var)
+        keys.append(
+            AgentKeyStatus(
+                name=name,
+                env_var=env_var,
+                set=bool(v),
+                mask=_mask_key(v) if v else None,
+            )
+        )
+
+    return AgentConfigView(
+        version=cfg.version,
+        description=cfg.description,
+        system_prompt=AgentPromptView(
+            path=str(prompt_path.relative_to(_PROJECT_ROOT_AGENT)),
+            content=prompt_content,
+        ),
+        models=models,
+        integrations=integrations,
+        keys=keys,
+    )
+
+
+class PromptUpdateRequest(BaseModel):
+    content: str
+
+
+class ManualEditResult(BaseModel):
+    """Returned from any manual-edit PUT — surfaces the resulting Lesson +
+    new version so the UI can route the operator to Evolution or inform
+    them what happened, AutoHarness-style: every edit is versioned."""
+
+    new_version: str
+    lesson_id: str
+    parent_version: str
+
+
+class PromptUpdateResponse(AgentPromptView, ManualEditResult):
+    pass
+
+
+@app.put("/agent/prompt", response_model=PromptUpdateResponse)
+async def update_prompt(payload: PromptUpdateRequest) -> PromptUpdateResponse:
+    """Apply a manual prompt edit through the same snapshot+ledger+lesson
+    machinery a candidate-driven promotion uses. AutoHarness paper treats
+    every change to the editable surface as a versioned event regardless
+    of source — see harness.executor.promote.record_manual_change."""
+    from harness.executor.promote import record_manual_change
+
+    prompt_path = _resolve_prompt_path()
+    if not str(prompt_path).startswith(str(_AGENT_DIR.resolve())):
+        raise HTTPException(status_code=400, detail="resolved prompt path escapes agent/")
+
+    rel_path = prompt_path.relative_to(_PROJECT_ROOT_AGENT)
+
+    def _write_prompt() -> None:
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        with prompt_path.open("w") as f:
+            f.write(payload.content)
+
+    lesson = record_manual_change(
+        _write_prompt,
+        kind="prompt",
+        summary="Updated system prompt",
+        mutations_desc=[f"{rel_path} (manual)"],
+        voice="I updated my system prompt directly.",
+    )
+
+    return PromptUpdateResponse(
+        path=str(rel_path),
+        content=payload.content,
+        new_version=lesson.version or "",
+        lesson_id=lesson.id,
+        parent_version=lesson.parent_version,
+    )
+
+
+class RouteUpdateRequest(BaseModel):
+    small: Optional[str] = None
+    big: Optional[str] = None
+    confidence_threshold: Optional[float] = None
+
+
+class RouteUpdateResponse(AgentModelsView, ManualEditResult):
+    pass
+
+
+@app.put("/agent/route", response_model=RouteUpdateResponse)
+async def update_route(payload: RouteUpdateRequest) -> RouteUpdateResponse:
+    """Apply a manual route edit (model or threshold change) through the
+    same versioning + ledger machinery as a candidate-driven promotion."""
+    import yaml
+
+    from harness.executor.promote import record_manual_change
+
+    route_path = _AGENT_DIR / "pipeline" / "route.yaml"
+    if not route_path.exists():
+        raise HTTPException(status_code=404, detail="route.yaml missing")
+
+    if payload.confidence_threshold is not None:
+        if not 0.0 <= payload.confidence_threshold <= 1.0:
+            raise HTTPException(
+                status_code=400, detail="confidence_threshold must be in [0, 1]"
+            )
+
+    changes: list[str] = []
+
+    def _write_route() -> None:
+        with route_path.open() as f:
+            doc = yaml.safe_load(f) or {}
+        knobs = doc.setdefault("knobs", {})
+        if payload.small is not None and knobs.get("small") != payload.small:
+            knobs["small"] = payload.small
+            changes.append(f"agent/pipeline/route.yaml:knobs.small={payload.small} (manual)")
+        if payload.big is not None and knobs.get("big") != payload.big:
+            knobs["big"] = payload.big
+            changes.append(f"agent/pipeline/route.yaml:knobs.big={payload.big} (manual)")
+        if (
+            payload.confidence_threshold is not None
+            and knobs.get("confidence_threshold") != payload.confidence_threshold
+        ):
+            knobs["confidence_threshold"] = float(payload.confidence_threshold)
+            changes.append(
+                f"agent/pipeline/route.yaml:knobs.confidence_threshold={payload.confidence_threshold} (manual)"
+            )
+        with route_path.open("w") as f:
+            yaml.safe_dump(doc, f, sort_keys=False)
+
+    # Prepare summary text
+    summary = "Updated routing knobs"
+    if payload.small is not None and payload.big is None and payload.confidence_threshold is None:
+        summary = f"Switched fast model to {payload.small}"
+    elif payload.big is not None and payload.small is None and payload.confidence_threshold is None:
+        summary = f"Switched escalation model to {payload.big}"
+
+    lesson = record_manual_change(
+        _write_route,
+        kind="router",
+        summary=summary,
+        mutations_desc=changes,  # populated by _write_route
+        voice="I changed how I route requests between models.",
+    )
+
+    # Re-read route to return current state
+    with route_path.open() as f:
+        doc = yaml.safe_load(f) or {}
+    knobs = doc.get("knobs") or {}
+    return RouteUpdateResponse(
+        small=knobs.get("small"),
+        big=knobs.get("big"),
+        confidence_threshold=knobs.get("confidence_threshold"),
+        new_version=lesson.version or "",
+        lesson_id=lesson.id,
+        parent_version=lesson.parent_version,
+    )
 
 
 @app.post("/run", response_model=RunResponse)

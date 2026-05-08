@@ -1,0 +1,80 @@
+/**
+ * Agent channel — proxy to runtime /agent/* endpoints.
+ *
+ *  GET  /v1/agent/config   → AgentSheet snapshot
+ *  PUT  /v1/agent/prompt   → rewrite system.md (records as a manual Lesson)
+ *  PUT  /v1/agent/route    → rewrite route.yaml knobs (records as a manual Lesson)
+ */
+
+import { Hono } from 'hono'
+
+const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
+const TIMEOUT_MS = 15_000
+
+export const agentRouter = new Hono()
+
+agentRouter.get('/config', async (c) => {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(RUNTIME_URL + '/agent/config', { signal: controller.signal })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+const putProxy = (path: string) => async (c: import('hono').Context) => {
+  let body: unknown = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    body = {}
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(`${RUNTIME_URL}${path}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    if (res.status === 400 || res.status === 404) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, res.status as 400 | 404)
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+agentRouter.put('/prompt', putProxy('/agent/prompt'))
+agentRouter.put('/route', putProxy('/agent/route'))
