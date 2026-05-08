@@ -3,8 +3,16 @@ import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  getReport,
+  getSuite,
   getTrace,
+  listReports,
+  listSuites,
   listTraces,
+  type ReportDetail,
+  type ReportSummary,
+  type SuiteDetail,
+  type SuiteSummary,
   type TraceDetail,
   type TraceSummary,
   type TracesPage,
@@ -616,299 +624,269 @@ const TraceDrawer = ({ traceId, onClose }: { traceId: string; onClose: () => voi
 
 
 // ============================================================================
-// Eval suites
+// Eval suites — wired to real backend (P15.2)
 // ============================================================================
+//
+// Suites read from /v1/evals/suites; the smoke_v0 suite today carries 5
+// goldens and 4 rubrics (pipeline_succeeded / response_nonempty /
+// keywords_match / under_budget). Reports under /v1/evals/reports include
+// both candidate runs (cand_<id>.json, written by experiments/runner.py
+// since P12) and baseline runs (smoke_v0_<ts>.json from a plain run_suite).
+// We render both as one timeline so the operator can watch a suite's
+// pass-rate move over agent versions.
 
-interface SuiteSample {
-  id: string;
-  input: string;
-  expected: string;
-  actual: string;
-  score: number;
-  pass: boolean;
-}
+const fmtPercent = (v: number | null | undefined): string =>
+  v == null ? '—' : `${(v * 100).toFixed(0)}%`;
 
-interface Suite {
-  id: string;
-  name: string;
-  desc: string;
-  n: number;
-  score: number;
-  baseline: number | null;
-  owner: 'agent' | 'human';
-  updated: string;
-  running: boolean;
-  history: (number | null)[];
-  samples: SuiteSample[];
-}
-
-const SUITES: Suite[] = [
-  {
-    id: 'tone', name: 'Tone — empathetic', desc: 'Checks whether the agent acknowledges feelings before solving the problem.',
-    n: 412, score: 0.92, baseline: 0.88, owner: 'agent', updated: '2d', running: false,
-    history: [0.74, 0.78, 0.81, 0.84, 0.86, 0.88, 0.89, 0.91, 0.92],
-    samples: [
-      { id: 's1', input: 'You charged me twice this is ridiculous', expected: 'Acknowledges frustration before solving.', actual: "That's frustrating, I'm sorry. Let me find both charges.", score: 0.96, pass: true },
-      { id: 's2', input: 'I waited 40 minutes on hold last time', expected: 'Acknowledges wait without over-apologizing.', actual: "I hear you — that's way too long. Let me get this sorted now.", score: 0.94, pass: true },
-      { id: 's3', input: 'Why is your shipping always late', expected: 'Acknowledges pattern, takes ownership.', actual: 'Fair point. Let me look up your last few orders.', score: 0.78, pass: true },
-      { id: 's4', input: 'You ruined my birthday party', expected: 'Strong acknowledgment.', actual: "Oh no. That's awful, I'm really sorry. Tell me what happened.", score: 0.99, pass: true },
-      { id: 's5', input: 'are you a robot', expected: 'Warm answer, not curt.', actual: 'Yes.', score: 0.18, pass: false },
-    ],
-  },
-  {
-    id: 'accuracy', name: 'Order lookup accuracy', desc: 'Tool returns the correct order for fuzzy or messy IDs.',
-    n: 230, score: 0.96, baseline: 0.71, owner: 'agent', updated: '2d', running: false,
-    history: [0.62, 0.66, 0.71, 0.78, 0.84, 0.89, 0.92, 0.95, 0.96],
-    samples: [
-      { id: 's1', input: 'order ord 3318 a', expected: 'ORD-3318-A', actual: 'ORD-3318-A', score: 1.0, pass: true },
-      { id: 's2', input: 'order# 4901B', expected: 'ORD-4901-B', actual: 'ORD-4901-B', score: 1.0, pass: true },
-      { id: 's3', input: 'my order from tuesday', expected: 'asks clarification', actual: 'I see two recent orders — was it the navy jacket or the boots?', score: 0.92, pass: true },
-      { id: 's4', input: 'ORD2210C', expected: 'ORD-2210-C', actual: 'ORD-2210-C', score: 1.0, pass: true },
-      { id: 's5', input: 'orderr 1109a', expected: 'ORD-1109-A', actual: 'ORD-1109-A', score: 1.0, pass: true },
-    ],
-  },
-  {
-    id: 'neutrality', name: 'Competitor neutrality', desc: 'Stays neutral when customers mention competitors.',
-    n: 30, score: 0.91, baseline: null, owner: 'agent', updated: '11d', running: false,
-    history: [null, null, null, null, null, 0.88, 0.90, 0.91, 0.91],
-    samples: [
-      { id: 's1', input: 'thinking of switching to Acme', expected: 'Neutral, offers comparison.', actual: 'I hear you — pricing matters. Want me to walk through usage?', score: 0.93, pass: true },
-      { id: 's2', input: 'Acme has better support', expected: 'No disparagement.', actual: 'Their team is solid. Can I help you decide what fits?', score: 0.89, pass: true },
-    ],
-  },
-  {
-    id: 'csat', name: 'Predicted CSAT (LLM judge)', desc: 'A judge model predicts CSAT from the transcript.',
-    n: 540, score: 0.86, baseline: 0.81, owner: 'human', updated: '5d', running: false,
-    history: [0.78, 0.79, 0.80, 0.81, 0.82, 0.83, 0.85, 0.86, 0.86],
-    samples: [],
-  },
-  {
-    id: 'safety', name: 'Refusal — out of scope', desc: 'Refuses or escalates when a request is outside policy.',
-    n: 120, score: 0.99, baseline: 0.97, owner: 'human', updated: '14d', running: false,
-    history: [0.95, 0.95, 0.96, 0.96, 0.97, 0.97, 0.98, 0.98, 0.99],
-    samples: [],
-  },
-  {
-    id: 'concise', name: 'Concise without losing warmth', desc: 'Stays under 60 words while still acknowledging the customer.',
-    n: 200, score: 0.78, baseline: 0.82, owner: 'agent', updated: '8d', running: false,
-    history: [0.84, 0.85, 0.83, 0.82, 0.80, 0.79, 0.78, 0.78, 0.78],
-    samples: [],
-  },
-];
+const fmtIsoDay = (iso: string | null): string => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  } catch {
+    return iso;
+  }
+};
 
 export const EvalSuites = () => {
-  const [filter, setFilter] = useState<'all' | 'agent' | 'you' | 'regressed'>('all');
+  const [suites, setSuites] = useState<SuiteSummary[] | null>(null);
   const [search, setSearch] = useState('');
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [running, setRunning] = useState<Record<string, boolean>>({});
+  const [openName, setOpenName] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [extraSuites, setExtraSuites] = useState<Suite[]>([]);
   useAutoToast(toast, setToast);
 
-  const allSuites = useMemo(() => [...extraSuites, ...SUITES], [extraSuites]);
-
-  const filtered = allSuites.filter((s) => {
-    if (filter === 'agent' && s.owner !== 'agent') return false;
-    if (filter === 'you' && s.owner !== 'human') return false;
-    if (filter === 'regressed') {
-      const d = s.baseline == null ? null : s.score - s.baseline;
-      if (d == null || d >= 0) return false;
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const list = await listSuites();
+      setSuites(list);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? `Backend ${e.status}: ${e.message}`
+          : `Network error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setLoading(false);
     }
-    if (search.trim() && !s.name.toLowerCase().includes(search.trim().toLowerCase())) return false;
-    return true;
-  });
+  }, []);
 
-  const open = allSuites.find((s) => s.id === openId);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-  const runSuite = (id: string) => {
-    setRunning((r) => ({ ...r, [id]: true }));
-    setToast(`Running ${allSuites.find((s) => s.id === id)?.name}…`);
-    setTimeout(() => {
-      setRunning((r) => ({ ...r, [id]: false }));
-      setToast('Done — no regressions detected.');
-    }, 1800);
-  };
-
-  const counts = {
-    all: allSuites.length,
-    agent: allSuites.filter((s) => s.owner === 'agent').length,
-    you: allSuites.filter((s) => s.owner === 'human').length,
-    regressed: allSuites.filter((s) => s.baseline != null && s.score - s.baseline < 0).length,
-  };
-
-  const handleCreate = (data: { name: string; desc: string }) => {
-    const newSuite: Suite = {
-      id: `custom_${Date.now()}`,
-      name: data.name,
-      desc: data.desc || 'Custom suite.',
-      n: 0,
-      score: 0,
-      baseline: null,
-      owner: 'human',
-      updated: 'just now',
-      running: false,
-      history: [null, null, null, null, null, null, null, null, null],
-      samples: [],
-    };
-    setExtraSuites((s) => [newSuite, ...s]);
-    setCreating(false);
-    setToast(`Created "${data.name}". Run it to get a first score.`);
-  };
-
-  const filterPills: [typeof filter, string, number][] = [
-    ['all', 'All', counts.all],
-    ['agent', 'Agent-authored', counts.agent],
-    ['you', 'You authored', counts.you],
-    ['regressed', 'Regressed', counts.regressed],
-  ];
+  const filtered = useMemo(() => {
+    if (!suites) return [];
+    const q = search.trim().toLowerCase();
+    if (!q) return suites;
+    return suites.filter((s) => s.name.toLowerCase().includes(q));
+  }, [suites, search]);
 
   return (
     <div className="content">
       <h1 className="page-title">Eval suites</h1>
-      <p className="page-sub">The self-tests your agent runs against every change. Some it wrote itself; some you pinned.</p>
+      <p className="page-sub">
+        The self-tests every candidate is scored against. Suites are YAML files
+        under <span className="mono">evals/suites/</span>; runs land in{' '}
+        <span className="mono">evals/reports/</span> and feed the trend below.
+      </p>
+
+      {error && (
+        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+            {error}
+          </p>
+        </div>
+      )}
 
       <div className="trace-toolbar">
         <div className="filter-pills">
-          {filterPills.map(([id, label, n]) => (
-            <button key={id} className={`pill ${filter === id ? 'on' : ''}`} onClick={() => setFilter(id)}>
-              {label} <span className="dim mono" style={{ fontSize: 11 }}>{n}</span>
-            </button>
-          ))}
+          <button className="pill on">
+            All <span className="dim mono" style={{ fontSize: 11 }}>{suites?.length ?? 0}</span>
+          </button>
         </div>
         <div className="trace-toolbar-right">
           <div className="search-input">
             <Icon name="search" size={13} />
-            <input placeholder="Search suites…" value={search} onChange={(e) => setSearch(e.target.value)} />
-            {search && <button className="clear" onClick={() => setSearch('')}>×</button>}
+            <input
+              placeholder="Search suites…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button className="clear" onClick={() => setSearch('')}>
+                ×
+              </button>
+            )}
           </div>
           <button
             className="btn sm"
-            onClick={() => {
-              setToast('Running all suites in parallel…');
-              setTimeout(() => setToast('All suites complete.'), 2000);
-            }}
+            disabled
+            title="Triggering eval runs from the UI is deferred — for now, run via the harness CLI"
           >
             <Icon name="play" size={11} /> Run all
           </button>
         </div>
       </div>
 
-      <div className="card">
-        <div className="suite-head">
-          <div>Suite</div>
-          <div>Samples</div>
-          <div>Score</div>
-          <div>vs. baseline</div>
-          <div>Author</div>
-          <div></div>
-        </div>
-        {filtered.length === 0 ? (
-          <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No suites match.</div>
-            <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
-              Clear filters
-            </button>
+      {loading && !suites && (
+        <div className="dim" style={{ padding: 32, fontSize: 13 }}>Loading suites…</div>
+      )}
+
+      {suites && (
+        <div className="card">
+          <div className="suite-head">
+            <div>Suite</div>
+            <div>Goldens</div>
+            <div>Last pass rate</div>
+            <div>Last run</div>
+            <div>Version</div>
+            <div></div>
           </div>
-        ) : (
-          filtered.map((s) => {
-            const delta = s.baseline == null ? null : (s.score - s.baseline) * 100;
-            const better = delta == null ? null : delta >= 0;
-            return (
-              <div className="suite-row" key={s.id} onClick={() => setOpenId(s.id)}>
+          {filtered.length === 0 ? (
+            <div className="empty-state" style={{ padding: 48 }}>
+              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+                {suites.length === 0
+                  ? 'No suites defined yet. Add a YAML to evals/suites/.'
+                  : 'No suites match.'}
+              </div>
+            </div>
+          ) : (
+            filtered.map((s) => (
+              <div className="suite-row" key={s.name} onClick={() => setOpenName(s.name)}>
                 <div>
-                  <div style={{ fontWeight: 500, fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div
+                    style={{
+                      fontWeight: 500,
+                      fontSize: 13.5,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                    }}
+                  >
                     {s.name}
-                    {running[s.id] && <span className="run-dot" />}
                   </div>
+                  {s.description && (
+                    <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+                      {s.description}
+                    </div>
+                  )}
                   <div style={{ marginTop: 6 }}>
                     <div className="bar" style={{ width: 200 }}>
-                      <span style={{ width: `${s.score * 100}%` }} />
+                      <span style={{ width: `${(s.last_pass_rate ?? 0) * 100}%` }} />
                     </div>
                   </div>
                 </div>
-                <span className="mono dim" style={{ fontSize: 12.5 }}>{s.n}</span>
-                <span className="mono" style={{ fontWeight: 500 }}>{(s.score * 100).toFixed(0)}%</span>
-                <span
-                  className="mono"
-                  style={{
-                    fontSize: 12,
-                    color: delta == null ? 'var(--fg-muted)' : better ? 'var(--accent-fg)' : 'var(--bad-fg)',
-                  }}
-                >
-                  {delta == null ? 'new suite' : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp`}
+                <span className="mono dim" style={{ fontSize: 12.5 }}>{s.n_goldens}</span>
+                <span className="mono" style={{ fontWeight: 500 }}>
+                  {fmtPercent(s.last_pass_rate)}
                 </span>
-                <span><Tag kind={s.owner === 'agent' ? 'info' : ''}>{s.owner === 'agent' ? 'Agent' : 'You'}</Tag></span>
-                <button
-                  className="row-action"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    runSuite(s.id);
-                  }}
-                  title="Run now"
-                >
-                  <Icon name="play" size={11} />
-                </button>
+                <span className="dim" style={{ fontSize: 12 }}>{fmtIsoDay(s.last_run_at)}</span>
+                <span className="mono dim" style={{ fontSize: 11.5 }}>
+                  {s.last_agent_version || '—'}
+                </span>
+                <Icon name="chevron" size={12} />
               </div>
-            );
-          })
-        )}
-      </div>
-
-      <div className="trace-foot">
-        <span className="dim">Showing {filtered.length} of {allSuites.length}</span>
-        <span className="dim" style={{ marginLeft: 'auto' }}>Last full run: 2h ago</span>
-      </div>
-
-      <button className="add-btn" style={{ marginTop: 16, maxWidth: 320 }} onClick={() => setCreating(true)}>
-        + New eval suite
-      </button>
-
-      {creating && <NewSuiteModal onCreate={handleCreate} onClose={() => setCreating(false)} />}
-
-      {open && (
-        <SuiteDrawer suite={open} running={!!running[open.id]} onClose={() => setOpenId(null)} onRun={() => runSuite(open.id)} />
+            ))
+          )}
+        </div>
       )}
 
+      <div className="trace-foot">
+        <span className="dim">
+          Showing {filtered.length} of {suites?.length ?? 0}
+        </span>
+        <span className="dim" style={{ marginLeft: 'auto' }}>
+          {suites && suites.length > 0
+            ? `Total runs across all suites: ${suites.reduce(
+                (s, x) => s + x.n_runs,
+                0,
+              )}`
+            : ''}
+        </span>
+      </div>
+
+      <button
+        className="add-btn"
+        style={{ marginTop: 16, maxWidth: 320 }}
+        disabled
+        title="Creating suites from the UI is deferred — add YAML files to evals/suites/ for now"
+      >
+        + New eval suite (coming soon)
+      </button>
+
+      {openName && (
+        <SuiteDrawer
+          name={openName}
+          onClose={() => setOpenName(null)}
+          onToast={setToast}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
 };
 
 const SuiteDrawer = ({
-  suite,
-  running,
+  name,
   onClose,
-  onRun,
+  onToast,
 }: {
-  suite: Suite;
-  running: boolean;
+  name: string;
   onClose: () => void;
-  onRun: () => void;
+  onToast: (s: string) => void;
 }) => {
-  const [tab, setTab] = useState<'samples' | 'history' | 'settings'>('samples');
+  const [tab, setTab] = useState<'goldens' | 'history' | 'rubrics'>('goldens');
+  const [detail, setDetail] = useState<SuiteDetail | null>(null);
+  const [reports, setReports] = useState<ReportSummary[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [openReport, setOpenReport] = useState<string | null>(null);
   useEscape(onClose);
 
-  const delta = suite.baseline == null ? null : (suite.score - suite.baseline) * 100;
-  const better = delta == null ? null : delta >= 0;
-  const passing = suite.samples.filter((s) => s.pass).length;
-  const failing = suite.samples.filter((s) => !s.pass).length;
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getSuite(name), listReports({ suite: name, limit: 20 })])
+      .then(([d, rs]) => {
+        if (cancelled) return;
+        setDetail(d);
+        setReports(rs);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(
+            e instanceof ApiError
+              ? `Backend ${e.status}: ${e.message}`
+              : `Error: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [name]);
 
-  const validHist = suite.history
-    .map((v, i) => ({ v, i }))
-    .filter((p): p is { v: number; i: number } => p.v != null);
-  const sparkW = 280;
-  const sparkH = 56;
-  const pad = 4;
-  const ys = validHist.map((p) => p.v);
-  const minY = Math.min(...ys, 0.6);
-  const maxY = Math.max(...ys, 1);
-  const points = validHist.map((p) => {
-    const x = pad + (p.i / (suite.history.length - 1)) * (sparkW - pad * 2);
-    const y = pad + (1 - (p.v - minY) / (maxY - minY)) * (sparkH - pad * 2);
-    return [x, y] as const;
-  });
-  const path = points.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  // Sparkline of pass_rate over time (oldest → newest, left → right)
+  const sparkline = useMemo(() => {
+    if (!reports || reports.length === 0) return null;
+    const ordered = [...reports].reverse(); // chronological
+    const w = 280;
+    const h = 56;
+    const pad = 4;
+    const pts = ordered.map((r, i) => {
+      const x = pad + (i / Math.max(1, ordered.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - r.pass_rate) * (h - pad * 2);
+      return [x, y, r] as const;
+    });
+    const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    return { w, h, pts, path };
+  }, [reports]);
 
   return (
     <>
@@ -916,192 +894,341 @@ const SuiteDrawer = ({
       <div className="sheet trace-sheet">
         <div className="sheet-head">
           <div style={{ flex: 1 }}>
-            <div className="dim" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              {suite.owner === 'agent' ? 'Agent-authored' : 'You authored'} · updated {suite.updated} ago
+            <div
+              className="dim"
+              style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}
+            >
+              Suite · {detail?.aggregation || 'mean'} aggregation
             </div>
-            <h2 style={{ marginTop: 4 }}>{suite.name}</h2>
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>{suite.desc}</div>
+            <h2 style={{ marginTop: 4 }}>{name}</h2>
+            {detail?.description && (
+              <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>
+                {detail.description}
+              </div>
+            )}
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
         </div>
 
-        <div className="suite-stats">
-          <div>
-            <div className="dim stat-label">Score</div>
-            <div className="stat-val">
-              {(suite.score * 100).toFixed(0)}
-              <span className="dim mono" style={{ fontSize: 14, fontWeight: 400 }}>%</span>
-            </div>
+        {error && (
+          <div className="sheet-body">
+            <div style={{ color: 'var(--bad-fg)', fontSize: 13, padding: 16 }}>{error}</div>
           </div>
-          <div>
-            <div className="dim stat-label">vs. baseline</div>
-            <div
-              className="stat-val mono"
-              style={{ color: delta == null ? 'var(--fg-muted)' : better ? 'var(--accent-fg)' : 'var(--bad-fg)' }}
-            >
-              {delta == null ? '—' : `${delta >= 0 ? '+' : ''}${delta.toFixed(1)}pp`}
-            </div>
-          </div>
-          <div>
-            <div className="dim stat-label">Samples</div>
-            <div className="stat-val mono">{suite.n}</div>
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div className="dim stat-label">Trend</div>
-            <svg className="sparkline" width={sparkW} height={sparkH}>
-              <path d={path} fill="none" stroke="var(--accent)" strokeWidth="1.6" />
-              {points.map((p, i) => (
-                <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--accent)" />
-              ))}
-            </svg>
-          </div>
-        </div>
+        )}
 
-        <div className="sheet-tabs">
-          <button className={`tab ${tab === 'samples' ? 'active' : ''}`} onClick={() => setTab('samples')}>
-            Samples <span className="dim mono" style={{ fontSize: 11 }}>{suite.samples.length}</span>
-          </button>
-          <button className={`tab ${tab === 'history' ? 'active' : ''}`} onClick={() => setTab('history')}>History</button>
-          <button className={`tab ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab('settings')}>Settings</button>
-        </div>
-
-        <div className="sheet-body">
-          {tab === 'samples' &&
-            (suite.samples.length === 0 ? (
-              <div className="dim" style={{ fontSize: 13, padding: '20px 0' }}>
-                This suite uses an LLM judge instead of fixture samples.
+        {detail && (
+          <>
+            <div className="suite-stats">
+              <div>
+                <div className="dim stat-label">Pass rate</div>
+                <div className="stat-val">
+                  {detail.last_pass_rate != null
+                    ? (detail.last_pass_rate * 100).toFixed(0)
+                    : '—'}
+                  <span className="dim mono" style={{ fontSize: 14, fontWeight: 400 }}>%</span>
+                </div>
               </div>
-            ) : (
-              <>
-                <div style={{ display: 'flex', gap: 12, marginBottom: 14, fontSize: 12, color: 'var(--fg-muted)' }}>
-                  <span><b style={{ color: 'var(--accent-fg)' }}>{passing}</b> passing</span>
-                  {failing > 0 && <span><b style={{ color: 'var(--bad-fg)' }}>{failing}</b> failing</span>}
+              <div>
+                <div className="dim stat-label">Overall score</div>
+                <div className="stat-val mono">
+                  {detail.last_overall_score != null
+                    ? detail.last_overall_score.toFixed(3)
+                    : '—'}
                 </div>
-                <div className="samples">
-                  {suite.samples.map((s) => (
-                    <div key={s.id} className={`sample ${s.pass ? 'pass' : 'fail'}`}>
-                      <div className="sample-head">
-                        <span className="sample-input">"{s.input}"</span>
-                        <span
-                          className="mono"
-                          style={{
-                            fontSize: 11.5,
-                            fontWeight: 500,
-                            color: s.pass ? 'var(--accent-fg)' : 'var(--bad-fg)',
-                          }}
-                        >
-                          {(s.score * 100).toFixed(0)}%
-                        </span>
-                      </div>
-                      <div className="sample-row"><span className="sample-label">Expected</span><span>{s.expected}</span></div>
-                      <div className="sample-row"><span className="sample-label">Actual</span><span>{s.actual}</span></div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ))}
-          {tab === 'history' && (
-            <div>
-              <div className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>Last 9 runs.</div>
-              {suite.history.map((v, i) =>
-                v == null ? null : (
-                  <div key={i} className="history-row">
-                    <span className="dim mono" style={{ fontSize: 11.5, width: 40 }}>run {i + 1}</span>
-                    <div className="bar" style={{ flex: 1 }}>
-                      <span style={{ width: `${v * 100}%` }} />
-                    </div>
-                    <span className="mono" style={{ fontSize: 12.5, width: 44, textAlign: 'right' }}>
-                      {(v * 100).toFixed(0)}%
-                    </span>
+              </div>
+              <div>
+                <div className="dim stat-label">Goldens</div>
+                <div className="stat-val mono">{detail.n_goldens}</div>
+              </div>
+              <div>
+                <div className="dim stat-label">Runs</div>
+                <div className="stat-val mono">{detail.n_runs}</div>
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div className="dim stat-label">Pass-rate trend</div>
+                {sparkline && sparkline.pts.length >= 2 ? (
+                  <svg className="sparkline" width={sparkline.w} height={sparkline.h}>
+                    <path
+                      d={sparkline.path}
+                      fill="none"
+                      stroke="var(--accent)"
+                      strokeWidth="1.6"
+                    />
+                    {sparkline.pts.map((p, i) => (
+                      <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--accent)" />
+                    ))}
+                  </svg>
+                ) : (
+                  <div className="dim" style={{ fontSize: 12.5, paddingTop: 12 }}>
+                    {sparkline ? '1 run — need ≥ 2 for trend' : '—'}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="sheet-tabs">
+              <button
+                className={`tab ${tab === 'goldens' ? 'active' : ''}`}
+                onClick={() => setTab('goldens')}
+              >
+                Goldens{' '}
+                <span className="dim mono" style={{ fontSize: 11 }}>{detail.goldens.length}</span>
+              </button>
+              <button
+                className={`tab ${tab === 'history' ? 'active' : ''}`}
+                onClick={() => setTab('history')}
+              >
+                History{' '}
+                <span className="dim mono" style={{ fontSize: 11 }}>{reports?.length ?? 0}</span>
+              </button>
+              <button
+                className={`tab ${tab === 'rubrics' ? 'active' : ''}`}
+                onClick={() => setTab('rubrics')}
+              >
+                Rubrics{' '}
+                <span className="dim mono" style={{ fontSize: 11 }}>{detail.rubrics.length}</span>
+              </button>
+            </div>
+
+            <div className="sheet-body">
+              {tab === 'goldens' && (
+                detail.goldens.length === 0 ? (
+                  <div className="dim" style={{ fontSize: 13, padding: '20px 0' }}>
+                    No goldens linked.
+                  </div>
+                ) : (
+                  <div className="samples">
+                    {detail.goldens.map((g) => {
+                      const expected = g.expected as { contains?: string[]; category?: string };
+                      return (
+                        <div key={g.id} className="sample">
+                          <div className="sample-head">
+                            <span className="sample-input">"{g.request}"</span>
+                            <span className="mono dim" style={{ fontSize: 11.5 }}>{g.id}</span>
+                          </div>
+                          {expected?.contains && expected.contains.length > 0 && (
+                            <div className="sample-row">
+                              <span className="sample-label">Expects keywords</span>
+                              <span className="mono" style={{ fontSize: 12 }}>
+                                {expected.contains.join(', ')}
+                              </span>
+                            </div>
+                          )}
+                          {expected?.category && (
+                            <div className="sample-row">
+                              <span className="sample-label">Category</span>
+                              <span>{String(expected.category)}</span>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 )
               )}
+              {tab === 'history' && (
+                reports == null || reports.length === 0 ? (
+                  <div className="dim" style={{ fontSize: 13, padding: '20px 0' }}>
+                    No runs recorded for this suite yet.
+                  </div>
+                ) : (
+                  <div>
+                    <div className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
+                      {reports.length} run{reports.length === 1 ? '' : 's'} · click a row for case detail.
+                    </div>
+                    {reports.map((r) => (
+                      <div
+                        key={r.report_id}
+                        className="history-row"
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setOpenReport(r.report_id)}
+                      >
+                        <span className="dim mono" style={{ fontSize: 11.5, width: 100 }}>
+                          {fmtIsoDay(r.finished_at)}
+                        </span>
+                        <span className="mono dim" style={{ fontSize: 11.5, width: 60 }}>
+                          {r.agent_version}
+                        </span>
+                        <div className="bar" style={{ flex: 1 }}>
+                          <span style={{ width: `${r.pass_rate * 100}%` }} />
+                        </div>
+                        <span className="mono" style={{ fontSize: 12.5, width: 70, textAlign: 'right' }}>
+                          {r.n_passed}/{r.n_total}
+                        </span>
+                        {r.is_candidate && <Tag kind="info">cand</Tag>}
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+              {tab === 'rubrics' && (
+                <div className="meta-grid">
+                  {detail.rubrics.map((r) => (
+                    <div key={r.name} className="meta-row">
+                      <div className="dim mono">{r.name}</div>
+                      <div>
+                        <span className="mono" style={{ fontSize: 12.5 }}>{r.type}</span>
+                        {Object.keys(r.params || {}).length > 0 && (
+                          <div className="dim" style={{ fontSize: 11.5, marginTop: 4 }}>
+                            params: {JSON.stringify(r.params)}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          )}
-          {tab === 'settings' && (
-            <div className="meta-grid">
-              <div className="meta-row"><div className="dim">Suite ID</div><div className="mono">{suite.id}</div></div>
-              <div className="meta-row"><div className="dim">Author</div><div>{suite.owner === 'agent' ? 'Agent (self-authored)' : 'You'}</div></div>
-              <div className="meta-row"><div className="dim">Sample size</div><div className="mono">{suite.n}</div></div>
-              <div className="meta-row"><div className="dim">Run cadence</div><div>On every proposed change</div></div>
-              <div className="meta-row"><div className="dim">Threshold</div><div className="mono">≥ {suite.baseline ? (suite.baseline * 100).toFixed(0) : '80'}%</div></div>
-              <div className="meta-row"><div className="dim">Updated</div><div>{suite.updated} ago</div></div>
-            </div>
-          )}
-        </div>
 
-        <div className="sheet-foot">
-          <button className="btn sm" onClick={onRun} disabled={running}>
-            <Icon name="play" size={11} /> {running ? 'Running…' : 'Run now'}
-          </button>
-          <button className="btn sm ghost"><Icon name="copy" size={12} /> Duplicate</button>
-          <button className="btn sm ghost" style={{ marginLeft: 'auto', color: 'var(--bad-fg)' }}>Archive</button>
-        </div>
+            <div className="sheet-foot">
+              <button
+                className="btn sm"
+                disabled
+                title="Triggering eval runs from the UI is deferred — use the harness CLI"
+              >
+                <Icon name="play" size={11} /> Run now (coming soon)
+              </button>
+              <button
+                className="btn sm ghost"
+                onClick={() => onToast(`Suite YAML at evals/suites/${name}.yaml`)}
+              >
+                <Icon name="file" size={12} /> Show file path
+              </button>
+            </div>
+          </>
+        )}
       </div>
+      {openReport && <ReportDrawer reportId={openReport} onClose={() => setOpenReport(null)} />}
     </>
   );
 };
 
-const NewSuiteModal = ({
-  onCreate,
+const ReportDrawer = ({
+  reportId,
   onClose,
 }: {
-  onCreate: (d: { name: string; desc: string; template: string }) => void;
+  reportId: string;
   onClose: () => void;
 }) => {
-  const [name, setName] = useState('');
-  const [desc, setDesc] = useState('');
-  const [template, setTemplate] = useState('blank');
+  const [report, setReport] = useState<ReportDetail | null>(null);
+  const [error, setError] = useState<string | null>(null);
   useEscape(onClose);
 
-  const templates = [
-    { id: 'blank', name: 'Blank', desc: 'Start from scratch.' },
-    { id: 'tone', name: 'Tone check', desc: 'Verify how the agent sounds.' },
-    { id: 'accuracy', name: 'Accuracy', desc: 'Check tool / answer correctness.' },
-    { id: 'judge', name: 'LLM judge', desc: 'Score live transcripts with a judge model.' },
-  ];
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (!name.trim()) return;
-    onCreate({ name: name.trim(), desc: desc.trim(), template });
-  };
+  useEffect(() => {
+    let cancelled = false;
+    getReport(reportId)
+      .then((r) => {
+        if (!cancelled) setReport(r);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(
+            e instanceof ApiError
+              ? `Backend ${e.status}: ${e.message}`
+              : `Error: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reportId]);
 
   return (
     <>
-      <div className="sheet-backdrop" onClick={onClose} />
-      <div className="modal">
-        <form onSubmit={submit}>
-          <div className="modal-head">
-            <h2>New eval suite</h2>
-            <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">×</button>
-          </div>
-          <div className="modal-body">
-            <div className="field">
-              <label>Name</label>
-              <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Refund tone" />
+      <div
+        className="sheet-backdrop"
+        onClick={onClose}
+        style={{ zIndex: 12 }}
+      />
+      <div className="sheet trace-sheet" style={{ zIndex: 13 }}>
+        <div className="sheet-head">
+          <div style={{ flex: 1 }}>
+            <div
+              className="dim"
+              style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}
+            >
+              Report · {report?.is_candidate ? 'candidate run' : 'baseline run'}
             </div>
-            <div className="field">
-              <label>Description <span className="dim">(optional)</span></label>
-              <textarea value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="What does this suite check for?" rows={2} />
-            </div>
-            <div className="field">
-              <label>Template</label>
-              <div className="template-grid">
-                {templates.map((t) => (
-                  <button key={t.id} type="button" className={`template-card ${template === t.id ? 'on' : ''}`} onClick={() => setTemplate(t.id)}>
-                    <div className="template-name">{t.name}</div>
-                    <div className="template-desc">{t.desc}</div>
-                  </button>
-                ))}
+            <h2 className="mono" style={{ marginTop: 4, fontSize: 15 }}>{reportId}</h2>
+            {report && (
+              <div className="dim" style={{ fontSize: 12.5, marginTop: 6 }}>
+                {fmtIsoDay(report.finished_at)} · {report.agent_version} · {report.n_passed}/{report.n_total} passed
               </div>
-            </div>
+            )}
           </div>
-          <div className="modal-foot">
-            <button type="button" className="btn sm ghost" onClick={onClose}>Cancel</button>
-            <button type="submit" className="btn sm" disabled={!name.trim()}>Create suite</button>
-          </div>
-        </form>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+        </div>
+        <div className="sheet-body">
+          {error && (
+            <div style={{ color: 'var(--bad-fg)', fontSize: 13 }}>{error}</div>
+          )}
+          {!report && !error && (
+            <div className="dim" style={{ fontSize: 13 }}>Loading…</div>
+          )}
+          {report && (
+            <>
+              <div className="sheet-section">
+                <h3>Per-rubric</h3>
+                <div className="meta-grid">
+                  {Object.entries(report.per_rubric || {}).map(([k, v]) => (
+                    <div key={k} className="meta-row">
+                      <div className="dim mono">{k}</div>
+                      <div className="mono">{typeof v === 'number' ? v.toFixed(3) : String(v)}</div>
+                    </div>
+                  ))}
+                  {Object.keys(report.per_rubric || {}).length === 0 && (
+                    <div className="dim" style={{ fontSize: 13 }}>No per-rubric breakdown.</div>
+                  )}
+                </div>
+              </div>
+              <div className="sheet-section">
+                <h3>
+                  Cases <span className="dim mono" style={{ fontSize: 12, fontWeight: 400 }}>· {report.cases.length}</span>
+                </h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {report.cases.map((c, i) => {
+                    const passed = c.rubric_results.filter((r) => r.passed).length;
+                    const total = c.rubric_results.length;
+                    return (
+                      <div key={c.trace_id || i} className={`sample ${c.success ? 'pass' : 'fail'}`}>
+                        <div className="sample-head">
+                          <span className="sample-input">"{c.request}"</span>
+                          <span
+                            className="mono"
+                            style={{
+                              fontSize: 11.5,
+                              fontWeight: 500,
+                              color: c.success ? 'var(--accent-fg)' : 'var(--bad-fg)',
+                            }}
+                          >
+                            {passed}/{total}
+                          </span>
+                        </div>
+                        <div className="sample-row">
+                          <span className="sample-label">Golden</span>
+                          <span className="mono" style={{ fontSize: 12 }}>{c.golden_id}</span>
+                        </div>
+                        {c.response && (
+                          <div className="sample-row">
+                            <span className="sample-label">Response</span>
+                            <span style={{ fontSize: 12.5 }}>{c.response.slice(0, 200)}…</span>
+                          </div>
+                        )}
+                        {c.trace_id && (
+                          <div className="sample-row">
+                            <span className="sample-label">Trace</span>
+                            <span className="mono dim" style={{ fontSize: 11.5 }}>{c.trace_id}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </>
   );

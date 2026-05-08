@@ -232,6 +232,115 @@ export async function getTrace(id: string): Promise<TraceDetail> {
   return (await res.json()) as TraceDetail;
 }
 
+// ---------- evals (Technical / Eval suites) ----------
+
+export interface RubricSpec {
+  name: string;
+  type: string;
+  params: Record<string, unknown>;
+}
+
+export interface GoldenView {
+  id: string;
+  request: string;
+  expected: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+}
+
+export interface SuiteSummary {
+  name: string;
+  description: string | null;
+  n_goldens: number;
+  n_rubrics: number;
+  aggregation: string;
+  last_run_at: string | null;
+  last_overall_score: number | null;
+  last_pass_rate: number | null;
+  last_agent_version: string | null;
+  n_runs: number;
+}
+
+export interface SuiteDetail extends SuiteSummary {
+  goldens: GoldenView[];
+  rubrics: RubricSpec[];
+}
+
+export interface ReportSummary {
+  report_id: string;
+  suite: string;
+  agent_version: string;
+  started_at: string;
+  finished_at: string;
+  overall_score: number;
+  pass_rate: number;
+  n_passed: number;
+  n_total: number;
+  is_candidate: boolean;
+  candidate_id: string | null;
+}
+
+export interface ReportCase {
+  golden_id: string;
+  request: string;
+  response: string | null;
+  duration_ms: number | null;
+  success: boolean;
+  error: string | null;
+  trace_id: string | null;
+  rubric_results: RubricResult[];
+}
+
+export interface ReportDetail extends ReportSummary {
+  cases: ReportCase[];
+  per_rubric: Record<string, unknown>;
+}
+
+export async function listSuites(): Promise<SuiteSummary[]> {
+  const res = await fetch('/v1/evals/suites');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as SuiteSummary[];
+}
+
+export async function getSuite(name: string): Promise<SuiteDetail> {
+  const res = await fetch(`/v1/evals/suites/${encodeURIComponent(name)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as SuiteDetail;
+}
+
+export async function listReports(opts: {
+  suite?: string;
+  limit?: number;
+  candidate_only?: boolean;
+} = {}): Promise<ReportSummary[]> {
+  const params = new URLSearchParams();
+  if (opts.suite) params.set('suite', opts.suite);
+  if (typeof opts.limit === 'number') params.set('limit', String(opts.limit));
+  if (opts.candidate_only) params.set('candidate_only', 'true');
+  const qs = params.toString();
+  const url = qs ? `/v1/evals/reports?${qs}` : '/v1/evals/reports';
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as ReportSummary[];
+}
+
+export async function getReport(reportId: string): Promise<ReportDetail> {
+  const res = await fetch(`/v1/evals/reports/${encodeURIComponent(reportId)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as ReportDetail;
+}
+
 // ---------- agent config ----------
 
 export interface AgentPromptView {

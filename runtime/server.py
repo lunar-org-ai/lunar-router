@@ -26,12 +26,17 @@ Endpoints:
   PUT  /agent/route                    — rewrite route.yaml model knobs.
   GET  /traces                         — list raw traces (Technical / Traces).
   GET  /traces/{trace_id}              — single trace with full stages.
+  GET  /evals/suites                   — list eval suites (Technical / Eval).
+  GET  /evals/suites/{name}            — suite detail (goldens + rubrics).
+  GET  /evals/reports                  — recent runs (filterable by suite).
+  GET  /evals/reports/{report_id}      — single eval report with cases.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -913,6 +918,287 @@ async def get_trace(trace_id: str) -> TraceDetail:
                     metadata=t.get("metadata") or {},
                 )
     raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+
+# ---------- evals (Technical / Eval suites) ----------
+#
+# Suites live in evals/suites/<name>.yaml; each lists golden ids and rubric
+# specs. Goldens live in evals/golden/<id>.yaml. Run reports live in
+# evals/reports/<report_id>.json — both candidate runs (cand_<id>.json) and
+# baseline runs (smoke_v0_<ts>.json). The UI sees them as one timeline so
+# the operator can watch a suite's pass-rate move over agent versions.
+
+
+class RubricSpec(BaseModel):
+    name: str
+    type: str
+    params: dict[str, Any] = {}
+
+
+class GoldenView(BaseModel):
+    id: str
+    request: str
+    expected: dict[str, Any] = {}
+    metadata: dict[str, Any] = {}
+
+
+class SuiteSummary(BaseModel):
+    name: str
+    description: Optional[str] = None
+    n_goldens: int
+    n_rubrics: int
+    aggregation: str = "mean"
+    last_run_at: Optional[str] = None
+    last_overall_score: Optional[float] = None
+    last_pass_rate: Optional[float] = None
+    last_agent_version: Optional[str] = None
+    n_runs: int = 0
+
+
+class SuiteDetail(SuiteSummary):
+    goldens: list[GoldenView] = []
+    rubrics: list[RubricSpec] = []
+
+
+class ReportSummary(BaseModel):
+    report_id: str
+    suite: str
+    agent_version: str
+    started_at: str
+    finished_at: str
+    overall_score: float
+    pass_rate: float
+    n_passed: int
+    n_total: int
+    is_candidate: bool = False
+    candidate_id: Optional[str] = None
+
+
+class ReportCase(BaseModel):
+    golden_id: str
+    request: str
+    response: Optional[str] = None
+    duration_ms: Optional[float] = None
+    success: bool = False
+    error: Optional[str] = None
+    trace_id: Optional[str] = None
+    rubric_results: list[dict[str, Any]] = []
+
+
+class ReportDetail(ReportSummary):
+    cases: list[ReportCase] = []
+    per_rubric: dict[str, Any] = {}
+
+
+_EVALS_DIR = Path(__file__).resolve().parent.parent / "evals"
+_REPORT_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
+
+
+def _safe_yaml_load(path: Path) -> dict[str, Any]:
+    import yaml as _yaml
+
+    if not path.exists():
+        return {}
+    with path.open() as f:
+        return _yaml.safe_load(f) or {}
+
+
+def _load_golden(golden_id: str) -> Optional[GoldenView]:
+    path = _EVALS_DIR / "golden" / f"{golden_id}.yaml"
+    if not path.exists():
+        return None
+    d = _safe_yaml_load(path)
+    return GoldenView(
+        id=d.get("id", golden_id),
+        request=(d.get("input") or {}).get("request", ""),
+        expected=d.get("expected") or {},
+        metadata=d.get("metadata") or {},
+    )
+
+
+def _list_report_files() -> list[Path]:
+    reports_dir = _EVALS_DIR / "reports"
+    if not reports_dir.exists():
+        return []
+    return sorted(reports_dir.glob("*.json"))
+
+
+def _load_report_meta(path: Path) -> Optional[ReportSummary]:
+    """Read just enough of a report to populate the summary row. We still
+    open the file (no per-line streaming) but we don't keep the cases."""
+    try:
+        with path.open() as f:
+            d = json.load(f)
+    except Exception:
+        return None
+    summary = d.get("summary") or {}
+    cases = d.get("cases") or []
+    is_candidate = path.name.startswith("cand_")
+    candidate_id: Optional[str] = None
+    if is_candidate:
+        # filename pattern: cand_<candidate_id>.json (cand_id may itself
+        # start with "cand_" — the wrapping prefix is just routing)
+        stem = path.stem
+        if stem.startswith("cand_"):
+            candidate_id = stem[len("cand_") :]
+    return ReportSummary(
+        report_id=path.stem,
+        suite=d.get("suite", ""),
+        agent_version=d.get("agent_version", ""),
+        started_at=d.get("started_at", ""),
+        finished_at=d.get("finished_at", ""),
+        overall_score=float(summary.get("overall_score", 0.0)),
+        pass_rate=float(summary.get("pass_rate", 0.0)),
+        n_passed=int(summary.get("n_passed", 0)),
+        n_total=int(summary.get("n_total", len(cases))),
+        is_candidate=is_candidate,
+        candidate_id=candidate_id,
+    )
+
+
+def _list_suites() -> list[SuiteSummary]:
+    suites_dir = _EVALS_DIR / "suites"
+    if not suites_dir.exists():
+        return []
+
+    # Pre-compute per-suite latest run from reports (one pass).
+    latest_by_suite: dict[str, ReportSummary] = {}
+    counts_by_suite: dict[str, int] = {}
+    for p in _list_report_files():
+        meta = _load_report_meta(p)
+        if meta is None or not meta.suite:
+            continue
+        counts_by_suite[meta.suite] = counts_by_suite.get(meta.suite, 0) + 1
+        prev = latest_by_suite.get(meta.suite)
+        if prev is None or meta.finished_at > prev.finished_at:
+            latest_by_suite[meta.suite] = meta
+
+    out: list[SuiteSummary] = []
+    for sp in sorted(suites_dir.glob("*.yaml")):
+        d = _safe_yaml_load(sp)
+        name = d.get("suite") or sp.stem
+        latest = latest_by_suite.get(name)
+        out.append(
+            SuiteSummary(
+                name=name,
+                description=d.get("description"),
+                n_goldens=len(d.get("goldens") or []),
+                n_rubrics=len(d.get("rubrics") or []),
+                aggregation=d.get("aggregation", "mean"),
+                last_run_at=latest.finished_at if latest else None,
+                last_overall_score=latest.overall_score if latest else None,
+                last_pass_rate=latest.pass_rate if latest else None,
+                last_agent_version=latest.agent_version if latest else None,
+                n_runs=counts_by_suite.get(name, 0),
+            )
+        )
+    return out
+
+
+@app.get("/evals/suites", response_model=list[SuiteSummary])
+async def get_suites() -> list[SuiteSummary]:
+    return _list_suites()
+
+
+@app.get("/evals/suites/{name}", response_model=SuiteDetail)
+async def get_suite(name: str) -> SuiteDetail:
+    if not _REPORT_ID_RE.match(name):
+        raise HTTPException(status_code=400, detail=f"invalid suite name {name!r}")
+    suite_path = _EVALS_DIR / "suites" / f"{name}.yaml"
+    if not suite_path.exists():
+        raise HTTPException(status_code=404, detail=f"unknown suite {name!r}")
+    d = _safe_yaml_load(suite_path)
+
+    goldens: list[GoldenView] = []
+    for gid in d.get("goldens") or []:
+        g = _load_golden(str(gid))
+        if g is not None:
+            goldens.append(g)
+
+    rubrics = [
+        RubricSpec(
+            name=r.get("name", ""),
+            type=r.get("type", ""),
+            params=r.get("params") or {},
+        )
+        for r in (d.get("rubrics") or [])
+    ]
+
+    # Reuse the summary builder for the latest run + counts so /suites/:name
+    # can render the same headline numbers as the list page.
+    summary = SuiteSummary(
+        name=d.get("suite") or suite_path.stem,
+        description=d.get("description"),
+        n_goldens=len(goldens),
+        n_rubrics=len(rubrics),
+        aggregation=d.get("aggregation", "mean"),
+    )
+    for s in _list_suites():
+        if s.name == summary.name:
+            summary = s
+            break
+
+    return SuiteDetail(
+        **summary.model_dump(),
+        goldens=goldens,
+        rubrics=rubrics,
+    )
+
+
+@app.get("/evals/reports", response_model=list[ReportSummary])
+async def list_reports(
+    suite: Optional[str] = None,
+    limit: int = 50,
+    candidate_only: bool = False,
+) -> list[ReportSummary]:
+    out: list[ReportSummary] = []
+    for p in _list_report_files():
+        meta = _load_report_meta(p)
+        if meta is None:
+            continue
+        if suite and meta.suite != suite:
+            continue
+        if candidate_only and not meta.is_candidate:
+            continue
+        out.append(meta)
+    out.sort(key=lambda r: r.finished_at or r.started_at, reverse=True)
+    return out[: max(1, min(int(limit), 200))]
+
+
+@app.get("/evals/reports/{report_id}", response_model=ReportDetail)
+async def get_report(report_id: str) -> ReportDetail:
+    if not _REPORT_ID_RE.match(report_id):
+        raise HTTPException(status_code=400, detail=f"invalid report_id {report_id!r}")
+    path = _EVALS_DIR / "reports" / f"{report_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"unknown report {report_id!r}")
+    with path.open() as f:
+        d = json.load(f)
+
+    cases = [
+        ReportCase(
+            golden_id=c.get("golden_id", ""),
+            request=c.get("request", ""),
+            response=c.get("response"),
+            duration_ms=c.get("duration_ms"),
+            success=bool(c.get("success", False)),
+            error=c.get("error"),
+            trace_id=c.get("trace_id"),
+            rubric_results=c.get("rubric_results") or [],
+        )
+        for c in (d.get("cases") or [])
+    ]
+
+    meta = _load_report_meta(path)
+    if meta is None:
+        raise HTTPException(status_code=500, detail="failed to read report meta")
+
+    summary = d.get("summary") or {}
+    return ReportDetail(
+        **meta.model_dump(),
+        cases=cases,
+        per_rubric=summary.get("per_rubric") or {},
+    )
 
 
 # ---------- agent config (AgentSheet) ----------
