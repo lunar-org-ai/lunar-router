@@ -1311,7 +1311,7 @@ export const EvalSuites = () => {
                       fontSize: 12,
                       color:
                         deltaPp == null
-                          ? 'var(--fg-muted)'
+                          ? 'var(--muted-foreground)'
                           : better
                             ? 'var(--accent-fg)'
                             : 'var(--bad-fg)',
@@ -1511,7 +1511,7 @@ const SuiteDrawer = ({
                       style={{
                         color:
                           deltaPp == null
-                            ? 'var(--fg-muted)'
+                            ? 'var(--muted-foreground)'
                             : better
                               ? 'var(--accent-fg)'
                               : 'var(--bad-fg)',
@@ -1533,11 +1533,11 @@ const SuiteDrawer = ({
                         <path
                           d={sparkline.path}
                           fill="none"
-                          stroke="var(--accent)"
+                          stroke="var(--primary)"
                           strokeWidth="1.6"
                         />
                         {sparkline.pts.map((p, i) => (
-                          <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--accent)" />
+                          <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--primary)" />
                         ))}
                       </svg>
                     ) : (
