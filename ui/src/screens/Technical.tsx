@@ -714,21 +714,14 @@ const TraceDrawer = ({
                           <div
                             key={i}
                             className={`msg msg-${m.role}`}
-                            style={{
-                              opacity: m.isCurrent ? 1 : 0.85,
-                            }}
-                            title={m.trace_id === traceId ? 'This trace' : `Other trace · ${m.trace_id.slice(0, 8)}…`}
+                            title={
+                              m.trace_id === traceId
+                                ? `Trace you opened · ${m.trace_id.slice(0, 8)}…`
+                                : `Other trace · ${m.trace_id.slice(0, 8)}…`
+                            }
                           >
                             <div className="msg-role">
                               {m.role === 'agent' ? 'Agent' : 'Customer'}
-                              {m.isCurrent && (
-                                <span
-                                  className="dim mono"
-                                  style={{ fontSize: 10, marginLeft: 6 }}
-                                >
-                                  · this turn
-                                </span>
-                              )}
                             </div>
                             <div className="msg-body">{m.text}</div>
                           </div>
