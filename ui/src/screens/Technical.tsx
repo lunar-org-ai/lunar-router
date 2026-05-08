@@ -571,7 +571,12 @@ const TraceDrawer = ({
 
   const sessionHasMore = !!session && session.n_turns > 1;
   const showSession = sessionHasMore && !forceTurnOnly;
-  const totalTurns = trace ? (trace.history?.length || 0) + 1 : 0;
+  // Each /run call = 1 turn (one user request + one agent reply). The
+  // trace.history field carries context messages from previous turns but
+  // it doesn't represent additional turns this trace handled.
+  const turnIndexInSession = session
+    ? session.turns.findIndex((t) => t.trace_id === traceId)
+    : -1;
 
   const copyJson = async () => {
     if (!trace) return;
@@ -610,10 +615,9 @@ const TraceDrawer = ({
                 <span className="mono">{routingModel || '—'}</span>
                 <span>·</span>
                 <span>
-                  {totalTurns} turn{totalTurns !== 1 ? 's' : ''}
-                  {sessionHasMore && session && session.n_turns > totalTurns && (
-                    <span style={{ marginLeft: 4 }}>· {session.n_turns} in session</span>
-                  )}
+                  {sessionHasMore && session && turnIndexInSession >= 0
+                    ? `Turn ${turnIndexInSession + 1} of ${session.n_turns}`
+                    : '1 turn'}
                 </span>
                 <span>·</span>
                 <span className="mono">— tok</span>
