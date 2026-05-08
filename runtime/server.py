@@ -24,12 +24,16 @@ Endpoints:
                                           models, integrations, key status).
   PUT  /agent/prompt                   — rewrite agent/prompts/system.md.
   PUT  /agent/route                    — rewrite route.yaml model knobs.
+  GET  /traces                         — list raw traces (Technical / Traces).
+  GET  /traces/{trace_id}              — single trace with full stages.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
@@ -739,6 +743,178 @@ async def update_policy(payload: PolicyUpdateRequest) -> PolicyView:
     return _policy_to_view(pol)
 
 
+# ---------- traces (Technical / Traces) ----------
+#
+# Source: traces/raw/<YYYY-MM-DD>.jsonl files written by runtime/executor/tracing.
+# One JSON object per line. Listing pages by offset; trace detail scans newest
+# day first so single-trace lookup is fast for recent traffic.
+
+
+class TraceStageView(BaseModel):
+    stage: Optional[str] = None
+    technique: str
+    variant: str
+    duration_ms: float = 0.0
+    docs_in: int = 0
+    docs_out: int = 0
+    response_set: Optional[bool] = None
+    routing_model: Optional[str] = None
+    error: Optional[str] = None
+
+
+class TraceSummary(BaseModel):
+    trace_id: str
+    timestamp: str
+    request: str
+    response: Optional[str] = None
+    duration_ms: float = 0.0
+    success: bool = False
+    error: Optional[str] = None
+    agent_version: Optional[str] = None
+    n_stages: int = 0
+
+
+class TracesPage(BaseModel):
+    date: str
+    available_dates: list[str]
+    total_filtered: int
+    items: list[TraceSummary]
+    has_more: bool
+
+
+class TraceDetail(TraceSummary):
+    stages: list[TraceStageView] = []
+    metadata: dict[str, Any] = {}
+
+
+_TRACES_DIR = Path(__file__).resolve().parent.parent / "traces" / "raw"
+
+
+def _load_traces_for_date(date: str) -> list[dict[str, Any]]:
+    path = _TRACES_DIR / f"{date}.jsonl"
+    rows: list[dict[str, Any]] = []
+    if not path.exists():
+        return rows
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    return rows
+
+
+def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
+    return TraceSummary(
+        trace_id=t.get("trace_id", ""),
+        timestamp=t.get("timestamp", ""),
+        request=t.get("request", ""),
+        response=t.get("response"),
+        duration_ms=float(t.get("duration_ms", 0) or 0),
+        success=bool(t.get("success", False)),
+        error=t.get("error"),
+        agent_version=t.get("agent_version"),
+        n_stages=len(t.get("stages") or []),
+    )
+
+
+def _available_trace_dates() -> list[str]:
+    if not _TRACES_DIR.exists():
+        return []
+    dates: list[str] = []
+    for p in sorted(_TRACES_DIR.glob("*.jsonl"), reverse=True):
+        # filename = YYYY-MM-DD.jsonl
+        dates.append(p.stem)
+    return dates
+
+
+@app.get("/traces", response_model=TracesPage)
+async def list_traces(
+    date: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    success: Optional[bool] = None,
+    agent_version: Optional[str] = None,
+    q: Optional[str] = None,
+) -> TracesPage:
+    available = _available_trace_dates()
+    if not available:
+        return TracesPage(
+            date=date or "",
+            available_dates=[],
+            total_filtered=0,
+            items=[],
+            has_more=False,
+        )
+
+    chosen_date = date or available[0]
+    if chosen_date not in available:
+        # client asked for a date with no data — return empty page but keep
+        # the chosen_date so the UI keeps the picker honest.
+        return TracesPage(
+            date=chosen_date,
+            available_dates=available,
+            total_filtered=0,
+            items=[],
+            has_more=False,
+        )
+
+    raw = _load_traces_for_date(chosen_date)
+
+    # Filter
+    filtered: list[dict[str, Any]] = []
+    needle = (q or "").lower().strip()
+    for t in raw:
+        if success is not None and bool(t.get("success", False)) != success:
+            continue
+        if agent_version and t.get("agent_version") != agent_version:
+            continue
+        if needle:
+            blob = (
+                str(t.get("request", "")).lower()
+                + " "
+                + str(t.get("response", "")).lower()
+            )
+            if needle not in blob:
+                continue
+        filtered.append(t)
+
+    # Newest first
+    filtered.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    page = filtered[offset : offset + limit]
+
+    return TracesPage(
+        date=chosen_date,
+        available_dates=available,
+        total_filtered=len(filtered),
+        items=[_trace_to_summary(t) for t in page],
+        has_more=offset + limit < len(filtered),
+    )
+
+
+@app.get("/traces/{trace_id}", response_model=TraceDetail)
+async def get_trace(trace_id: str) -> TraceDetail:
+    """Find a trace by id. Scans newest day first so lookups for recent
+    traffic stay fast."""
+    for d in _available_trace_dates():
+        for t in _load_traces_for_date(d):
+            if t.get("trace_id") == trace_id:
+                summary = _trace_to_summary(t)
+                stages = [TraceStageView(**s) for s in (t.get("stages") or [])]
+                return TraceDetail(
+                    **summary.model_dump(),
+                    stages=stages,
+                    metadata=t.get("metadata") or {},
+                )
+    raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+
 # ---------- agent config (AgentSheet) ----------
 #
 # Wires the four AgentSheet tabs (Brain / Hands / Channels / Keys) to real
@@ -781,8 +957,6 @@ class AgentConfigView(BaseModel):
     integrations: list[IntegrationStatus]
     keys: list[AgentKeyStatus]
 
-
-from pathlib import Path  # noqa: E402
 
 _PROJECT_ROOT_AGENT = Path(__file__).resolve().parent.parent
 _AGENT_DIR = _PROJECT_ROOT_AGENT / "agent"

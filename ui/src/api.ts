@@ -159,6 +159,79 @@ export async function getMetricsOverview(): Promise<MetricsOverview> {
   return (await res.json()) as MetricsOverview;
 }
 
+// ---------- traces (Technical / Traces) ----------
+
+export interface TraceStageView {
+  stage: string | null;
+  technique: string;
+  variant: string;
+  duration_ms: number;
+  docs_in: number;
+  docs_out: number;
+  response_set: boolean | null;
+  routing_model: string | null;
+  error: string | null;
+}
+
+export interface TraceSummary {
+  trace_id: string;
+  timestamp: string;
+  request: string;
+  response: string | null;
+  duration_ms: number;
+  success: boolean;
+  error: string | null;
+  agent_version: string | null;
+  n_stages: number;
+}
+
+export interface TracesPage {
+  date: string;
+  available_dates: string[];
+  total_filtered: number;
+  items: TraceSummary[];
+  has_more: boolean;
+}
+
+export interface TraceDetail extends TraceSummary {
+  stages: TraceStageView[];
+  metadata: Record<string, unknown>;
+}
+
+export async function listTraces(opts: {
+  date?: string;
+  limit?: number;
+  offset?: number;
+  success?: boolean;
+  agent_version?: string;
+  q?: string;
+} = {}): Promise<TracesPage> {
+  const params = new URLSearchParams();
+  if (opts.date) params.set('date', opts.date);
+  if (typeof opts.limit === 'number') params.set('limit', String(opts.limit));
+  if (typeof opts.offset === 'number') params.set('offset', String(opts.offset));
+  if (typeof opts.success === 'boolean') params.set('success', String(opts.success));
+  if (opts.agent_version) params.set('agent_version', opts.agent_version);
+  if (opts.q) params.set('q', opts.q);
+  const qs = params.toString();
+  const url = qs ? `/v1/traces?${qs}` : '/v1/traces';
+  const res = await fetch(url);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TracesPage;
+}
+
+export async function getTrace(id: string): Promise<TraceDetail> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceDetail;
+}
+
 // ---------- agent config ----------
 
 export interface AgentPromptView {

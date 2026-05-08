@@ -1,145 +1,17 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
+import {
+  ApiError,
+  getTrace,
+  listTraces,
+  type TraceDetail,
+  type TraceSummary,
+  type TracesPage,
+} from '../api';
 
-// ============================================================================
-// Traces
-// ============================================================================
-
-interface TranscriptMsg {
-  role: 'user' | 'agent' | 'tool';
-  text: string;
-}
-
-interface TraceEval {
-  name: string;
-  score: number;
-}
-
-interface Trace {
-  id: string;
-  when: string;
-  whenAbs: string;
-  channel: string;
-  dur: string;
-  model: string;
-  verdict: 'pass' | 'fail' | 'flag';
-  preview: string;
-  cost: number;
-  turns: number;
-  tokens: number;
-  transcript: TranscriptMsg[];
-  evals: TraceEval[];
-  flagReason?: string;
-}
-
-const TRACES: Trace[] = [
-  {
-    id: 'trc_8af2f1', when: '2m ago', whenAbs: '14:38:22', channel: 'whatsapp', dur: '1.4s', model: 'sonnet-4.5',
-    verdict: 'pass', preview: 'Customer asked about order ORD-3318-A. Refund issued.', cost: 0.012, turns: 4, tokens: 1842,
-    transcript: [
-      { role: 'user', text: 'hey i never got order ord 3318 a' },
-      { role: 'agent', text: 'Let me look that up for you. One moment.' },
-      { role: 'tool', text: 'lookup_order(ORD-3318-A) → status: shipped, delivered_at: null, last_scan: 2026-04-29 (Memphis, TN)' },
-      { role: 'agent', text: "I see ORD-3318-A — it shipped April 27 and last scanned in Memphis on the 29th, then went silent. That's outside our normal window so I'm going to refund it now and get a replacement out today. You'll see the refund within 3 business days." },
-      { role: 'tool', text: 'issue_refund(ORD-3318-A, full) → ok' },
-      { role: 'tool', text: 'create_replacement(ORD-3318-A, expedited) → ORD-4901-B' },
-      { role: 'agent', text: "Refund's done and your replacement is ORD-4901-B, shipping today via expedited. Anything else?" },
-      { role: 'user', text: 'nope thanks' },
-    ],
-    evals: [
-      { name: 'Order lookup accuracy', score: 1.0 },
-      { name: 'Tone — empathetic', score: 0.94 },
-      { name: 'Concise without losing warmth', score: 0.88 },
-    ],
-  },
-  {
-    id: 'trc_91ddc9', when: '6m ago', whenAbs: '14:34:11', channel: 'api', dur: '0.8s', model: 'haiku-4.5',
-    verdict: 'pass', preview: '"What time do you close?" → answered.', cost: 0.001, turns: 1, tokens: 124,
-    transcript: [
-      { role: 'user', text: 'what time do you close?' },
-      { role: 'agent', text: "We're open until 8pm Pacific tonight." },
-    ],
-    evals: [{ name: 'Concise without losing warmth', score: 0.91 }],
-  },
-  {
-    id: 'trc_5be0c2', when: '11m ago', whenAbs: '14:29:48', channel: 'widget', dur: '3.2s', model: 'sonnet-4.5',
-    verdict: 'flag', preview: 'Customer mentioned competitor twice. Tone neutral but verbose.', cost: 0.018, turns: 6, tokens: 2104,
-    transcript: [
-      { role: 'user', text: "i'm thinking of switching to Acme. their pricing is better" },
-      { role: 'agent', text: "I hear you — pricing matters. If it helps, our annual plan is about 18% cheaper than monthly, and most customers in your tier use that. But genuinely, if Acme fits your needs better, that's a fair call. Want me to walk through what your usage looks like so you can compare?" },
-      { role: 'user', text: 'sure' },
-      { role: 'agent', text: '[long usage breakdown — 340 words]' },
-    ],
-    evals: [
-      { name: 'Competitor neutrality', score: 0.91 },
-      { name: 'Concise without losing warmth', score: 0.62 },
-    ],
-    flagReason: 'Length exceeded conciseness threshold (340w response).',
-  },
-  {
-    id: 'trc_44e0aa', when: '14m ago', whenAbs: '14:26:55', channel: 'whatsapp', dur: '0.6s', model: 'haiku-4.5',
-    verdict: 'fail', preview: '"Are you a robot?" Agent: "Yes." (concise mode era)', cost: 0.001, turns: 1, tokens: 88,
-    transcript: [
-      { role: 'user', text: 'are you a robot?' },
-      { role: 'agent', text: 'Yes.' },
-    ],
-    evals: [
-      { name: 'Tone — empathetic', score: 0.31 },
-      { name: 'Concise without losing warmth', score: 0.22 },
-    ],
-    flagReason: 'Curt response to identity question. Triggered Lesson #41.',
-  },
-  {
-    id: 'trc_77c1d4', when: '22m ago', whenAbs: '14:18:02', channel: 'whatsapp', dur: '2.1s', model: 'sonnet-4.5',
-    verdict: 'pass', preview: 'Frustrated customer. Acknowledged once, refunded duplicate charge.', cost: 0.014, turns: 3, tokens: 1240,
-    transcript: [
-      { role: 'user', text: 'you charged me TWICE this is ridiculous' },
-      { role: 'agent', text: "That's frustrating, I'm sorry. Let me find both charges." },
-      { role: 'tool', text: 'lookup_charges(customer_id=8821) → 2 charges, $49 each, same SKU, 4s apart' },
-      { role: 'agent', text: "Confirmed — two charges 4 seconds apart, same item. That's a duplicate on our end. Refunding the second one now." },
-      { role: 'tool', text: 'refund(ch_902c1, $49) → ok' },
-      { role: 'agent', text: "Refunded. You'll see it within 3 business days." },
-    ],
-    evals: [{ name: 'Tone — empathetic', score: 0.96 }, { name: 'Order lookup accuracy', score: 1.0 }],
-  },
-  {
-    id: 'trc_2a4488', when: '34m ago', whenAbs: '14:06:17', channel: 'api', dur: '1.1s', model: 'sonnet-4.5',
-    verdict: 'pass', preview: 'Shipping address change — confirmed and updated.', cost: 0.011, turns: 3, tokens: 980,
-    transcript: [
-      { role: 'user', text: 'can you change shipping on ORD-2210-C to 88 Cedar St' },
-      { role: 'agent', text: "ORD-2210-C is still in 'preparing' so I can update it. Just confirming: 88 Cedar St — same city and zip as before?" },
-      { role: 'user', text: 'yes' },
-      { role: 'tool', text: "update_address(ORD-2210-C, '88 Cedar St') → ok" },
-      { role: 'agent', text: "Updated. You'll get a confirmation email." },
-    ],
-    evals: [{ name: 'Order lookup accuracy', score: 1.0 }],
-  },
-  {
-    id: 'trc_d119f0', when: '41m ago', whenAbs: '13:59:41', channel: 'whatsapp', dur: '0.4s', model: 'haiku-4.5',
-    verdict: 'pass', preview: '"Where are you located?" → answered.', cost: 0.001, turns: 1, tokens: 76,
-    transcript: [
-      { role: 'user', text: 'where are you located?' },
-      { role: 'agent', text: 'Our HQ is in Brooklyn, NY. We ship from there and from Reno, NV.' },
-    ],
-    evals: [],
-  },
-  {
-    id: 'trc_38b220', when: '58m ago', whenAbs: '13:42:08', channel: 'widget', dur: '4.6s', model: 'sonnet-4.5',
-    verdict: 'flag', preview: 'Customer asked for refund outside policy. Escalated to human.', cost: 0.022, turns: 8, tokens: 2890,
-    transcript: [
-      { role: 'user', text: 'i want a refund on order from 6 months ago' },
-      { role: 'agent', text: 'Our refund window is 60 days, but let me see what I can do. One moment.' },
-      { role: 'tool', text: 'lookup_order(ORD-1109-A) → delivered 2025-11-04, 184 days ago' },
-      { role: 'agent', text: "It's been 184 days, which is past our policy. I don't have authority to override that, but I can pass this to a human teammate who does — would you like me to?" },
-      { role: 'user', text: 'yes please' },
-      { role: 'tool', text: "escalate_to_human(reason='out_of_policy_refund') → ticket #44102" },
-      { role: 'agent', text: 'Done. Someone from our team will reach out by tomorrow. Ticket #44102 if you need to reference it.' },
-    ],
-    evals: [{ name: 'Refusal — out of scope', score: 1.0 }, { name: 'Tone — empathetic', score: 0.88 }],
-    flagReason: 'Escalation occurred — pinned by human reviewer for training.',
-  },
-];
+// Shared helpers used by every Technical sub-screen — Esc closes drawers,
+// toasts auto-dismiss after a couple seconds.
 
 const useEscape = (onClose: () => void) => {
   useEffect(() => {
@@ -159,195 +31,371 @@ const useAutoToast = (toast: string | null, setToast: (v: string | null) => void
   }, [toast, setToast]);
 };
 
+// ============================================================================
+// Traces  — wired to real backend (P15.1)
+// ============================================================================
+//
+// Source: traces/raw/<YYYY-MM-DD>.jsonl files surfaced by the runtime as a
+// paginated feed (GET /v1/traces). Each row is one pipeline run; the drawer
+// shows the per-stage breakdown (retrieve / rerank / route / generate).
+//
+// Filters (date / success / agent_version / search) round-trip to the
+// backend — no client-side filtering, so the count is honest. Pagination is
+// offset-based; we keep page state local and refetch when filters change.
+
+const PAGE_SIZE = 50;
+
+const fmtDuration = (ms: number): string => {
+  if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
+  if (ms < 1000) return `${ms.toFixed(2)}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+};
+
+const fmtTimeOfDay = (iso: string): string => {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return iso.slice(11, 19);
+  }
+};
+
+const fmtRelative = (iso: string): string => {
+  if (!iso) return '';
+  try {
+    const ms = Date.now() - new Date(iso).getTime();
+    if (ms < 60_000) return `${Math.round(ms / 1000)}s ago`;
+    if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+    if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
+    return `${Math.round(ms / 86_400_000)}d ago`;
+  } catch {
+    return '';
+  }
+};
+
 export const Traces = () => {
-  const [filter, setFilter] = useState<'all' | 'pass' | 'flag' | 'fail'>('all');
-  const [channelFilter, setChannelFilter] = useState('all');
+  const [page, setPage] = useState<TracesPage | null>(null);
+  const [date, setDate] = useState<string | null>(null);
+  const [filter, setFilter] = useState<'all' | 'pass' | 'fail'>('all');
+  const [versionFilter, setVersionFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
-  const [showFilters, setShowFilters] = useState(false);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
-  const [pinned, setPinned] = useState<Record<string, boolean>>({});
-  const [toast, setToast] = useState<string | null>(null);
-  useAutoToast(toast, setToast);
 
-  const filtered = TRACES.filter((t) => {
-    if (filter !== 'all' && t.verdict !== filter) return false;
-    if (channelFilter !== 'all' && t.channel !== channelFilter) return false;
-    if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      if (!t.preview.toLowerCase().includes(q) && !t.id.toLowerCase().includes(q)) return false;
+  // Debounce search to avoid hammering the backend on every keystroke.
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const opts: Parameters<typeof listTraces>[0] = {
+        limit: PAGE_SIZE,
+        offset,
+      };
+      if (date) opts.date = date;
+      if (filter === 'pass') opts.success = true;
+      else if (filter === 'fail') opts.success = false;
+      if (versionFilter !== 'all') opts.agent_version = versionFilter;
+      if (debouncedSearch) opts.q = debouncedSearch;
+      const p = await listTraces(opts);
+      setPage(p);
+      // sync date if backend chose a default
+      if (!date && p.date) setDate(p.date);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? `Backend ${e.status}: ${e.message}`
+          : `Network error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setLoading(false);
     }
-    return true;
-  });
+  }, [date, filter, versionFilter, debouncedSearch, offset]);
 
-  const open = TRACES.find((t) => t.id === openId);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-  const togglePin = (id: string) => {
-    setPinned((p) => {
-      const next = { ...p, [id]: !p[id] };
-      setToast(next[id] ? 'Pinned for the agent to learn from.' : 'Unpinned.');
-      return next;
-    });
-  };
+  // Reset offset when filters change.
+  useEffect(() => {
+    setOffset(0);
+  }, [date, filter, versionFilter, debouncedSearch]);
 
-  const flagAsFail = (id: string) => {
-    setToast(`Flagged ${id}. The agent will review it tonight.`);
-  };
+  const versionOptions = useMemo(() => {
+    if (!page) return ['all'];
+    const versions = new Set<string>();
+    for (const t of page.items) {
+      if (t.agent_version) versions.add(t.agent_version);
+    }
+    return ['all', ...Array.from(versions).sort()];
+  }, [page]);
 
-  const channels = ['all', 'whatsapp', 'api', 'widget'];
-
-  const filterPills: [typeof filter, string, number][] = [
-    ['all', 'All', TRACES.length],
-    ['pass', 'Passed', TRACES.filter((t) => t.verdict === 'pass').length],
-    ['flag', 'Flagged', TRACES.filter((t) => t.verdict === 'flag').length],
-    ['fail', 'Failed', TRACES.filter((t) => t.verdict === 'fail').length],
-  ];
+  const showing = page?.items.length ?? 0;
+  const total = page?.total_filtered ?? 0;
+  const startIdx = total === 0 ? 0 : offset + 1;
+  const endIdx = offset + showing;
 
   return (
     <div className="content">
       <h1 className="page-title">Traces</h1>
-      <p className="page-sub">Every conversation the agent has had. Filter, flag, or pin one for the agent to learn from.</p>
+      <p className="page-sub">
+        Every pipeline run, raw. Click a row to inspect stages, retrieved docs, and routing
+        decisions.
+      </p>
+
+      {error && (
+        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+            {error}
+          </p>
+        </div>
+      )}
 
       <div className="trace-toolbar">
         <div className="filter-pills">
-          {filterPills.map(([id, label, n]) => (
-            <button key={id} className={`pill ${filter === id ? 'on' : ''}`} onClick={() => setFilter(id)}>
-              {label} <span className="dim mono" style={{ fontSize: 11 }}>{n}</span>
+          {(['all', 'pass', 'fail'] as const).map((f) => (
+            <button
+              key={f}
+              className={`pill ${filter === f ? 'on' : ''}`}
+              onClick={() => setFilter(f)}
+            >
+              {f === 'all' ? 'All' : f === 'pass' ? 'Successful' : 'Failed'}
             </button>
           ))}
         </div>
-        <div className="trace-toolbar-right">
-          <div className="search-input">
-            <Icon name="search" size={13} />
-            <input placeholder="Search excerpt or trace id…" value={search} onChange={(e) => setSearch(e.target.value)} />
-            {search && <button className="clear" onClick={() => setSearch('')}>×</button>}
-          </div>
-          <div style={{ position: 'relative' }}>
-            <button
-              className={`btn sm ${showFilters || channelFilter !== 'all' ? '' : 'ghost'}`}
-              onClick={() => setShowFilters((s) => !s)}
-            >
-              <Icon name="sliders" size={12} /> Filters
-              {channelFilter !== 'all' && <span className="filter-dot" />}
-            </button>
-            {showFilters && (
-              <>
-                <div className="popover-backdrop" onClick={() => setShowFilters(false)} />
-                <div className="popover">
-                  <div className="popover-section">
-                    <div className="popover-label">Channel</div>
-                    <div className="popover-options">
-                      {channels.map((c) => (
-                        <button key={c} className={`pill sm ${channelFilter === c ? 'on' : ''}`} onClick={() => setChannelFilter(c)}>
-                          {c === 'all' ? 'Any' : c}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="popover-foot">
-                    <button
-                      className="btn sm ghost"
-                      onClick={() => {
-                        setChannelFilter('all');
-                        setSearch('');
-                        setFilter('all');
-                        setShowFilters(false);
-                      }}
-                    >
-                      Reset all
-                    </button>
-                    <button className="btn sm" onClick={() => setShowFilters(false)}>Done</button>
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-
-      <div className="card">
-        <div className="trace-head">
-          <div>Trace</div>
-          <div>Excerpt</div>
-          <div>Model</div>
-          <div>Cost</div>
-          <div></div>
-        </div>
-        {filtered.length === 0 ? (
-          <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No traces match those filters.</div>
-            <button
-              className="btn sm ghost"
-              style={{ marginTop: 12 }}
-              onClick={() => {
-                setFilter('all');
-                setChannelFilter('all');
-                setSearch('');
+        <div className="trace-toolbar-right" style={{ gap: 8 }}>
+          {page && page.available_dates.length > 1 && (
+            <select
+              value={date || page.date}
+              onChange={(e) => setDate(e.target.value)}
+              style={{
+                padding: '6px 10px',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                background: 'var(--bg)',
+                fontSize: 12.5,
               }}
             >
-              Clear filters
-            </button>
+              {page.available_dates.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          )}
+          {versionOptions.length > 1 && (
+            <select
+              value={versionFilter}
+              onChange={(e) => setVersionFilter(e.target.value)}
+              style={{
+                padding: '6px 10px',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                background: 'var(--bg)',
+                fontSize: 12.5,
+                fontFamily: 'var(--font-mono)',
+              }}
+            >
+              {versionOptions.map((v) => (
+                <option key={v} value={v}>
+                  {v === 'all' ? 'all versions' : v}
+                </option>
+              ))}
+            </select>
+          )}
+          <div className="search-input">
+            <Icon name="search" size={13} />
+            <input
+              placeholder="Search request / response…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search && (
+              <button className="clear" onClick={() => setSearch('')}>
+                ×
+              </button>
+            )}
           </div>
-        ) : (
-          filtered.map((t) => (
-            <div className="trace-row" key={t.id} onClick={() => setOpenId(t.id)}>
-              <div className="cell-trace">
-                <div className="id-row">
-                  <span className="id">{t.id}</span>
-                  {pinned[t.id] && <Icon name="pin" size={11} />}
-                </div>
-                <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
-                  {t.when} · {t.channel}
-                </div>
-              </div>
-              <div className="cell-excerpt">
-                <Tag kind={t.verdict === 'pass' ? 'success' : t.verdict === 'fail' ? 'bad' : 'warn'}>
-                  <span className="dot" />
-                </Tag>
-                <span className="preview">{t.preview}</span>
-              </div>
-              <span className="mono dim cell-model">{t.model}</span>
-              <span className="mono dim cell-cost">${t.cost.toFixed(3)}</span>
-              <Icon name="chevron" size={12} />
-            </div>
-          ))
-        )}
+          <button
+            className="btn sm ghost"
+            onClick={() => {
+              setFilter('all');
+              setVersionFilter('all');
+              setSearch('');
+            }}
+            disabled={filter === 'all' && versionFilter === 'all' && !search}
+          >
+            Reset
+          </button>
+        </div>
       </div>
 
-      <div className="trace-foot">
-        <span className="dim">Showing {filtered.length} of {TRACES.length}</span>
-        <span className="dim" style={{ marginLeft: 'auto' }}>Auto-refresh in 12s</span>
-      </div>
-
-      {open && (
-        <TraceDrawer
-          trace={open}
-          pinned={!!pinned[open.id]}
-          onClose={() => setOpenId(null)}
-          onTogglePin={() => togglePin(open.id)}
-          onFlag={() => flagAsFail(open.id)}
-        />
+      {loading && !page && (
+        <div className="dim" style={{ padding: 32, fontSize: 13 }}>
+          Loading traces…
+        </div>
       )}
 
-      {toast && <div className="toast">{toast}</div>}
+      {page && (
+        <>
+          <div className="card">
+            <div
+              style={{
+                padding: '12px 16px',
+                borderBottom: '1px solid var(--border)',
+                fontSize: 12,
+                color: 'var(--fg-muted)',
+                display: 'grid',
+                gridTemplateColumns: '110px 1fr 1fr 90px 80px 80px',
+                gap: 16,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                fontWeight: 500,
+              }}
+            >
+              <div>Time</div>
+              <div>Request</div>
+              <div>Response</div>
+              <div>Version</div>
+              <div>Latency</div>
+              <div>Status</div>
+            </div>
+            {page.items.length === 0 ? (
+              <div className="empty-state" style={{ padding: 48 }}>
+                <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+                  No traces match the current filters for {page.date || 'this date'}.
+                </div>
+              </div>
+            ) : (
+              page.items.map((t: TraceSummary) => (
+                <div
+                  key={t.trace_id}
+                  className="trace-row"
+                  onClick={() => setOpenId(t.trace_id)}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '110px 1fr 1fr 90px 80px 80px',
+                    gap: 16,
+                    padding: '12px 16px',
+                    borderBottom: '1px solid var(--border)',
+                    cursor: 'pointer',
+                    alignItems: 'center',
+                    fontSize: 13,
+                  }}
+                >
+                  <div>
+                    <div className="mono" style={{ fontSize: 12 }}>
+                      {fmtTimeOfDay(t.timestamp)}
+                    </div>
+                    <div className="dim" style={{ fontSize: 11 }}>
+                      {fmtRelative(t.timestamp)}
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                    title={t.request}
+                  >
+                    {t.request || <span className="dim">(empty)</span>}
+                  </div>
+                  <div
+                    className="dim"
+                    style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontSize: 12.5,
+                    }}
+                    title={t.response || ''}
+                  >
+                    {t.response || (t.error ? <span style={{ color: 'var(--bad-fg)' }}>{t.error}</span> : '—')}
+                  </div>
+                  <span className="mono dim" style={{ fontSize: 11.5 }}>
+                    {t.agent_version || '—'}
+                  </span>
+                  <span className="mono" style={{ fontSize: 12 }}>
+                    {fmtDuration(t.duration_ms)}
+                  </span>
+                  <Tag kind={t.success ? 'success' : 'bad'}>
+                    <span className="dot" /> {t.success ? 'ok' : 'fail'}
+                  </Tag>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="trace-foot" style={{ marginTop: 12 }}>
+            <span className="dim">
+              {total === 0
+                ? '0 traces'
+                : `Showing ${startIdx}–${endIdx} of ${total} traces`}
+            </span>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+              <button
+                className="btn sm ghost"
+                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                disabled={offset === 0 || loading}
+              >
+                ← Previous
+              </button>
+              <button
+                className="btn sm ghost"
+                onClick={() => setOffset(offset + PAGE_SIZE)}
+                disabled={!page.has_more || loading}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+
+      {openId && <TraceDrawer traceId={openId} onClose={() => setOpenId(null)} />}
     </div>
   );
 };
 
-const TraceDrawer = ({
-  trace,
-  pinned,
-  onClose,
-  onTogglePin,
-  onFlag,
-}: {
-  trace: Trace;
-  pinned: boolean;
-  onClose: () => void;
-  onTogglePin: () => void;
-  onFlag: () => void;
-}) => {
-  const [tab, setTab] = useState<'transcript' | 'evals' | 'meta'>('transcript');
+const TraceDrawer = ({ traceId, onClose }: { traceId: string; onClose: () => void }) => {
+  const [trace, setTrace] = useState<TraceDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   useEscape(onClose);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    getTrace(traceId)
+      .then((t) => {
+        if (!cancelled) setTrace(t);
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setError(
+            e instanceof ApiError
+              ? `Backend ${e.status}: ${e.message}`
+              : `Error: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [traceId]);
 
   return (
     <>
@@ -355,120 +403,217 @@ const TraceDrawer = ({
       <div className="sheet trace-sheet">
         <div className="sheet-head">
           <div style={{ flex: 1 }}>
-            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>{trace.id}</div>
-            <h2 style={{ marginTop: 2 }}>{trace.preview}</h2>
-            <div style={{ display: 'flex', gap: 14, marginTop: 8, fontSize: 12, color: 'var(--fg-muted)' }}>
-              <span>{trace.whenAbs}</span><span>·</span>
-              <span>{trace.channel}</span><span>·</span>
-              <span className="mono">{trace.model}</span><span>·</span>
-              <span>{trace.turns} turn{trace.turns !== 1 ? 's' : ''}</span><span>·</span>
-              <span className="mono">{trace.tokens.toLocaleString()} tok</span><span>·</span>
-              <span className="mono">${trace.cost.toFixed(3)}</span>
+            <div
+              className="dim"
+              style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}
+            >
+              Trace · {trace?.agent_version || '—'}
             </div>
+            <h2 className="mono" style={{ marginTop: 4, fontSize: 16 }}>
+              {traceId}
+            </h2>
+            {trace && (
+              <div className="dim" style={{ fontSize: 12.5, marginTop: 6 }}>
+                {fmtTimeOfDay(trace.timestamp)} · {fmtDuration(trace.duration_ms)} ·{' '}
+                {trace.success ? (
+                  <span style={{ color: 'var(--accent-fg)' }}>success</span>
+                ) : (
+                  <span style={{ color: 'var(--bad-fg)' }}>failed</span>
+                )}
+              </div>
+            )}
           </div>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+          <button className="icon-btn" onClick={onClose} aria-label="Close">
+            ×
+          </button>
         </div>
-        {trace.flagReason && (
-          <div className="flag-banner">
-            <Icon name="flag" size={12} />
-            <span><b>Flagged:</b> {trace.flagReason}</span>
+
+        {loading && (
+          <div className="sheet-body">
+            <div className="dim" style={{ fontSize: 13, padding: 24 }}>Loading…</div>
           </div>
         )}
-        <div className="sheet-tabs">
-          <button className={`tab ${tab === 'transcript' ? 'active' : ''}`} onClick={() => setTab('transcript')}>Transcript</button>
-          <button className={`tab ${tab === 'evals' ? 'active' : ''}`} onClick={() => setTab('evals')}>
-            Evals <span className="dim mono" style={{ fontSize: 11 }}>{trace.evals.length}</span>
-          </button>
-          <button className={`tab ${tab === 'meta' ? 'active' : ''}`} onClick={() => setTab('meta')}>Metadata</button>
-        </div>
-        <div className="sheet-body">
-          {tab === 'transcript' && (
-            <div className="transcript">
-              {trace.transcript.map((m, i) => (
-                <div key={i} className={`msg msg-${m.role}`}>
-                  <div className="msg-role">{m.role === 'agent' ? 'Agent' : m.role === 'user' ? 'Customer' : 'Tool'}</div>
-                  <div className="msg-body">{m.text}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          {tab === 'evals' && (
-            <div>
-              {trace.evals.length === 0 ? (
-                <div className="dim" style={{ fontSize: 13 }}>No evals ran for this trace.</div>
-              ) : (
-                trace.evals.map((e, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 12,
-                      padding: '12px 0',
-                      borderBottom: i < trace.evals.length - 1 ? '1px solid var(--border)' : 'none',
-                    }}
-                  >
-                    <div style={{ flex: 1, fontSize: 13.5 }}>{e.name}</div>
-                    <div className="bar" style={{ width: 140 }}>
-                      <span
-                        style={{
-                          width: `${e.score * 100}%`,
-                          background: e.score >= 0.8 ? 'var(--accent)' : e.score >= 0.5 ? 'oklch(0.75 0.13 70)' : 'var(--bad)',
-                        }}
-                      />
-                    </div>
-                    <div
-                      className="mono"
-                      style={{
-                        width: 48,
-                        textAlign: 'right',
-                        fontWeight: 500,
-                        color: e.score >= 0.8 ? 'var(--accent-fg)' : e.score >= 0.5 ? 'oklch(0.5 0.12 70)' : 'var(--bad-fg)',
-                      }}
-                    >
-                      {(e.score * 100).toFixed(0)}%
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-          {tab === 'meta' && (
-            <div className="meta-grid">
-              <div className="meta-row"><div className="dim">Trace ID</div><div className="mono">{trace.id}</div></div>
-              <div className="meta-row"><div className="dim">When</div><div>{trace.whenAbs} ({trace.when})</div></div>
-              <div className="meta-row"><div className="dim">Channel</div><div>{trace.channel}</div></div>
-              <div className="meta-row"><div className="dim">Model</div><div className="mono">{trace.model}</div></div>
-              <div className="meta-row"><div className="dim">Duration</div><div className="mono">{trace.dur}</div></div>
-              <div className="meta-row"><div className="dim">Turns</div><div className="mono">{trace.turns}</div></div>
-              <div className="meta-row"><div className="dim">Tokens</div><div className="mono">{trace.tokens.toLocaleString()}</div></div>
-              <div className="meta-row"><div className="dim">Cost</div><div className="mono">${trace.cost.toFixed(3)}</div></div>
-              <div className="meta-row">
-                <div className="dim">Verdict</div>
-                <div>
-                  <Tag kind={trace.verdict === 'pass' ? 'success' : trace.verdict === 'fail' ? 'bad' : 'warn'}>
-                    {trace.verdict}
-                  </Tag>
-                </div>
+        {error && (
+          <div className="sheet-body">
+            <div style={{ color: 'var(--bad-fg)', fontSize: 13, padding: 24 }}>{error}</div>
+          </div>
+        )}
+        {trace && !loading && (
+          <div className="sheet-body">
+            <div className="sheet-section">
+              <h3>Request</h3>
+              <div
+                style={{
+                  padding: '12px 14px',
+                  background: 'var(--bg-muted)',
+                  borderRadius: 8,
+                  fontSize: 13.5,
+                  lineHeight: 1.55,
+                  whiteSpace: 'pre-wrap',
+                }}
+              >
+                {trace.request || <span className="dim">(empty request)</span>}
               </div>
             </div>
-          )}
-        </div>
-        <div className="sheet-foot">
-          <button className={`btn sm ${pinned ? '' : 'ghost'}`} onClick={onTogglePin}>
-            <Icon name="pin" size={12} /> {pinned ? 'Pinned' : 'Pin for learning'}
-          </button>
-          <button className="btn sm ghost" onClick={onFlag}>
-            <Icon name="flag" size={12} /> Flag as failure
-          </button>
-          <button className="btn sm ghost" style={{ marginLeft: 'auto' }}>
-            <Icon name="copy" size={12} /> Copy trace
-          </button>
-        </div>
+
+            <div className="sheet-section">
+              <h3>Response</h3>
+              {trace.response ? (
+                <div
+                  style={{
+                    padding: '12px 14px',
+                    background: 'var(--bg-muted)',
+                    borderRadius: 8,
+                    fontSize: 13.5,
+                    lineHeight: 1.55,
+                    whiteSpace: 'pre-wrap',
+                  }}
+                >
+                  {trace.response}
+                </div>
+              ) : (
+                <div
+                  className="dim"
+                  style={{
+                    padding: '12px 14px',
+                    background: 'var(--bg-muted)',
+                    borderRadius: 8,
+                    fontSize: 13,
+                  }}
+                >
+                  No response —{' '}
+                  {trace.error ? (
+                    <span style={{ color: 'var(--bad-fg)' }}>{trace.error}</span>
+                  ) : (
+                    'pipeline did not produce output'
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div className="sheet-section">
+              <h3>
+                Pipeline stages{' '}
+                <span className="dim mono" style={{ fontSize: 12, fontWeight: 400 }}>
+                  · {trace.stages.length}
+                </span>
+              </h3>
+              {trace.stages.length === 0 ? (
+                <div className="dim" style={{ fontSize: 13 }}>No stages recorded.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {trace.stages.map((s, i) => {
+                    const failed = !!s.error;
+                    return (
+                      <div
+                        key={i}
+                        className="card card-pad"
+                        style={{
+                          padding: '12px 14px',
+                          borderColor: failed ? 'var(--bad)' : undefined,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            marginBottom: 6,
+                          }}
+                        >
+                          <span
+                            className="mono dim"
+                            style={{ fontSize: 11, width: 18 }}
+                          >
+                            {i + 1}.
+                          </span>
+                          <span style={{ fontWeight: 500, fontSize: 13.5 }}>
+                            {s.stage || s.technique}
+                          </span>
+                          <span
+                            className="mono dim"
+                            style={{ fontSize: 11.5, marginLeft: 6 }}
+                          >
+                            {s.technique}/{s.variant}
+                          </span>
+                          <span
+                            className="mono"
+                            style={{ marginLeft: 'auto', fontSize: 12 }}
+                          >
+                            {fmtDuration(s.duration_ms)}
+                          </span>
+                        </div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            gap: 12,
+                            fontSize: 12,
+                            color: 'var(--fg-muted)',
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          {(s.docs_in > 0 || s.docs_out > 0) && (
+                            <span>
+                              docs <span className="mono">{s.docs_in}</span> →{' '}
+                              <span className="mono">{s.docs_out}</span>
+                            </span>
+                          )}
+                          {s.routing_model && (
+                            <span>
+                              routing →{' '}
+                              <span className="mono" style={{ color: 'var(--fg)' }}>
+                                {s.routing_model}
+                              </span>
+                            </span>
+                          )}
+                          {s.response_set != null && (
+                            <span>response_set {String(s.response_set)}</span>
+                          )}
+                        </div>
+                        {failed && (
+                          <div
+                            style={{
+                              marginTop: 8,
+                              fontSize: 12.5,
+                              color: 'var(--bad-fg)',
+                              fontFamily: 'var(--font-mono)',
+                            }}
+                          >
+                            {s.error}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {Object.keys(trace.metadata || {}).length > 0 && (
+              <div className="sheet-section">
+                <h3>Metadata</h3>
+                <pre
+                  style={{
+                    background: 'var(--bg-muted)',
+                    padding: '10px 12px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontFamily: 'var(--font-mono)',
+                    overflow: 'auto',
+                    margin: 0,
+                  }}
+                >
+                  {JSON.stringify(trace.metadata, null, 2)}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </>
   );
 };
+
 
 // ============================================================================
 // Eval suites
