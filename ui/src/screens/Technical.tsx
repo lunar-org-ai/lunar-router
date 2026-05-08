@@ -10,6 +10,8 @@ import {
   listReports,
   listSuites,
   listTraces,
+  runAllSuites,
+  runSuite,
   type ReportDetail,
   type ReportSummary,
   type SessionDetail,
@@ -1042,13 +1044,24 @@ const fmtIsoDay = (iso: string | null): string => {
   }
 };
 
+type SuiteFilter = 'all' | 'agent' | 'you' | 'regressed';
+
+const isRegressed = (s: SuiteSummary): boolean =>
+  s.last_pass_rate != null &&
+  s.baseline_pass_rate != null &&
+  s.last_pass_rate < s.baseline_pass_rate;
+
 export const EvalSuites = () => {
   const [suites, setSuites] = useState<SuiteSummary[] | null>(null);
   const [search, setSearch] = useState('');
+  const [filter, setFilter] = useState<SuiteFilter>('all');
   const [openName, setOpenName] = useState<string | null>(null);
+  const [openReport, setOpenReport] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [runningAll, setRunningAll] = useState(false);
+  const [runningOne, setRunningOne] = useState<Record<string, boolean>>({});
   useAutoToast(toast, setToast);
 
   const load = useCallback(async () => {
@@ -1072,20 +1085,96 @@ export const EvalSuites = () => {
     void load();
   }, [load]);
 
+  const handleRunAll = useCallback(async () => {
+    if (runningAll) return;
+    setRunningAll(true);
+    try {
+      const result = await runAllSuites();
+      const ok = result.reports.length;
+      const failed = result.errors.length;
+      if (failed === 0) {
+        setToast(`Ran ${ok} suite${ok === 1 ? '' : 's'} — refreshed`);
+      } else {
+        setToast(`Ran ${ok} ok, ${failed} failed: ${result.errors.map((e) => e.suite).join(', ')}`);
+      }
+      await load();
+    } catch (e) {
+      setToast(
+        e instanceof ApiError
+          ? `Run failed: ${e.status} ${e.message}`
+          : `Run failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setRunningAll(false);
+    }
+  }, [load, runningAll]);
+
+  const counts = useMemo(() => {
+    const list = suites ?? [];
+    return {
+      all: list.length,
+      agent: list.filter((s) => s.author === 'agent').length,
+      you: list.filter((s) => s.author === 'human').length,
+      regressed: list.filter(isRegressed).length,
+    };
+  }, [suites]);
+
   const filtered = useMemo(() => {
     if (!suites) return [];
     const q = search.trim().toLowerCase();
-    if (!q) return suites;
-    return suites.filter((s) => s.name.toLowerCase().includes(q));
-  }, [suites, search]);
+    return suites.filter((s) => {
+      if (filter === 'agent' && s.author !== 'agent') return false;
+      if (filter === 'you' && s.author !== 'human') return false;
+      if (filter === 'regressed' && !isRegressed(s)) return false;
+      if (q && !s.name.toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [suites, search, filter]);
+
+  const handleRunOne = useCallback(async (name: string) => {
+    if (runningOne[name]) return;
+    setRunningOne((r) => ({ ...r, [name]: true }));
+    try {
+      const summary = await runSuite(name);
+      setToast(`Ran ${name} — ${summary.n_passed}/${summary.n_total} passed`);
+      await load();
+      setOpenReport(summary.report_id);
+    } catch (e) {
+      setToast(
+        e instanceof ApiError
+          ? `Run failed: ${e.status} ${e.message}`
+          : `Run failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setRunningOne((r) => {
+        const { [name]: _, ...rest } = r;
+        return rest;
+      });
+    }
+  }, [load, runningOne]);
+
+  const filterPills: { id: SuiteFilter; label: string; n: number }[] = [
+    { id: 'all', label: 'All', n: counts.all },
+    { id: 'agent', label: 'Agent-authored', n: counts.agent },
+    { id: 'you', label: 'You authored', n: counts.you },
+    { id: 'regressed', label: 'Regressed', n: counts.regressed },
+  ];
+
+  const lastRunIso = useMemo(() => {
+    if (!suites) return null;
+    let best: string | null = null;
+    for (const s of suites) {
+      if (s.last_run_at && (!best || s.last_run_at > best)) best = s.last_run_at;
+    }
+    return best;
+  }, [suites]);
 
   return (
     <div className="content">
       <h1 className="page-title">Eval suites</h1>
       <p className="page-sub">
-        The self-tests every candidate is scored against. Suites are YAML files
-        under <span className="mono">evals/suites/</span>; runs land in{' '}
-        <span className="mono">evals/reports/</span> and feed the trend below.
+        The self-tests your agent runs against every change. Some it wrote
+        itself; some you pinned.
       </p>
 
       {error && (
@@ -1098,9 +1187,16 @@ export const EvalSuites = () => {
 
       <div className="trace-toolbar">
         <div className="filter-pills">
-          <button className="pill on">
-            All <span className="dim mono" style={{ fontSize: 11 }}>{suites?.length ?? 0}</span>
-          </button>
+          {filterPills.map((p) => (
+            <button
+              key={p.id}
+              className={`pill ${filter === p.id ? 'on' : ''}`}
+              onClick={() => setFilter(p.id)}
+            >
+              {p.label}{' '}
+              <span className="dim mono" style={{ fontSize: 11 }}>{p.n}</span>
+            </button>
+          ))}
         </div>
         <div className="trace-toolbar-right">
           <div className="search-input">
@@ -1118,10 +1214,15 @@ export const EvalSuites = () => {
           </div>
           <button
             className="btn sm"
-            disabled
-            title="Triggering eval runs from the UI is deferred — for now, run via the harness CLI"
+            onClick={() => void handleRunAll()}
+            disabled={runningAll || !suites || suites.length === 0}
+            title={
+              suites && suites.length > 0
+                ? 'Run every suite end-to-end and refresh.'
+                : 'No suites to run.'
+            }
           >
-            <Icon name="play" size={11} /> Run all
+            <Icon name="play" size={11} /> {runningAll ? 'Running…' : 'Run all'}
           </button>
         </div>
       </div>
@@ -1134,10 +1235,10 @@ export const EvalSuites = () => {
         <div className="card">
           <div className="suite-head">
             <div>Suite</div>
-            <div>Goldens</div>
-            <div>Last pass rate</div>
-            <div>Last run</div>
-            <div>Version</div>
+            <div>Samples</div>
+            <div>Score</div>
+            <div>vs. baseline</div>
+            <div>Author</div>
             <div></div>
           </div>
           {filtered.length === 0 ? (
@@ -1147,44 +1248,96 @@ export const EvalSuites = () => {
                   ? 'No suites defined yet. Add a YAML to evals/suites/.'
                   : 'No suites match.'}
               </div>
+              {(filter !== 'all' || search) && suites.length > 0 && (
+                <button
+                  className="btn sm ghost"
+                  style={{ marginTop: 12 }}
+                  onClick={() => {
+                    setFilter('all');
+                    setSearch('');
+                  }}
+                >
+                  Clear filters
+                </button>
+              )}
             </div>
           ) : (
-            filtered.map((s) => (
-              <div className="suite-row" key={s.name} onClick={() => setOpenName(s.name)}>
-                <div>
-                  <div
+            filtered.map((s) => {
+              const score = s.last_pass_rate;
+              const baseline = s.baseline_pass_rate;
+              const deltaPp =
+                score == null || baseline == null ? null : (score - baseline) * 100;
+              const better = deltaPp == null ? null : deltaPp >= 0;
+              const isAgent = s.author === 'agent';
+              return (
+                <div
+                  className="suite-row"
+                  key={s.name}
+                  onClick={() => setOpenName(s.name)}
+                >
+                  <div>
+                    <div
+                      style={{
+                        fontWeight: 500,
+                        fontSize: 13.5,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                      }}
+                    >
+                      {s.name}
+                      {runningOne[s.name] && <span className="run-dot" />}
+                    </div>
+                    {s.description && (
+                      <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+                        {s.description}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 6 }}>
+                      <div className="bar" style={{ width: 200 }}>
+                        <span style={{ width: `${(score ?? 0) * 100}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                  <span className="mono dim" style={{ fontSize: 12.5 }}>
+                    {s.n_goldens}
+                  </span>
+                  <span className="mono" style={{ fontWeight: 500 }}>
+                    {score == null ? '—' : `${(score * 100).toFixed(0)}%`}
+                  </span>
+                  <span
+                    className="mono"
                     style={{
-                      fontWeight: 500,
-                      fontSize: 13.5,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
+                      fontSize: 12,
+                      color:
+                        deltaPp == null
+                          ? 'var(--fg-muted)'
+                          : better
+                            ? 'var(--accent-fg)'
+                            : 'var(--bad-fg)',
                     }}
                   >
-                    {s.name}
-                  </div>
-                  {s.description && (
-                    <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
-                      {s.description}
-                    </div>
-                  )}
-                  <div style={{ marginTop: 6 }}>
-                    <div className="bar" style={{ width: 200 }}>
-                      <span style={{ width: `${(s.last_pass_rate ?? 0) * 100}%` }} />
-                    </div>
-                  </div>
+                    {deltaPp == null
+                      ? 'new suite'
+                      : `${deltaPp >= 0 ? '+' : ''}${deltaPp.toFixed(1)}pp`}
+                  </span>
+                  <span>
+                    <Tag kind={isAgent ? 'info' : ''}>{isAgent ? 'Agent' : 'You'}</Tag>
+                  </span>
+                  <button
+                    className="row-action"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleRunOne(s.name);
+                    }}
+                    disabled={!!runningOne[s.name]}
+                    title="Run now"
+                  >
+                    <Icon name="play" size={11} />
+                  </button>
                 </div>
-                <span className="mono dim" style={{ fontSize: 12.5 }}>{s.n_goldens}</span>
-                <span className="mono" style={{ fontWeight: 500 }}>
-                  {fmtPercent(s.last_pass_rate)}
-                </span>
-                <span className="dim" style={{ fontSize: 12 }}>{fmtIsoDay(s.last_run_at)}</span>
-                <span className="mono dim" style={{ fontSize: 11.5 }}>
-                  {s.last_agent_version || '—'}
-                </span>
-                <Icon name="chevron" size={12} />
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       )}
@@ -1194,12 +1347,7 @@ export const EvalSuites = () => {
           Showing {filtered.length} of {suites?.length ?? 0}
         </span>
         <span className="dim" style={{ marginLeft: 'auto' }}>
-          {suites && suites.length > 0
-            ? `Total runs across all suites: ${suites.reduce(
-                (s, x) => s + x.n_runs,
-                0,
-              )}`
-            : ''}
+          {lastRunIso ? `Last full run: ${fmtIsoDay(lastRunIso)}` : 'No runs yet'}
         </span>
       </div>
 
@@ -1217,7 +1365,14 @@ export const EvalSuites = () => {
           name={openName}
           onClose={() => setOpenName(null)}
           onToast={setToast}
+          onRan={(reportId) => {
+            void load();
+            setOpenReport(reportId);
+          }}
         />
+      )}
+      {openReport && (
+        <ReportDrawer reportId={openReport} onClose={() => setOpenReport(null)} />
       )}
       {toast && <div className="toast">{toast}</div>}
     </div>
@@ -1228,39 +1383,64 @@ const SuiteDrawer = ({
   name,
   onClose,
   onToast,
+  onRan,
 }: {
   name: string;
   onClose: () => void;
   onToast: (s: string) => void;
+  onRan?: (reportId: string) => void;
 }) => {
   const [tab, setTab] = useState<'goldens' | 'history' | 'rubrics'>('goldens');
   const [detail, setDetail] = useState<SuiteDetail | null>(null);
   const [reports, setReports] = useState<ReportSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [openReport, setOpenReport] = useState<string | null>(null);
+  const [running, setRunning] = useState(false);
   useEscape(onClose);
+
+  const refresh = useCallback(async () => {
+    const [d, rs] = await Promise.all([
+      getSuite(name),
+      listReports({ suite: name, limit: 20 }),
+    ]);
+    setDetail(d);
+    setReports(rs);
+  }, [name]);
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([getSuite(name), listReports({ suite: name, limit: 20 })])
-      .then(([d, rs]) => {
-        if (cancelled) return;
-        setDetail(d);
-        setReports(rs);
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setError(
-            e instanceof ApiError
-              ? `Backend ${e.status}: ${e.message}`
-              : `Error: ${e instanceof Error ? e.message : String(e)}`,
-          );
-        }
-      });
+    refresh().catch((e) => {
+      if (!cancelled) {
+        setError(
+          e instanceof ApiError
+            ? `Backend ${e.status}: ${e.message}`
+            : `Error: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    });
     return () => {
       cancelled = true;
     };
-  }, [name]);
+  }, [refresh]);
+
+  const handleRun = useCallback(async () => {
+    if (running) return;
+    setRunning(true);
+    try {
+      const summary = await runSuite(name);
+      onToast(`Ran ${name} — ${summary.n_passed}/${summary.n_total} passed`);
+      await refresh();
+      onRan?.(summary.report_id);
+    } catch (e) {
+      onToast(
+        e instanceof ApiError
+          ? `Run failed: ${e.status} ${e.message}`
+          : `Run failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setRunning(false);
+    }
+  }, [name, running, refresh, onRan, onToast]);
 
   // Sparkline of pass_rate over time (oldest → newest, left → right)
   const sparkline = useMemo(() => {
@@ -1288,7 +1468,8 @@ const SuiteDrawer = ({
               className="dim"
               style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}
             >
-              Suite · {detail?.aggregation || 'mean'} aggregation
+              {detail?.author === 'agent' ? 'Agent-authored' : 'You authored'}
+              {detail?.last_run_at ? ` · updated ${fmtIsoDay(detail.last_run_at)}` : ''}
             </div>
             <h2 style={{ marginTop: 4 }}>{name}</h2>
             {detail?.description && (
@@ -1308,53 +1489,66 @@ const SuiteDrawer = ({
 
         {detail && (
           <>
-            <div className="suite-stats">
-              <div>
-                <div className="dim stat-label">Pass rate</div>
-                <div className="stat-val">
-                  {detail.last_pass_rate != null
-                    ? (detail.last_pass_rate * 100).toFixed(0)
-                    : '—'}
-                  <span className="dim mono" style={{ fontSize: 14, fontWeight: 400 }}>%</span>
-                </div>
-              </div>
-              <div>
-                <div className="dim stat-label">Overall score</div>
-                <div className="stat-val mono">
-                  {detail.last_overall_score != null
-                    ? detail.last_overall_score.toFixed(3)
-                    : '—'}
-                </div>
-              </div>
-              <div>
-                <div className="dim stat-label">Goldens</div>
-                <div className="stat-val mono">{detail.n_goldens}</div>
-              </div>
-              <div>
-                <div className="dim stat-label">Runs</div>
-                <div className="stat-val mono">{detail.n_runs}</div>
-              </div>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="dim stat-label">Pass-rate trend</div>
-                {sparkline && sparkline.pts.length >= 2 ? (
-                  <svg className="sparkline" width={sparkline.w} height={sparkline.h}>
-                    <path
-                      d={sparkline.path}
-                      fill="none"
-                      stroke="var(--primary)"
-                      strokeWidth="1.6"
-                    />
-                    {sparkline.pts.map((p, i) => (
-                      <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--primary)" />
-                    ))}
-                  </svg>
-                ) : (
-                  <div className="dim" style={{ fontSize: 12.5, paddingTop: 12 }}>
-                    {sparkline ? '1 run — need ≥ 2 for trend' : '—'}
+            {(() => {
+              const score = detail.last_pass_rate;
+              const baseline = detail.baseline_pass_rate;
+              const deltaPp =
+                score == null || baseline == null ? null : (score - baseline) * 100;
+              const better = deltaPp == null ? null : deltaPp >= 0;
+              return (
+                <div className="suite-stats">
+                  <div>
+                    <div className="dim stat-label">Score</div>
+                    <div className="stat-val">
+                      {score != null ? (score * 100).toFixed(0) : '—'}
+                      <span className="dim mono" style={{ fontSize: 14, fontWeight: 400 }}>%</span>
+                    </div>
                   </div>
-                )}
-              </div>
-            </div>
+                  <div>
+                    <div className="dim stat-label">vs. baseline</div>
+                    <div
+                      className="stat-val mono"
+                      style={{
+                        color:
+                          deltaPp == null
+                            ? 'var(--fg-muted)'
+                            : better
+                              ? 'var(--accent-fg)'
+                              : 'var(--bad-fg)',
+                      }}
+                    >
+                      {deltaPp == null
+                        ? '—'
+                        : `${deltaPp >= 0 ? '+' : ''}${deltaPp.toFixed(1)}pp`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="dim stat-label">Samples</div>
+                    <div className="stat-val mono">{detail.n_goldens}</div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="dim stat-label">Trend</div>
+                    {sparkline && sparkline.pts.length >= 2 ? (
+                      <svg className="sparkline" width={sparkline.w} height={sparkline.h}>
+                        <path
+                          d={sparkline.path}
+                          fill="none"
+                          stroke="var(--accent)"
+                          strokeWidth="1.6"
+                        />
+                        {sparkline.pts.map((p, i) => (
+                          <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--accent)" />
+                        ))}
+                      </svg>
+                    ) : (
+                      <div className="dim" style={{ fontSize: 12.5, paddingTop: 12 }}>
+                        {sparkline ? '1 run — need ≥ 2 for trend' : '—'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
 
             <div className="sheet-tabs">
               <button
@@ -1473,10 +1667,11 @@ const SuiteDrawer = ({
             <div className="sheet-foot">
               <button
                 className="btn sm"
-                disabled
-                title="Triggering eval runs from the UI is deferred — use the harness CLI"
+                onClick={() => void handleRun()}
+                disabled={running}
+                title="Run this suite now and refresh."
               >
-                <Icon name="play" size={11} /> Run now (coming soon)
+                <Icon name="play" size={11} /> {running ? 'Running…' : 'Run now'}
               </button>
               <button
                 className="btn sm ghost"
