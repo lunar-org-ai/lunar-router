@@ -17,7 +17,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Tag, StatusTag, KindIcon, KindLabel } from '../components/Tag';
-import { ApiError, getLesson, type LessonSummary } from '../api';
+import {
+  ApiError,
+  getLesson,
+  getLessonTraces,
+  type LessonSummary,
+  type LessonTracesResponse,
+} from '../api';
 
 const fmtDay = (iso: string | null): string => {
   if (!iso) return '—';
@@ -43,6 +49,8 @@ type TabId = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
 
 export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: () => void }) => {
   const [lesson, setLesson] = useState<LessonSummary | null>(null);
+  const [traces, setTraces] = useState<LessonTracesResponse | null>(null);
+  const [tracesLoading, setTracesLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<TabId>('story');
@@ -67,6 +75,23 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Lazy-load traces only when the Traces tab is opened (and cache by lesson).
+  useEffect(() => {
+    if (tab !== 'traces') return;
+    if (traces?.lesson_id === lessonId) return;
+    setTracesLoading(true);
+    getLessonTraces(lessonId)
+      .then(setTraces)
+      .catch((e) => {
+        setError(
+          e instanceof ApiError
+            ? `Traces ${e.status}: ${e.message}`
+            : `Traces error: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      })
+      .finally(() => setTracesLoading(false));
+  }, [tab, lessonId, traces]);
 
   if (loading) {
     return (
@@ -103,7 +128,7 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
 
   const tabs: Array<{ id: TabId; label: string; count?: number }> = [
     { id: 'story', label: 'Story' },
-    { id: 'traces', label: 'Traces' },
+    { id: 'traces', label: 'Traces', count: traces?.cases.length },
     { id: 'evals', label: 'Evals', count: rubricKeys.length },
     { id: 'diff', label: 'Diff', count: l.mutations.length },
     { id: 'decision', label: 'Decision' },
@@ -254,24 +279,131 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
       )}
 
       {tab === 'traces' && (
-        <div className="card card-pad">
-          <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>
-            Trace lineage not yet linked
-          </div>
-          <div className="dim" style={{ fontSize: 13, lineHeight: 1.6 }}>
-            Each lesson should carry the trace IDs that triggered the proposal and the trace IDs
-            it was validated against. The harness writes these into the ledger entry but doesn't
-            yet surface them on the lesson record. Coming in a future phase.
-          </div>
-          {l.ledger_entry_id && (
-            <div
-              className="dim mono"
-              style={{ fontSize: 12, marginTop: 12, fontFamily: 'var(--font-mono)' }}
-            >
-              Ledger entry: {l.ledger_entry_id}
+        <>
+          {tracesLoading && !traces && (
+            <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>Loading traces…</div>
+          )}
+          {traces && !traces.has_report && (
+            <div className="card card-pad">
+              <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>
+                Trace lineage not captured
+              </div>
+              <div className="dim" style={{ fontSize: 13, lineHeight: 1.6 }}>
+                {traces.note ||
+                  'No candidate report on disk for this lesson. Future lessons will carry full trace lineage.'}
+              </div>
+              {l.ledger_entry_id && (
+                <div
+                  className="dim"
+                  style={{ fontSize: 12, marginTop: 12, fontFamily: 'var(--font-mono)' }}
+                >
+                  Ledger entry: {l.ledger_entry_id}
+                </div>
+              )}
             </div>
           )}
-        </div>
+          {traces && traces.has_report && (
+            <>
+              <div className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
+                {traces.cases.length} cases from suite{' '}
+                <span className="mono">{traces.suite || '—'}</span>
+                {traces.agent_version && (
+                  <>
+                    {' '}
+                    · agent <span className="mono">{traces.agent_version}</span>
+                  </>
+                )}
+                {traces.candidate_id && (
+                  <>
+                    {' '}
+                    · candidate <span className="mono">{traces.candidate_id}</span>
+                  </>
+                )}
+              </div>
+              <div className="card">
+                <div
+                  style={{
+                    padding: '12px 16px',
+                    borderBottom: '1px solid var(--border)',
+                    fontSize: 12,
+                    color: 'var(--fg-muted)',
+                    display: 'grid',
+                    gridTemplateColumns: '90px 1fr 90px 80px',
+                    gap: 12,
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    fontWeight: 500,
+                  }}
+                >
+                  <div>Golden</div>
+                  <div>Request → response</div>
+                  <div>Rubrics</div>
+                  <div>Verdict</div>
+                </div>
+                {traces.cases.map((c, i) => {
+                  const passed = c.rubric_results.filter((r) => r.passed).length;
+                  const total = c.rubric_results.length;
+                  const allPassed = c.success && passed === total && total > 0;
+                  const respPreview = (c.response || c.error || '').slice(0, 120);
+                  return (
+                    <div
+                      key={c.trace_id || i}
+                      style={{
+                        padding: '12px 16px',
+                        borderBottom:
+                          i < traces.cases.length - 1 ? '1px solid var(--border)' : 'none',
+                        display: 'grid',
+                        gridTemplateColumns: '90px 1fr 90px 80px',
+                        gap: 12,
+                        alignItems: 'center',
+                        fontSize: 13,
+                      }}
+                    >
+                      <span className="mono dim" style={{ fontSize: 11.5 }}>
+                        {c.golden_id}
+                      </span>
+                      <div style={{ minWidth: 0 }}>
+                        <div
+                          style={{
+                            fontWeight: 500,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {c.request}
+                        </div>
+                        <div
+                          className="dim"
+                          style={{
+                            fontSize: 12,
+                            marginTop: 2,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {respPreview || '(no response)'}
+                        </div>
+                      </div>
+                      <span className="mono" style={{ fontSize: 12 }}>
+                        {passed}/{total}
+                      </span>
+                      <Tag kind={allPassed ? 'success' : 'bad'}>
+                        <span className="dot" /> {allPassed ? 'Passed' : 'Failed'}
+                      </Tag>
+                    </div>
+                  );
+                })}
+                {traces.cases.length === 0 && (
+                  <div className="empty" style={{ padding: 32 }}>
+                    Report exists but has no cases.
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+        </>
       )}
 
       {tab === 'evals' && (

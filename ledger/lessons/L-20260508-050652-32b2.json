@@ -1,0 +1,27 @@
+{
+  "id": "L-20260508-050652-32b2",
+  "kind": "rag",
+  "status": "awaiting_review",
+  "title": "Adjusted how much context I read per question",
+  "summary": "Queued for your review. Branched from v0.0.2; candidate didn't move evals much but didn't regress either.",
+  "proposal_source": "heuristic_sweep",
+  "delta": {
+    "overall_score": 0.0,
+    "pass_rate": 0.0,
+    "per_rubric": {
+      "keywords_match": 0.0,
+      "response_nonempty": 0.0,
+      "pipeline_succeeded": 0.0,
+      "under_budget": 0.0
+    }
+  },
+  "mutations": [
+    "pipeline/retrieve.yaml:knobs.k=14"
+  ],
+  "parent_version": "v0.0.2",
+  "candidate_id": "cand_20260508T050652_2c93",
+  "version": null,
+  "promoted_at": null,
+  "ledger_entry_id": "led_20260508T050652_7f8f7d",
+  "voice": "I noticed I was sometimes either missing useful context or getting distracted by less relevant retrieval. I adjusted how much I read per question. The eval barely moved, but I'm leaving it in for now to see how real traffic responds."
+}

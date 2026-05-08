@@ -19,6 +19,7 @@ from experiments.types import CandidateManifest
 
 BASELINE_AGENT = Path("agent/agent.yaml")
 RESULTS_DIR = Path("experiments/results")
+EVAL_REPORTS_DIR = Path("evals/reports")
 
 
 @dataclass
@@ -83,6 +84,10 @@ def run_candidate(
     baseline_report = run_suite(suite_path, agent_path=baseline_agent, write_report=False)
     candidate_report = run_suite(suite_path, agent_path=cand_yaml, write_report=False)
 
+    # Persist the candidate's full report so the UI Lesson view can recover the
+    # trace lineage later (lesson.candidate_id → cand_<id>.json → cases[].trace_id).
+    _persist_candidate_report(candidate_id, candidate_report)
+
     baseline_view = _summary_view(baseline_report.summary)
     candidate_view = _summary_view(candidate_report.summary)
     delta = _compute_delta(baseline_view, candidate_view)
@@ -102,6 +107,17 @@ def run_candidate(
         _append_result(result, results_dir)
 
     return result
+
+
+def _persist_candidate_report(
+    candidate_id: str, report: Any, reports_dir: Path | str = EVAL_REPORTS_DIR
+) -> Path:
+    out_dir = Path(reports_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"cand_{candidate_id}.json"
+    with path.open("w") as f:
+        json.dump(asdict(report), f, indent=2, default=str)
+    return path
 
 
 def _append_result(result: CandidateResult, results_dir: Path | str) -> Path:

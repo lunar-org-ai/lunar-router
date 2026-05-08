@@ -86,6 +86,7 @@ export interface LessonSummary {
   delta: { overall_score?: number; pass_rate?: number; per_rubric?: Record<string, number> };
   mutations: string[];
   parent_version: string | null;
+  candidate_id: string | null;
   promoted_at: string | null;
   ledger_entry_id: string | null;
   proposal_source: string | null;
@@ -196,6 +197,44 @@ export async function rejectLesson(
     throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
   }
   return (await res.json()) as LessonSummary;
+}
+
+export interface RubricResult {
+  rubric: string;
+  type: string;
+  score: number;
+  passed: boolean;
+  detail: string | null;
+}
+
+export interface LessonTraceCase {
+  golden_id: string;
+  request: string;
+  response: string | null;
+  duration_ms: number | null;
+  success: boolean;
+  error: string | null;
+  trace_id: string | null;
+  rubric_results: RubricResult[];
+}
+
+export interface LessonTracesResponse {
+  lesson_id: string;
+  candidate_id: string | null;
+  suite: string | null;
+  agent_version: string | null;
+  has_report: boolean;
+  note: string | null;
+  cases: LessonTraceCase[];
+}
+
+export async function getLessonTraces(id: string): Promise<LessonTracesResponse> {
+  const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}/traces`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonTracesResponse;
 }
 
 export async function requeueLesson(id: string): Promise<LessonSummary> {

@@ -16,6 +16,7 @@ Endpoints:
   POST /lessons/{id}/approve           — approve a queued review lesson + promote.
   POST /lessons/{id}/reject            — reject a queued review lesson.
   POST /lessons/{id}/requeue           — undo an approve/reject; back to queue.
+  GET  /lessons/{id}/traces            — eval cases the candidate ran through.
   GET  /metrics/overview               — derived dashboard metrics.
 """
 
@@ -185,6 +186,7 @@ class LessonSummary(BaseModel):
     delta: dict[str, Any] = {}
     mutations: list[str] = []
     parent_version: Optional[str] = None
+    candidate_id: Optional[str] = None
     promoted_at: Optional[str] = None
     ledger_entry_id: Optional[str] = None
     proposal_source: Optional[str] = None
@@ -202,6 +204,7 @@ def _lesson_to_summary(lesson: Any) -> "LessonSummary":
         delta=lesson.delta,
         mutations=lesson.mutations,
         parent_version=lesson.parent_version,
+        candidate_id=lesson.candidate_id or None,
         promoted_at=lesson.promoted_at,
         ledger_entry_id=lesson.ledger_entry_id,
         proposal_source=lesson.proposal_source,
@@ -356,6 +359,89 @@ async def requeue_lesson(lesson_id: str) -> LessonSummary:
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     return _lesson_to_summary(lesson)
+
+
+class LessonTraceCase(BaseModel):
+    golden_id: str
+    request: str
+    response: Optional[str] = None
+    duration_ms: Optional[float] = None
+    success: bool = False
+    error: Optional[str] = None
+    trace_id: Optional[str] = None
+    rubric_results: list[dict[str, Any]] = []
+
+
+class LessonTracesResponse(BaseModel):
+    lesson_id: str
+    candidate_id: Optional[str] = None
+    suite: Optional[str] = None
+    agent_version: Optional[str] = None
+    has_report: bool = False
+    note: Optional[str] = None
+    cases: list[LessonTraceCase] = []
+
+
+@app.get("/lessons/{lesson_id}/traces", response_model=LessonTracesResponse)
+async def get_lesson_traces(lesson_id: str) -> LessonTracesResponse:
+    """Return the eval cases (request/response + rubric verdicts) the
+    candidate ran through. Source: evals/reports/cand_<candidate_id>.json,
+    persisted by experiments.runner since P12.1.
+
+    Lessons promoted before P12.1 have no persisted report — we return
+    has_report=false with a note so the UI can render an honest empty state.
+    """
+    import json
+    from pathlib import Path
+
+    from ledger.writer import read_lesson
+
+    lesson = read_lesson(lesson_id)
+    if lesson is None:
+        raise HTTPException(status_code=404, detail=f"unknown lesson {lesson_id!r}")
+
+    cand_id = lesson.candidate_id or ""
+    project_root = Path(__file__).resolve().parent.parent
+    report_path = project_root / "evals" / "reports" / f"cand_{cand_id}.json"
+
+    if not cand_id or not report_path.exists():
+        return LessonTracesResponse(
+            lesson_id=lesson_id,
+            candidate_id=cand_id or None,
+            has_report=False,
+            note=(
+                "No candidate report on disk for this lesson — this lesson predates "
+                "candidate-report persistence. Run a fresh sweep to capture lineage on "
+                "future lessons."
+            ),
+            cases=[],
+        )
+
+    with report_path.open() as f:
+        report = json.load(f)
+
+    cases = [
+        LessonTraceCase(
+            golden_id=c.get("golden_id", ""),
+            request=c.get("request", ""),
+            response=c.get("response"),
+            duration_ms=c.get("duration_ms"),
+            success=bool(c.get("success", False)),
+            error=c.get("error"),
+            trace_id=c.get("trace_id"),
+            rubric_results=c.get("rubric_results", []),
+        )
+        for c in report.get("cases", [])
+    ]
+
+    return LessonTracesResponse(
+        lesson_id=lesson_id,
+        candidate_id=cand_id,
+        suite=report.get("suite"),
+        agent_version=report.get("agent_version"),
+        has_report=True,
+        cases=cases,
+    )
 
 
 class RollbackRequest(BaseModel):
