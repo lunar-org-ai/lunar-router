@@ -36,6 +36,7 @@ import { Versions } from './screens/Versions';
 import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
+import { TracesLive } from './screens/TracesLive';
 import { ChatAssistantUi } from './screens/chat-assistant-ui';
 import { ChatCopilotKit } from './screens/chat-copilot-kit';
 
@@ -107,6 +108,12 @@ const tracesRoute = createRoute({
   component: Traces,
 });
 
+const tracesLiveRoute = createRoute({
+  getParentRoute: () => technicalLayoutRoute,
+  path: 'traces/live',
+  component: TracesLive,
+});
+
 const evalsRoute = createRoute({
   getParentRoute: () => technicalLayoutRoute,
   path: 'evals',
@@ -150,7 +157,13 @@ const routeTree = rootRoute.addChildren([
   versionsRoute,
   talkRoute,
   policiesRoute,
-  technicalLayoutRoute.addChildren([tracesRoute, evalsRoute, routerConfigRoute, datasetsRoute]),
+  technicalLayoutRoute.addChildren([
+    tracesRoute,
+    tracesLiveRoute,
+    evalsRoute,
+    routerConfigRoute,
+    datasetsRoute,
+  ]),
   labLayoutRoute.addChildren([labAssistantUiRoute, labCopilotKitRoute]),
 ]);
 

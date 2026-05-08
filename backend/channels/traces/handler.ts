@@ -2,6 +2,7 @@
  * Traces channel — proxy to runtime /traces.
  *
  *  GET /v1/traces                 → paginated trace feed
+ *  GET /v1/traces/stream          → SSE live feed (proxied 1:1 from runtime)
  *  GET /v1/traces/:trace_id       → single trace with stages
  *
  * Query params on the list endpoint pass through verbatim:
@@ -14,6 +15,32 @@ const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 15_000
 
 export const tracesRouter = new Hono()
+
+// SSE proxy. Must be registered BEFORE the /:id route so the literal path
+// wins. No client-side timeout — the connection is long-lived. The upstream
+// fetch is cancelled when the downstream client disconnects.
+tracesRouter.get('/stream', async (c) => {
+  const upstream = await fetch(`${RUNTIME_URL}/traces/stream`, {
+    headers: { Accept: 'text/event-stream' },
+    signal: c.req.raw.signal,
+  })
+  if (!upstream.ok || !upstream.body) {
+    const text = upstream.body ? await upstream.text().catch(() => '') : ''
+    return c.json(
+      { error: 'runtime error', detail: `${upstream.status}: ${text.slice(0, 200)}` },
+      502,
+    )
+  }
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  })
+})
 
 tracesRouter.get('/', async (c) => {
   const qs = c.req.url.split('?')[1] ?? ''

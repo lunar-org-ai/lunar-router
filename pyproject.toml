@@ -10,12 +10,17 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "mcp>=1.0.0",
     "anthropic>=0.40",
+    "duckdb>=1.1",
 ]
 
 [project.optional-dependencies]
 llm = ["anthropic>=0.40"]
 rag = ["faiss-cpu>=1.8", "numpy>=1.26"]
 dev = ["pytest>=8.0", "ruff>=0.5"]
+# Only needed to run infra/restate/serve.py (the daily compactor scheduler).
+# Stays out of the default dependency set so the runtime + harness don't pull
+# in a Restate dep they never import.
+infra = ["restate-sdk>=0.7", "hypercorn>=0.16"]
 
 [build-system]
 requires = ["hatchling"]

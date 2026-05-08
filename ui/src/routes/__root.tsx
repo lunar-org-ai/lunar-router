@@ -41,7 +41,12 @@ interface NavItem {
 }
 
 interface TechNavItem {
-  to: '/technical/traces' | '/technical/evals' | '/technical/router' | '/technical/datasets';
+  to:
+    | '/technical/traces'
+    | '/technical/traces/live'
+    | '/technical/evals'
+    | '/technical/router'
+    | '/technical/datasets';
   label: string;
   icon: IconName;
 }
@@ -62,6 +67,7 @@ const NAV: NavItem[] = [
 
 const TECH_NAV: TechNavItem[] = [
   { to: '/technical/traces', label: 'Traces', icon: 'timeline' },
+  { to: '/technical/traces/live', label: 'Traces · Live', icon: 'timeline' },
   { to: '/technical/evals', label: 'Eval suites', icon: 'flask' },
   { to: '/technical/router', label: 'Router config', icon: 'route' },
   { to: '/technical/datasets', label: 'Datasets', icon: 'book' },
@@ -85,6 +91,7 @@ const ROUTE_LABEL: Record<string, string> = {
   '/talk': 'Talk to agent',
   '/policies': 'Policies',
   '/technical/traces': 'Traces',
+  '/technical/traces/live': 'Traces · Live',
   '/technical/evals': 'Eval suites',
   '/technical/router': 'Router config',
   '/technical/datasets': 'Datasets',
