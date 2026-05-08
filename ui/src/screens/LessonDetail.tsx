@@ -126,9 +126,10 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
   const overall = l.delta?.overall_score;
   const passRate = l.delta?.pass_rate;
 
+  const traceCount = traces?.cases.length ?? l.n_traces ?? undefined;
   const tabs: Array<{ id: TabId; label: string; count?: number }> = [
     { id: 'story', label: 'Story' },
-    { id: 'traces', label: 'Traces', count: traces?.cases.length },
+    { id: 'traces', label: 'Traces', count: traceCount },
     { id: 'evals', label: 'Evals', count: rubricKeys.length },
     { id: 'diff', label: 'Diff', count: l.mutations.length },
     { id: 'decision', label: 'Decision' },
