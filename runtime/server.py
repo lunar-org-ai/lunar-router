@@ -777,6 +777,7 @@ class TraceSummary(BaseModel):
     error: Optional[str] = None
     agent_version: Optional[str] = None
     n_stages: int = 0
+    routing_model: Optional[str] = None  # picked off the route stage
 
 
 class TracesPage(BaseModel):
@@ -813,6 +814,12 @@ def _load_traces_for_date(date: str) -> list[dict[str, Any]]:
 
 
 def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
+    stages = t.get("stages") or []
+    routing_model: Optional[str] = None
+    for s in stages:
+        if s.get("stage") == "route" and s.get("routing_model"):
+            routing_model = s["routing_model"]
+            break
     return TraceSummary(
         trace_id=t.get("trace_id", ""),
         timestamp=t.get("timestamp", ""),
@@ -822,7 +829,8 @@ def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
         success=bool(t.get("success", False)),
         error=t.get("error"),
         agent_version=t.get("agent_version"),
-        n_stages=len(t.get("stages") or []),
+        n_stages=len(stages),
+        routing_model=routing_model,
     )
 
 

@@ -40,18 +40,30 @@ const useAutoToast = (toast: string | null, setToast: (v: string | null) => void
 };
 
 // ============================================================================
-// Traces  — wired to real backend (P15.1)
+// Traces — wired to real backend, design-faithful (P15.1 + remix)
 // ============================================================================
 //
-// Source: traces/raw/<YYYY-MM-DD>.jsonl files surfaced by the runtime as a
-// paginated feed (GET /v1/traces). Each row is one pipeline run; the drawer
-// shows the per-stage breakdown (retrieve / rerank / route / generate).
+// Layout follows the "OpenTracy Evolution" design's Technical.jsx:
+//   - Trace row: id + when + channel · verdict dot + excerpt · model · cost
+//   - Drawer:
+//       header   id mono / preview h2 / meta strip
+//       tabs     Transcript / Evals / Metadata
+//       footer   pin / flag / copy
 //
-// Filters (date / success / agent_version / search) round-trip to the
-// backend — no client-side filtering, so the count is honest. Pagination is
-// offset-based; we keep page state local and refetch when filters change.
+// Real data we DO have today:
+//   trace_id, timestamp, request, response, duration_ms, success, error,
+//   agent_version, stages[] (incl. routing_model on the route stage).
+//
+// Real data we DON'T have yet (rendered as "—" and labeled honestly when
+// inspected, no fabrication):
+//   channel       — only the webhook adapter exists, so always "webhook"
+//   cost / tokens — no real cost tracking until P1.9 (real LLM)
+//   turns         — 1 per trace today; real conversations need session join
+//   evals         — evals run against candidates, not production traces
+//   flagReason    — no flag concept persisted yet (button is local-state)
 
 const PAGE_SIZE = 50;
+type Verdict = 'pass' | 'fail';
 
 const fmtDuration = (ms: number): string => {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
@@ -82,19 +94,46 @@ const fmtRelative = (iso: string): string => {
   }
 };
 
+const verdictOf = (t: TraceSummary): Verdict =>
+  t.success && !t.error ? 'pass' : 'fail';
+
+const excerptOf = (t: TraceSummary): string => {
+  if (t.request) return t.request;
+  if (t.response) return t.response.slice(0, 80);
+  if (t.error) return `error: ${t.error}`;
+  return '(empty)';
+};
+
+// Single-turn traces today — request becomes the customer line, response
+// the agent line. When we add session/conversation grouping, this becomes
+// the real conversation thread.
+const buildTranscript = (t: TraceDetail): { role: 'user' | 'agent'; text: string }[] => {
+  const out: { role: 'user' | 'agent'; text: string }[] = [];
+  out.push({ role: 'user', text: t.request || '(empty request)' });
+  if (t.response) {
+    out.push({ role: 'agent', text: t.response });
+  } else if (t.error) {
+    out.push({ role: 'agent', text: `[error] ${t.error}` });
+  }
+  return out;
+};
+
 export const Traces = () => {
   const [page, setPage] = useState<TracesPage | null>(null);
   const [date, setDate] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | 'pass' | 'fail'>('all');
+  const [filter, setFilter] = useState<'all' | Verdict>('all');
   const [versionFilter, setVersionFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
   const [offset, setOffset] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<Record<string, boolean>>({});
+  const [toast, setToast] = useState<string | null>(null);
+  useAutoToast(toast, setToast);
 
-  // Debounce search to avoid hammering the backend on every keystroke.
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(t);
@@ -104,10 +143,7 @@ export const Traces = () => {
     setLoading(true);
     setError(null);
     try {
-      const opts: Parameters<typeof listTraces>[0] = {
-        limit: PAGE_SIZE,
-        offset,
-      };
+      const opts: Parameters<typeof listTraces>[0] = { limit: PAGE_SIZE, offset };
       if (date) opts.date = date;
       if (filter === 'pass') opts.success = true;
       else if (filter === 'fail') opts.success = false;
@@ -115,7 +151,6 @@ export const Traces = () => {
       if (debouncedSearch) opts.q = debouncedSearch;
       const p = await listTraces(opts);
       setPage(p);
-      // sync date if backend chose a default
       if (!date && p.date) setDate(p.date);
     } catch (e) {
       setError(
@@ -132,7 +167,6 @@ export const Traces = () => {
     void load();
   }, [load]);
 
-  // Reset offset when filters change.
   useEffect(() => {
     setOffset(0);
   }, [date, filter, versionFilter, debouncedSearch]);
@@ -146,6 +180,27 @@ export const Traces = () => {
     return ['all', ...Array.from(versions).sort()];
   }, [page]);
 
+  const togglePin = (id: string) => {
+    setPinned((p) => {
+      const next = { ...p, [id]: !p[id] };
+      setToast(next[id] ? 'Pinned for the agent to learn from.' : 'Unpinned.');
+      return next;
+    });
+  };
+
+  const flagAsFail = (id: string) => {
+    setToast(`Flagged ${id.slice(0, 12)}…  (UI state only — flag persistence not wired yet)`);
+  };
+
+  const counts = useMemo(() => {
+    if (!page) return { all: 0, pass: 0, fail: 0 };
+    return {
+      all: page.total_filtered,
+      pass: page.items.filter((t) => verdictOf(t) === 'pass').length,
+      fail: page.items.filter((t) => verdictOf(t) === 'fail').length,
+    };
+  }, [page]);
+
   const showing = page?.items.length ?? 0;
   const total = page?.total_filtered ?? 0;
   const startIdx = total === 0 ? 0 : offset + 1;
@@ -155,8 +210,7 @@ export const Traces = () => {
     <div className="content">
       <h1 className="page-title">Traces</h1>
       <p className="page-sub">
-        Every pipeline run, raw. Click a row to inspect stages, retrieved docs, and routing
-        decisions.
+        Every conversation the agent has had. Filter, flag, or pin one for the agent to learn from.
       </p>
 
       {error && (
@@ -169,60 +223,30 @@ export const Traces = () => {
 
       <div className="trace-toolbar">
         <div className="filter-pills">
-          {(['all', 'pass', 'fail'] as const).map((f) => (
+          {(
+            [
+              ['all', 'All', counts.all],
+              ['pass', 'Passed', counts.pass],
+              ['fail', 'Failed', counts.fail],
+            ] as const
+          ).map(([id, label, n]) => (
             <button
-              key={f}
-              className={`pill ${filter === f ? 'on' : ''}`}
-              onClick={() => setFilter(f)}
+              key={id}
+              className={`pill ${filter === id ? 'on' : ''}`}
+              onClick={() => setFilter(id as 'all' | Verdict)}
             >
-              {f === 'all' ? 'All' : f === 'pass' ? 'Successful' : 'Failed'}
+              {label}{' '}
+              <span className="dim mono" style={{ fontSize: 11 }}>
+                {n}
+              </span>
             </button>
           ))}
         </div>
-        <div className="trace-toolbar-right" style={{ gap: 8 }}>
-          {page && page.available_dates.length > 1 && (
-            <select
-              value={date || page.date}
-              onChange={(e) => setDate(e.target.value)}
-              style={{
-                padding: '6px 10px',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                background: 'var(--bg)',
-                fontSize: 12.5,
-              }}
-            >
-              {page.available_dates.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          )}
-          {versionOptions.length > 1 && (
-            <select
-              value={versionFilter}
-              onChange={(e) => setVersionFilter(e.target.value)}
-              style={{
-                padding: '6px 10px',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                background: 'var(--bg)',
-                fontSize: 12.5,
-                fontFamily: 'var(--font-mono)',
-              }}
-            >
-              {versionOptions.map((v) => (
-                <option key={v} value={v}>
-                  {v === 'all' ? 'all versions' : v}
-                </option>
-              ))}
-            </select>
-          )}
+        <div className="trace-toolbar-right">
           <div className="search-input">
             <Icon name="search" size={13} />
             <input
-              placeholder="Search request / response…"
+              placeholder="Search excerpt or trace id…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -232,149 +256,206 @@ export const Traces = () => {
               </button>
             )}
           </div>
-          <button
-            className="btn sm ghost"
-            onClick={() => {
-              setFilter('all');
-              setVersionFilter('all');
-              setSearch('');
-            }}
-            disabled={filter === 'all' && versionFilter === 'all' && !search}
-          >
-            Reset
-          </button>
+          <div style={{ position: 'relative' }}>
+            <button
+              className={`btn sm ${
+                showFilters || versionFilter !== 'all' || (page && date && date !== page.available_dates[0])
+                  ? ''
+                  : 'ghost'
+              }`}
+              onClick={() => setShowFilters((s) => !s)}
+            >
+              <Icon name="sliders" size={12} /> Filters
+              {(versionFilter !== 'all' ||
+                (page && date && date !== page.available_dates[0])) && (
+                <span className="filter-dot" />
+              )}
+            </button>
+            {showFilters && (
+              <>
+                <div className="popover-backdrop" onClick={() => setShowFilters(false)} />
+                <div className="popover">
+                  {page && page.available_dates.length > 1 && (
+                    <div className="popover-section">
+                      <div className="popover-label">Date</div>
+                      <div className="popover-options">
+                        {page.available_dates.map((d) => (
+                          <button
+                            key={d}
+                            className={`pill sm ${date === d ? 'on' : ''}`}
+                            onClick={() => setDate(d)}
+                          >
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {versionOptions.length > 1 && (
+                    <div className="popover-section">
+                      <div className="popover-label">Agent version</div>
+                      <div className="popover-options">
+                        {versionOptions.map((v) => (
+                          <button
+                            key={v}
+                            className={`pill sm ${versionFilter === v ? 'on' : ''}`}
+                            onClick={() => setVersionFilter(v)}
+                          >
+                            {v === 'all' ? 'Any' : v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div className="popover-section">
+                    <div className="popover-label">Channel</div>
+                    <div className="popover-options">
+                      <button className="pill sm on">Any</button>
+                      <button className="pill sm" disabled title="Only webhook adapter exists today">
+                        webhook
+                      </button>
+                    </div>
+                  </div>
+                  <div className="popover-foot">
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => {
+                        setVersionFilter('all');
+                        setSearch('');
+                        setFilter('all');
+                        setShowFilters(false);
+                      }}
+                    >
+                      Reset all
+                    </button>
+                    <button className="btn sm" onClick={() => setShowFilters(false)}>
+                      Done
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
 
       {loading && !page && (
-        <div className="dim" style={{ padding: 32, fontSize: 13 }}>
-          Loading traces…
-        </div>
+        <div className="dim" style={{ padding: 32, fontSize: 13 }}>Loading traces…</div>
       )}
 
       {page && (
-        <>
-          <div className="card">
-            <div
-              style={{
-                padding: '12px 16px',
-                borderBottom: '1px solid var(--border)',
-                fontSize: 12,
-                color: 'var(--fg-muted)',
-                display: 'grid',
-                gridTemplateColumns: '110px 1fr 1fr 90px 80px 80px',
-                gap: 16,
-                textTransform: 'uppercase',
-                letterSpacing: '0.05em',
-                fontWeight: 500,
-              }}
-            >
-              <div>Time</div>
-              <div>Request</div>
-              <div>Response</div>
-              <div>Version</div>
-              <div>Latency</div>
-              <div>Status</div>
-            </div>
-            {page.items.length === 0 ? (
-              <div className="empty-state" style={{ padding: 48 }}>
-                <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
-                  No traces match the current filters for {page.date || 'this date'}.
-                </div>
+        <div className="card">
+          <div className="trace-head">
+            <div>Trace</div>
+            <div>Excerpt</div>
+            <div>Model</div>
+            <div>Cost</div>
+            <div></div>
+          </div>
+          {page.items.length === 0 ? (
+            <div className="empty-state">
+              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+                No traces match those filters.
               </div>
-            ) : (
-              page.items.map((t: TraceSummary) => (
-                <div
-                  key={t.trace_id}
-                  className="trace-row"
-                  onClick={() => setOpenId(t.trace_id)}
-                  style={{
-                    display: 'grid',
-                    gridTemplateColumns: '110px 1fr 1fr 90px 80px 80px',
-                    gap: 16,
-                    padding: '12px 16px',
-                    borderBottom: '1px solid var(--border)',
-                    cursor: 'pointer',
-                    alignItems: 'center',
-                    fontSize: 13,
-                  }}
-                >
-                  <div>
-                    <div className="mono" style={{ fontSize: 12 }}>
-                      {fmtTimeOfDay(t.timestamp)}
-                    </div>
-                    <div className="dim" style={{ fontSize: 11 }}>
-                      {fmtRelative(t.timestamp)}
-                    </div>
-                  </div>
-                  <div
-                    style={{
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
-                    title={t.request}
-                  >
-                    {t.request || <span className="dim">(empty)</span>}
-                  </div>
-                  <div
-                    className="dim"
-                    style={{
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      fontSize: 12.5,
-                    }}
-                    title={t.response || ''}
-                  >
-                    {t.response || (t.error ? <span style={{ color: 'var(--bad-fg)' }}>{t.error}</span> : '—')}
-                  </div>
-                  <span className="mono dim" style={{ fontSize: 11.5 }}>
-                    {t.agent_version || '—'}
-                  </span>
-                  <span className="mono" style={{ fontSize: 12 }}>
-                    {fmtDuration(t.duration_ms)}
-                  </span>
-                  <Tag kind={t.success ? 'success' : 'bad'}>
-                    <span className="dot" /> {t.success ? 'ok' : 'fail'}
-                  </Tag>
-                </div>
-              ))
-            )}
-          </div>
-
-          <div className="trace-foot" style={{ marginTop: 12 }}>
-            <span className="dim">
-              {total === 0
-                ? '0 traces'
-                : `Showing ${startIdx}–${endIdx} of ${total} traces`}
-            </span>
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
               <button
                 className="btn sm ghost"
-                onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
-                disabled={offset === 0 || loading}
+                style={{ marginTop: 12 }}
+                onClick={() => {
+                  setFilter('all');
+                  setVersionFilter('all');
+                  setSearch('');
+                }}
               >
-                ← Previous
-              </button>
-              <button
-                className="btn sm ghost"
-                onClick={() => setOffset(offset + PAGE_SIZE)}
-                disabled={!page.has_more || loading}
-              >
-                Next →
+                Clear filters
               </button>
             </div>
-          </div>
-        </>
+          ) : (
+            page.items.map((t) => {
+              const v = verdictOf(t);
+              return (
+                <div
+                  className="trace-row clickable"
+                  key={t.trace_id}
+                  onClick={() => setOpenId(t.trace_id)}
+                >
+                  <div className="cell-trace">
+                    <div className="id-row">
+                      <span className="id">{t.trace_id.slice(0, 8)}…</span>
+                      {pinned[t.trace_id] && <Icon name="pin" size={11} />}
+                    </div>
+                    <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
+                      {fmtRelative(t.timestamp)} · webhook
+                    </div>
+                  </div>
+                  <div className="cell-excerpt">
+                    <Tag kind={v === 'pass' ? 'success' : 'bad'}>
+                      <span className="dot" />
+                    </Tag>
+                    <span className="preview">{excerptOf(t)}</span>
+                  </div>
+                  <span className="mono dim cell-model">
+                    {t.routing_model || '—'}
+                  </span>
+                  <span className="mono dim cell-cost">—</span>
+                  <Icon name="chevron" size={12} />
+                </div>
+              );
+            })
+          )}
+        </div>
       )}
 
-      {openId && <TraceDrawer traceId={openId} onClose={() => setOpenId(null)} />}
+      <div className="trace-foot">
+        <span className="dim">
+          {total === 0 ? '0 traces' : `Showing ${startIdx}–${endIdx} of ${total} traces`}
+        </span>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+          <button
+            className="btn sm ghost"
+            onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            disabled={offset === 0 || loading}
+          >
+            ← Previous
+          </button>
+          <button
+            className="btn sm ghost"
+            onClick={() => setOffset(offset + PAGE_SIZE)}
+            disabled={!page?.has_more || loading}
+          >
+            Next →
+          </button>
+        </div>
+      </div>
+
+      {openId && (
+        <TraceDrawer
+          traceId={openId}
+          pinned={!!pinned[openId]}
+          onClose={() => setOpenId(null)}
+          onTogglePin={() => togglePin(openId)}
+          onFlag={() => flagAsFail(openId)}
+        />
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 };
 
-const TraceDrawer = ({ traceId, onClose }: { traceId: string; onClose: () => void }) => {
+const TraceDrawer = ({
+  traceId,
+  pinned,
+  onClose,
+  onTogglePin,
+  onFlag,
+}: {
+  traceId: string;
+  pinned: boolean;
+  onClose: () => void;
+  onTogglePin: () => void;
+  onFlag: () => void;
+}) => {
+  const [tab, setTab] = useState<'transcript' | 'stages' | 'evals' | 'meta'>('transcript');
   const [trace, setTrace] = useState<TraceDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -405,29 +486,55 @@ const TraceDrawer = ({ traceId, onClose }: { traceId: string; onClose: () => voi
     };
   }, [traceId]);
 
+  const transcript = trace ? buildTranscript(trace) : [];
+  const routingModel = trace?.stages.find((s) => s.stage === 'route')?.routing_model || null;
+  const verdict: Verdict = trace ? (trace.success && !trace.error ? 'pass' : 'fail') : 'pass';
+
+  const copyJson = async () => {
+    if (!trace) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(trace, null, 2));
+    } catch {
+      /* ignore */
+    }
+  };
+
   return (
     <>
       <div className="sheet-backdrop" onClick={onClose} />
       <div className="sheet trace-sheet">
         <div className="sheet-head">
           <div style={{ flex: 1 }}>
-            <div
-              className="dim"
-              style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em' }}
-            >
-              Trace · {trace?.agent_version || '—'}
-            </div>
-            <h2 className="mono" style={{ marginTop: 4, fontSize: 16 }}>
+            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
               {traceId}
-            </h2>
+            </div>
+            <h2 style={{ marginTop: 2 }}>{trace ? excerptOf(trace) : 'Loading…'}</h2>
             {trace && (
-              <div className="dim" style={{ fontSize: 12.5, marginTop: 6 }}>
-                {fmtTimeOfDay(trace.timestamp)} · {fmtDuration(trace.duration_ms)} ·{' '}
-                {trace.success ? (
-                  <span style={{ color: 'var(--accent-fg)' }}>success</span>
-                ) : (
-                  <span style={{ color: 'var(--bad-fg)' }}>failed</span>
-                )}
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 14,
+                  marginTop: 8,
+                  fontSize: 12,
+                  color: 'var(--fg-muted)',
+                  flexWrap: 'wrap',
+                }}
+              >
+                <span>{fmtTimeOfDay(trace.timestamp)}</span>
+                <span>·</span>
+                <span>webhook</span>
+                <span>·</span>
+                <span className="mono">{routingModel || '—'}</span>
+                <span>·</span>
+                <span>1 turn</span>
+                <span>·</span>
+                <span className="mono">— tok</span>
+                <span>·</span>
+                <span className="mono">— cost</span>
+                <span>·</span>
+                <span className="mono">{fmtDuration(trace.duration_ms)}</span>
+                <span>·</span>
+                <span className="mono">{trace.agent_version || '—'}</span>
               </div>
             )}
           </div>
@@ -436,185 +543,240 @@ const TraceDrawer = ({ traceId, onClose }: { traceId: string; onClose: () => voi
           </button>
         </div>
 
-        {loading && (
-          <div className="sheet-body">
-            <div className="dim" style={{ fontSize: 13, padding: 24 }}>Loading…</div>
-          </div>
-        )}
         {error && (
           <div className="sheet-body">
-            <div style={{ color: 'var(--bad-fg)', fontSize: 13, padding: 24 }}>{error}</div>
+            <div style={{ color: 'var(--bad-fg)', fontSize: 13, padding: 16 }}>{error}</div>
           </div>
         )}
-        {trace && !loading && (
-          <div className="sheet-body">
-            <div className="sheet-section">
-              <h3>Request</h3>
-              <div
-                style={{
-                  padding: '12px 14px',
-                  background: 'var(--bg-muted)',
-                  borderRadius: 8,
-                  fontSize: 13.5,
-                  lineHeight: 1.55,
-                  whiteSpace: 'pre-wrap',
-                }}
-              >
-                {trace.request || <span className="dim">(empty request)</span>}
+
+        {trace && (
+          <>
+            {trace.error && (
+              <div className="flag-banner">
+                <Icon name="flag" size={12} />
+                <span>
+                  <b>Pipeline error:</b> {trace.error}
+                </span>
               </div>
+            )}
+            <div className="sheet-tabs">
+              <button
+                className={`tab ${tab === 'transcript' ? 'active' : ''}`}
+                onClick={() => setTab('transcript')}
+              >
+                Transcript
+              </button>
+              <button
+                className={`tab ${tab === 'stages' ? 'active' : ''}`}
+                onClick={() => setTab('stages')}
+              >
+                Stages{' '}
+                <span className="dim mono" style={{ fontSize: 11 }}>
+                  {trace.stages.length}
+                </span>
+              </button>
+              <button
+                className={`tab ${tab === 'evals' ? 'active' : ''}`}
+                onClick={() => setTab('evals')}
+              >
+                Evals{' '}
+                <span className="dim mono" style={{ fontSize: 11 }}>
+                  0
+                </span>
+              </button>
+              <button
+                className={`tab ${tab === 'meta' ? 'active' : ''}`}
+                onClick={() => setTab('meta')}
+              >
+                Metadata
+              </button>
             </div>
 
-            <div className="sheet-section">
-              <h3>Response</h3>
-              {trace.response ? (
-                <div
-                  style={{
-                    padding: '12px 14px',
-                    background: 'var(--bg-muted)',
-                    borderRadius: 8,
-                    fontSize: 13.5,
-                    lineHeight: 1.55,
-                    whiteSpace: 'pre-wrap',
-                  }}
-                >
-                  {trace.response}
+            <div className="sheet-body">
+              {tab === 'transcript' && (
+                <div className="transcript">
+                  {transcript.map((m, i) => (
+                    <div key={i} className={`msg msg-${m.role}`}>
+                      <div className="msg-role">{m.role === 'agent' ? 'Agent' : 'Customer'}</div>
+                      <div className="msg-body">{m.text}</div>
+                    </div>
+                  ))}
+                  {trace.success && transcript.length === 1 && (
+                    <div className="dim" style={{ fontSize: 12, marginTop: 12, lineHeight: 1.5 }}>
+                      Single-turn trace — the pipeline returned no response. Check the Stages tab
+                      for the per-stage breakdown.
+                    </div>
+                  )}
                 </div>
-              ) : (
-                <div
-                  className="dim"
-                  style={{
-                    padding: '12px 14px',
-                    background: 'var(--bg-muted)',
-                    borderRadius: 8,
-                    fontSize: 13,
-                  }}
-                >
-                  No response —{' '}
-                  {trace.error ? (
-                    <span style={{ color: 'var(--bad-fg)' }}>{trace.error}</span>
-                  ) : (
-                    'pipeline did not produce output'
+              )}
+
+              {tab === 'stages' && (
+                trace.stages.length === 0 ? (
+                  <div className="dim" style={{ fontSize: 13, padding: '20px 0' }}>
+                    No stages recorded.
+                  </div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {trace.stages.map((s, i) => {
+                      const failed = !!s.error;
+                      return (
+                        <div
+                          key={i}
+                          className="card card-pad"
+                          style={{
+                            padding: '12px 14px',
+                            borderColor: failed ? 'var(--bad)' : undefined,
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 10,
+                              marginBottom: 6,
+                            }}
+                          >
+                            <span className="mono dim" style={{ fontSize: 11, width: 18 }}>
+                              {i + 1}.
+                            </span>
+                            <span style={{ fontWeight: 500, fontSize: 13.5 }}>
+                              {s.stage || s.technique}
+                            </span>
+                            <span
+                              className="mono dim"
+                              style={{ fontSize: 11.5, marginLeft: 6 }}
+                            >
+                              {s.technique}/{s.variant}
+                            </span>
+                            <span className="mono" style={{ marginLeft: 'auto', fontSize: 12 }}>
+                              {fmtDuration(s.duration_ms)}
+                            </span>
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              gap: 12,
+                              fontSize: 12,
+                              color: 'var(--fg-muted)',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            {(s.docs_in > 0 || s.docs_out > 0) && (
+                              <span>
+                                docs <span className="mono">{s.docs_in}</span> →{' '}
+                                <span className="mono">{s.docs_out}</span>
+                              </span>
+                            )}
+                            {s.routing_model && (
+                              <span>
+                                routing →{' '}
+                                <span className="mono" style={{ color: 'var(--fg)' }}>
+                                  {s.routing_model}
+                                </span>
+                              </span>
+                            )}
+                            {s.response_set != null && (
+                              <span>response_set {String(s.response_set)}</span>
+                            )}
+                          </div>
+                          {failed && (
+                            <div
+                              style={{
+                                marginTop: 8,
+                                fontSize: 12.5,
+                                color: 'var(--bad-fg)',
+                                fontFamily: 'var(--font-mono)',
+                              }}
+                            >
+                              {s.error}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )
+              )}
+
+              {tab === 'evals' && (
+                <div className="dim" style={{ fontSize: 13, padding: '20px 0', lineHeight: 1.55 }}>
+                  Evals run on candidates, not production traces. Open this trace's lesson in the
+                  Evolution tab to see the eval cases that promoted the agent that handled it.
+                </div>
+              )}
+
+              {tab === 'meta' && (
+                <div className="meta-grid">
+                  <div className="meta-row">
+                    <div className="dim">Trace ID</div>
+                    <div className="mono">{trace.trace_id}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Timestamp</div>
+                    <div className="mono">{trace.timestamp}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Channel</div>
+                    <div>webhook</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Routing model</div>
+                    <div className="mono">{routingModel || '—'}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Duration</div>
+                    <div className="mono">{fmtDuration(trace.duration_ms)}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Stages</div>
+                    <div className="mono">{trace.stages.length}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Agent version</div>
+                    <div className="mono">{trace.agent_version || '—'}</div>
+                  </div>
+                  <div className="meta-row">
+                    <div className="dim">Verdict</div>
+                    <div>
+                      <Tag kind={verdict === 'pass' ? 'success' : 'bad'}>{verdict}</Tag>
+                    </div>
+                  </div>
+                  {Object.keys(trace.metadata || {}).length > 0 && (
+                    <div className="meta-row">
+                      <div className="dim">Metadata</div>
+                      <pre
+                        style={{
+                          margin: 0,
+                          fontFamily: 'var(--font-mono)',
+                          fontSize: 11.5,
+                          whiteSpace: 'pre-wrap',
+                        }}
+                      >
+                        {JSON.stringify(trace.metadata, null, 2)}
+                      </pre>
+                    </div>
                   )}
                 </div>
               )}
             </div>
 
-            <div className="sheet-section">
-              <h3>
-                Pipeline stages{' '}
-                <span className="dim mono" style={{ fontSize: 12, fontWeight: 400 }}>
-                  · {trace.stages.length}
-                </span>
-              </h3>
-              {trace.stages.length === 0 ? (
-                <div className="dim" style={{ fontSize: 13 }}>No stages recorded.</div>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {trace.stages.map((s, i) => {
-                    const failed = !!s.error;
-                    return (
-                      <div
-                        key={i}
-                        className="card card-pad"
-                        style={{
-                          padding: '12px 14px',
-                          borderColor: failed ? 'var(--bad)' : undefined,
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 10,
-                            marginBottom: 6,
-                          }}
-                        >
-                          <span
-                            className="mono dim"
-                            style={{ fontSize: 11, width: 18 }}
-                          >
-                            {i + 1}.
-                          </span>
-                          <span style={{ fontWeight: 500, fontSize: 13.5 }}>
-                            {s.stage || s.technique}
-                          </span>
-                          <span
-                            className="mono dim"
-                            style={{ fontSize: 11.5, marginLeft: 6 }}
-                          >
-                            {s.technique}/{s.variant}
-                          </span>
-                          <span
-                            className="mono"
-                            style={{ marginLeft: 'auto', fontSize: 12 }}
-                          >
-                            {fmtDuration(s.duration_ms)}
-                          </span>
-                        </div>
-                        <div
-                          style={{
-                            display: 'flex',
-                            gap: 12,
-                            fontSize: 12,
-                            color: 'var(--fg-muted)',
-                            flexWrap: 'wrap',
-                          }}
-                        >
-                          {(s.docs_in > 0 || s.docs_out > 0) && (
-                            <span>
-                              docs <span className="mono">{s.docs_in}</span> →{' '}
-                              <span className="mono">{s.docs_out}</span>
-                            </span>
-                          )}
-                          {s.routing_model && (
-                            <span>
-                              routing →{' '}
-                              <span className="mono" style={{ color: 'var(--fg)' }}>
-                                {s.routing_model}
-                              </span>
-                            </span>
-                          )}
-                          {s.response_set != null && (
-                            <span>response_set {String(s.response_set)}</span>
-                          )}
-                        </div>
-                        {failed && (
-                          <div
-                            style={{
-                              marginTop: 8,
-                              fontSize: 12.5,
-                              color: 'var(--bad-fg)',
-                              fontFamily: 'var(--font-mono)',
-                            }}
-                          >
-                            {s.error}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+            <div className="sheet-foot">
+              <button className={`btn sm ${pinned ? '' : 'ghost'}`} onClick={onTogglePin}>
+                <Icon name="pin" size={12} /> {pinned ? 'Pinned' : 'Pin for learning'}
+              </button>
+              <button className="btn sm ghost" onClick={onFlag}>
+                <Icon name="flag" size={12} /> Flag as failure
+              </button>
+              <button className="btn sm ghost" style={{ marginLeft: 'auto' }} onClick={copyJson}>
+                <Icon name="copy" size={12} /> Copy trace
+              </button>
             </div>
+          </>
+        )}
 
-            {Object.keys(trace.metadata || {}).length > 0 && (
-              <div className="sheet-section">
-                <h3>Metadata</h3>
-                <pre
-                  style={{
-                    background: 'var(--bg-muted)',
-                    padding: '10px 12px',
-                    borderRadius: 6,
-                    fontSize: 12,
-                    fontFamily: 'var(--font-mono)',
-                    overflow: 'auto',
-                    margin: 0,
-                  }}
-                >
-                  {JSON.stringify(trace.metadata, null, 2)}
-                </pre>
-              </div>
-            )}
+        {loading && !trace && (
+          <div className="sheet-body">
+            <div className="dim" style={{ fontSize: 13, padding: 24 }}>Loading…</div>
           </div>
         )}
       </div>

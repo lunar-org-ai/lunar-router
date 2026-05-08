@@ -183,6 +183,7 @@ export interface TraceSummary {
   error: string | null;
   agent_version: string | null;
   n_stages: number;
+  routing_model: string | null;
 }
 
 export interface TracesPage {
