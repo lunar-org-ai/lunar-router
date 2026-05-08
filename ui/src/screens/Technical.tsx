@@ -322,8 +322,8 @@ export const Traces = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+        <div className="card card-pad" style={{ borderColor: 'var(--destructive)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--destructive)', margin: 0 }}>
             {error}
           </p>
         </div>
@@ -463,7 +463,7 @@ export const Traces = () => {
           </div>
           {visibleItems.length === 0 ? (
             <div className="empty-state">
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
                 {filter === 'flag'
                   ? 'No flagged traces yet. Flag one from the drawer to triage it later.'
                   : 'No traces match those filters.'}
@@ -663,7 +663,7 @@ const TraceDrawer = ({
       <div className="sheet trace-sheet">
         <div className="sheet-head">
           <div style={{ flex: 1 }}>
-            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+            <div className="mono" style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
               {traceId}
             </div>
             <h2 style={{ marginTop: 2 }}>{trace ? excerptOf(trace) : 'Loading…'}</h2>
@@ -674,7 +674,7 @@ const TraceDrawer = ({
                   gap: 14,
                   marginTop: 8,
                   fontSize: 12,
-                  color: 'var(--fg-muted)',
+                  color: 'var(--muted-foreground)',
                   flexWrap: 'wrap',
                 }}
               >
@@ -774,7 +774,7 @@ const TraceDrawer = ({
                         gap: 12,
                         marginBottom: 12,
                         padding: '8px 12px',
-                        background: 'var(--bg-muted)',
+                        background: 'var(--muted)',
                         borderRadius: 8,
                         fontSize: 12.5,
                       }}
@@ -855,7 +855,7 @@ const TraceDrawer = ({
                           className="card card-pad"
                           style={{
                             padding: '12px 14px',
-                            borderColor: failed ? 'var(--bad)' : undefined,
+                            borderColor: failed ? 'var(--destructive)' : undefined,
                           }}
                         >
                           <div
@@ -887,7 +887,7 @@ const TraceDrawer = ({
                               display: 'flex',
                               gap: 12,
                               fontSize: 12,
-                              color: 'var(--fg-muted)',
+                              color: 'var(--muted-foreground)',
                               flexWrap: 'wrap',
                             }}
                           >
@@ -900,7 +900,7 @@ const TraceDrawer = ({
                             {s.routing_model && (
                               <span>
                                 routing →{' '}
-                                <span className="mono" style={{ color: 'var(--fg)' }}>
+                                <span className="mono" style={{ color: 'var(--foreground)' }}>
                                   {s.routing_model}
                                 </span>
                               </span>
@@ -1178,8 +1178,8 @@ export const EvalSuites = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+        <div className="card card-pad" style={{ borderColor: 'var(--destructive)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--destructive)', margin: 0 }}>
             {error}
           </p>
         </div>
@@ -1243,7 +1243,7 @@ export const EvalSuites = () => {
           </div>
           {filtered.length === 0 ? (
             <div className="empty-state" style={{ padding: 48 }}>
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
                 {suites.length === 0
                   ? 'No suites defined yet. Add a YAML to evals/suites/.'
                   : 'No suites match.'}
@@ -1473,7 +1473,7 @@ const SuiteDrawer = ({
             </div>
             <h2 style={{ marginTop: 4 }}>{name}</h2>
             {detail?.description && (
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginTop: 6, lineHeight: 1.5 }}>
                 {detail.description}
               </div>
             )}
@@ -2027,7 +2027,7 @@ export const RouterConfig = () => {
         </div>
         {filtered.length === 0 ? (
           <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No rules match.</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No rules match.</div>
             <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
               Clear filters
             </button>
@@ -2135,10 +2135,10 @@ const RuleDrawer = ({
               {rule.auth === 'agent' ? 'Agent-authored' : 'You authored'} · {rule.enabled ? 'active' : 'paused'}
             </div>
             <h2 style={{ marginTop: 4 }}>{rule.name}</h2>
-            <div className="mono" style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginTop: 6 }}>
+            <div className="mono" style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 6 }}>
               if {rule.when}
               <span style={{ margin: '0 8px', opacity: 0.5 }}>→</span>
-              <span style={{ color: 'var(--fg)', fontWeight: 500 }}>{rule.then}</span>
+              <span style={{ color: 'var(--foreground)', fontWeight: 500 }}>{rule.then}</span>
             </div>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
@@ -2155,7 +2155,7 @@ const RuleDrawer = ({
             <div>
               <div className="sheet-section">
                 <h3>Rationale</h3>
-                <p style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--fg-muted)', margin: 0 }}>{rule.rationale}</p>
+                <p style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--muted-foreground)', margin: 0 }}>{rule.rationale}</p>
               </div>
               <div className="meta-grid">
                 <div className="meta-row"><div className="dim">Share of traffic</div><div className="mono">{(rule.share * 100).toFixed(0)}%</div></div>
@@ -2471,7 +2471,7 @@ export const Datasets = () => {
       {filtered.length === 0 ? (
         <div className="card">
           <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No datasets match.</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No datasets match.</div>
             <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
               Clear filters
             </button>
@@ -2562,7 +2562,7 @@ const DatasetDrawer = ({
               {dataset.owner === 'agent' ? 'Agent-curated' : 'You created'} · {dataset.growing ? 'auto-collecting' : 'static'}
             </div>
             <h2 style={{ marginTop: 4 }}>{dataset.name}</h2>
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>{dataset.desc}</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginTop: 6, lineHeight: 1.5 }}>{dataset.desc}</div>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
         </div>

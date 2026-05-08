@@ -1,25 +1,20 @@
 /**
  * Policies — operator's trust dial.
  *
- * Layout matches OpenTracy Evolution design verbatim:
- *   - "Approval mode by change type" (5 per-kind rows + global)
- *   - "Auto-rollback" (trigger threshold + notify channels)
- *   - "How auto-promote works" info card
- *
  * Per-kind overrides are honored by harness.approver.policy.decide() — the
  * approver looks up policy.mode_for(kind) before falling back to the global
- * mode. Kinds in the design (prompt/router/tool/policy/eval) cover the
- * mock's surface; the harness today emits kinds {rag, rerank, router,
- * prompt, memory, other}, so anything emitted that isn't in the table
- * falls through to the global mode (safe default).
- *
- * Auto-rollback values persist to YAML and are visible to the approver,
+ * mode. Auto-rollback values persist to YAML and are visible to the approver,
  * but the metric watcher that triggers them on production telemetry doesn't
- * exist yet — that's tied to P1.9 (real LLM) + production telemetry hooks.
+ * exist yet.
  */
 
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
+import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
+import { Input } from '../components/ui/input';
+import { ToggleGroup, ToggleGroupItem } from '../components/ui/toggle-group';
 import {
   ApiError,
   getPolicy,
@@ -41,6 +36,59 @@ const modeDesc = (mode: string, autoLiftPct: string): string => {
   if (mode === 'review') return 'Wait for your approval';
   return 'Never apply automatically';
 };
+
+const ModeToggle = ({
+  value,
+  onChange,
+}: {
+  value: PolicyMode | string | undefined;
+  onChange: (mode: PolicyMode) => void;
+}) => (
+  <ToggleGroup
+    type="single"
+    variant="outline"
+    size="sm"
+    value={value ?? ''}
+    onValueChange={(v) => v && onChange(v as PolicyMode)}
+  >
+    <ToggleGroupItem value="auto">Auto</ToggleGroupItem>
+    <ToggleGroupItem value="review">Review</ToggleGroupItem>
+    <ToggleGroupItem value="off">Off</ToggleGroupItem>
+  </ToggleGroup>
+);
+
+const SectionHeader = ({ children }: { children: React.ReactNode }) => (
+  <div className="flex items-center justify-between border-b border-border px-4 py-3.5 text-[13px] font-semibold">
+    {children}
+  </div>
+);
+
+const Row = ({
+  name,
+  desc,
+  hint,
+  control,
+  muted,
+}: {
+  name: string;
+  desc: React.ReactNode;
+  hint?: React.ReactNode;
+  control: React.ReactNode;
+  muted?: boolean;
+}) => (
+  <div
+    className={`grid grid-cols-[1fr_auto_auto] items-center gap-4 px-4 py-3.5 border-b border-border last:border-b-0 ${
+      muted ? 'bg-muted' : ''
+    }`}
+  >
+    <div className="min-w-0">
+      <div className="text-[13.5px] font-medium">{name}</div>
+      <div className="dim text-xs leading-snug">{desc}</div>
+    </div>
+    {hint && <div className="dim text-xs">{hint}</div>}
+    <div>{control}</div>
+  </div>
+);
 
 export const Policies = () => {
   const [policy, setPolicy] = useState<PolicyView | null>(null);
@@ -74,8 +122,7 @@ export const Policies = () => {
     void load();
   }, [load]);
 
-  const dirty =
-    !!policy && !!draft && JSON.stringify(policy) !== JSON.stringify(draft);
+  const dirty = !!policy && !!draft && JSON.stringify(policy) !== JSON.stringify(draft);
 
   const save = async () => {
     if (!draft) return;
@@ -117,21 +164,24 @@ export const Policies = () => {
     return (
       <div className="content">
         <h1 className="page-title">Policies</h1>
-        <p className="page-sub" style={{ color: 'var(--bad)' }}>
-          {error || 'Policy unavailable.'}
-        </p>
-        <button className="btn" onClick={load}>Retry</button>
+        <p className="page-sub text-destructive">{error || 'Policy unavailable.'}</p>
+        <Button onClick={load}>Retry</Button>
       </div>
     );
   }
 
   const setKindMode = (kind: string, mode: PolicyMode) => {
-    setDraft((d) =>
-      d ? { ...d, overrides: { ...d.overrides, [kind]: mode } } : d,
-    );
+    setDraft((d) => (d ? { ...d, overrides: { ...d.overrides, [kind]: mode } } : d));
   };
-  const effectiveMode = (kind: string): string =>
-    draft.overrides[kind] || draft.mode;
+  const clearKindMode = (kind: string) => {
+    setDraft((d) => {
+      if (!d) return d;
+      const next = { ...d.overrides };
+      delete next[kind];
+      return { ...d, overrides: next };
+    });
+  };
+  const effectiveMode = (kind: string): string => draft.overrides[kind] || draft.mode;
 
   const autoLiftPct = (draft.auto_min_lift * 100).toFixed(1);
 
@@ -144,357 +194,241 @@ export const Policies = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>{error}</p>
-        </div>
+        <Card className="mb-4 border-destructive p-4">
+          <p className="dim m-0 text-destructive">{error}</p>
+        </Card>
       )}
 
-      <div className="card" style={{ marginBottom: 24 }}>
-        <div
-          style={{
-            padding: '14px 16px',
-            borderBottom: '1px solid var(--border)',
-            fontSize: 13,
-            fontWeight: 600,
-          }}
-        >
-          Approval mode by change type
-        </div>
-        <div className="policy-row">
-          <div>
-            <div className="pname">Default for everything</div>
-            <div className="pdesc">
-              Falls through to this mode for any change kind without an override below
-            </div>
-          </div>
-          <div className="dim" style={{ fontSize: 12.5 }}>{modeDesc(draft.mode, autoLiftPct)}</div>
-          <div className="toggle">
-            {(['auto', 'review', 'off'] as const).map((m) => (
-              <button
-                key={m}
-                className={draft.mode === m ? 'on' : ''}
-                onClick={() => setDraft({ ...draft, mode: m })}
-              >
-                {m === 'auto' ? 'Auto' : m === 'review' ? 'Review' : 'Off'}
-              </button>
-            ))}
-          </div>
-        </div>
+      <Card className="mb-6 gap-0 py-0">
+        <SectionHeader>Approval mode by change type</SectionHeader>
+        <Row
+          name="Default for everything"
+          desc="Falls through to this mode for any change kind without an override below"
+          hint={modeDesc(draft.mode, autoLiftPct)}
+          control={
+            <ModeToggle
+              value={draft.mode}
+              onChange={(m) => setDraft({ ...draft, mode: m })}
+            />
+          }
+        />
         {KIND_ROWS.map((r) => {
           const overrideMode = draft.overrides[r.key];
           const eff = effectiveMode(r.key);
           const usingOverride = !!overrideMode;
           return (
-            <div className="policy-row" key={r.key}>
-              <div>
-                <div className="pname">{r.name}</div>
-                <div className="pdesc">
+            <Row
+              key={r.key}
+              name={r.name}
+              desc={
+                <>
                   {r.desc}
                   {!usingOverride && (
-                    <span className="dim" style={{ marginLeft: 8, fontSize: 11 }}>
-                      (using default)
-                    </span>
+                    <span className="dim ml-2 text-[11px]">(using default)</span>
+                  )}
+                </>
+              }
+              hint={modeDesc(eff, autoLiftPct)}
+              control={
+                <div className="flex items-center gap-1">
+                  <ModeToggle
+                    value={overrideMode}
+                    onChange={(m) => setKindMode(r.key, m)}
+                  />
+                  {usingOverride && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      title="Clear override"
+                      onClick={() => clearKindMode(r.key)}
+                    >
+                      ×
+                    </Button>
                   )}
                 </div>
-              </div>
-              <div className="dim" style={{ fontSize: 12.5 }}>{modeDesc(eff, autoLiftPct)}</div>
-              <div className="toggle">
-                {(['auto', 'review', 'off'] as const).map((m) => (
-                  <button
-                    key={m}
-                    className={overrideMode === m ? 'on' : ''}
-                    onClick={() => setKindMode(r.key, m)}
-                  >
-                    {m === 'auto' ? 'Auto' : m === 'review' ? 'Review' : 'Off'}
-                  </button>
-                ))}
-                {usingOverride && (
-                  <button
-                    title="Clear override"
-                    onClick={() =>
-                      setDraft((d) => {
-                        if (!d) return d;
-                        const next = { ...d.overrides };
-                        delete next[r.key];
-                        return { ...d, overrides: next };
-                      })
-                    }
-                    style={{
-                      background: 'transparent',
-                      color: 'var(--fg-muted)',
-                      padding: '0 8px',
-                    }}
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-            </div>
+              }
+            />
           );
         })}
-        <div className="policy-row" style={{ background: 'var(--bg-muted)' }}>
-          <div>
-            <div className="pname">Auto-promote threshold</div>
-            <div className="pdesc">
+        <Row
+          muted
+          name="Auto-promote threshold"
+          desc={
+            <>
               Minimum Δoverall on the eval suite before <span className="mono">auto</span>{' '}
               promotes. Only used in auto mode.
-            </div>
-          </div>
-          <div className="dim mono" style={{ fontSize: 12.5 }}>
-            auto_min_lift: {draft.auto_min_lift.toFixed(4)} ({autoLiftPct} pp)
-          </div>
-          <input
-            type="number"
-            step="0.001"
-            min="0"
-            max="1"
-            value={draft.auto_min_lift}
-            onChange={(e) =>
-              setDraft({
-                ...draft,
-                auto_min_lift: Math.max(0, Math.min(1, Number(e.target.value) || 0)),
-              })
-            }
-            style={{
-              width: 100,
-              padding: '6px 10px',
-              border: '1px solid var(--border)',
-              borderRadius: 6,
-              background: 'var(--bg)',
-              color: 'var(--fg)',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 13,
-            }}
-          />
-        </div>
-      </div>
-
-      <div className="card" style={{ marginBottom: 24 }}>
-        <div
-          style={{
-            padding: '14px 16px',
-            borderBottom: '1px solid var(--border)',
-            fontSize: 13,
-            fontWeight: 600,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
-          <span>Auto-rollback</span>
-          <span
-            className="tag"
-            style={{
-              background: 'var(--bg-muted)',
-              color: 'var(--fg-muted)',
-              fontSize: 11,
-            }}
-            title="Values persist to YAML; metric-trigger fires once production telemetry is wired."
-          >
-            persisted; not yet firing
-          </span>
-        </div>
-        <div className="policy-row">
-          <div>
-            <div className="pname">Trigger threshold</div>
-            <div className="pdesc">How much regression before the agent rolls itself back</div>
-          </div>
-          {editingThreshold ? (
-            <div
-              style={{
-                display: 'flex',
-                gap: 6,
-                alignItems: 'center',
-                fontSize: 12.5,
-                fontFamily: 'var(--font-mono)',
-              }}
-            >
-              CSAT drop ≥
-              <input
-                type="number"
-                step="0.05"
-                min="0"
-                max="5"
-                value={draft.auto_rollback.csat_drop}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    auto_rollback: {
-                      ...draft.auto_rollback,
-                      csat_drop: Math.max(0, Math.min(5, Number(e.target.value) || 0)),
-                    },
-                  })
-                }
-                style={{
-                  width: 60,
-                  padding: '3px 6px',
-                  border: '1px solid var(--border)',
-                  borderRadius: 4,
-                  background: 'var(--bg)',
-                  fontFamily: 'inherit',
-                  fontSize: 12.5,
-                }}
-              />
-              within
-              <input
-                type="number"
-                min="1"
-                max="720"
-                value={draft.auto_rollback.window_hours}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    auto_rollback: {
-                      ...draft.auto_rollback,
-                      window_hours: Math.max(1, Math.min(720, Number(e.target.value) || 24)),
-                    },
-                  })
-                }
-                style={{
-                  width: 56,
-                  padding: '3px 6px',
-                  border: '1px solid var(--border)',
-                  borderRadius: 4,
-                  background: 'var(--bg)',
-                  fontFamily: 'inherit',
-                  fontSize: 12.5,
-                }}
-              />
-              h, OR resolution drop ≥
-              <input
-                type="number"
-                step="0.01"
-                min="0"
-                max="1"
-                value={draft.auto_rollback.resolution_drop}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    auto_rollback: {
-                      ...draft.auto_rollback,
-                      resolution_drop: Math.max(
-                        0,
-                        Math.min(1, Number(e.target.value) || 0),
-                      ),
-                    },
-                  })
-                }
-                style={{
-                  width: 60,
-                  padding: '3px 6px',
-                  border: '1px solid var(--border)',
-                  borderRadius: 4,
-                  background: 'var(--bg)',
-                  fontFamily: 'inherit',
-                  fontSize: 12.5,
-                }}
-              />
-            </div>
-          ) : (
-            <div className="dim mono" style={{ fontSize: 12.5 }}>
-              CSAT drop ≥ {draft.auto_rollback.csat_drop} within {draft.auto_rollback.window_hours}
-              h, OR resolution rate drop ≥ {(draft.auto_rollback.resolution_drop * 100).toFixed(0)}%
-            </div>
-          )}
-          <button className="btn sm" onClick={() => setEditingThreshold((v) => !v)}>
-            {editingThreshold ? 'Done' : 'Edit'}
-          </button>
-        </div>
-        <div className="policy-row">
-          <div>
-            <div className="pname">Notify on rollback</div>
-            <div className="pdesc">Where the agent posts a heads-up</div>
-          </div>
-          {editingNotify ? (
-            <input
-              type="text"
-              value={draft.auto_rollback.notify_channels.join(', ')}
+            </>
+          }
+          hint={
+            <span className="mono">
+              auto_min_lift: {draft.auto_min_lift.toFixed(4)} ({autoLiftPct} pp)
+            </span>
+          }
+          control={
+            <Input
+              type="number"
+              step="0.001"
+              min="0"
+              max="1"
+              value={draft.auto_min_lift}
               onChange={(e) =>
                 setDraft({
                   ...draft,
-                  auto_rollback: {
-                    ...draft.auto_rollback,
-                    notify_channels: e.target.value
-                      .split(',')
-                      .map((s) => s.trim())
-                      .filter(Boolean),
-                  },
+                  auto_min_lift: Math.max(0, Math.min(1, Number(e.target.value) || 0)),
                 })
               }
-              placeholder="email, slack:#agent-evolution"
-              style={{
-                width: 260,
-                padding: '6px 10px',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                background: 'var(--bg)',
-                fontSize: 12.5,
-              }}
+              className="mono w-[100px]"
             />
-          ) : (
-            <div className="dim" style={{ fontSize: 12.5 }}>
-              {draft.auto_rollback.notify_channels.length === 0
-                ? '(none)'
-                : draft.auto_rollback.notify_channels.join(' + ')}
-            </div>
-          )}
-          <button className="btn sm" onClick={() => setEditingNotify((v) => !v)}>
-            {editingNotify ? 'Done' : 'Edit'}
-          </button>
-        </div>
-      </div>
+          }
+        />
+      </Card>
 
-      <div
-        className="card card-pad"
-        style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: 24 }}
-      >
+      <Card className="mb-6 gap-0 py-0">
+        <SectionHeader>
+          <span>Auto-rollback</span>
+          <Badge
+            variant="neutral"
+            title="Values persist to YAML; metric-trigger fires once production telemetry is wired."
+          >
+            persisted; not yet firing
+          </Badge>
+        </SectionHeader>
+        <Row
+          name="Trigger threshold"
+          desc="How much regression before the agent rolls itself back"
+          hint={
+            editingThreshold ? (
+              <div className="mono flex items-center gap-1.5 text-xs">
+                CSAT drop ≥
+                <Input
+                  type="number"
+                  step="0.05"
+                  min="0"
+                  max="5"
+                  value={draft.auto_rollback.csat_drop}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      auto_rollback: {
+                        ...draft.auto_rollback,
+                        csat_drop: Math.max(0, Math.min(5, Number(e.target.value) || 0)),
+                      },
+                    })
+                  }
+                  className="h-7 w-[64px] px-2 text-xs"
+                />
+                within
+                <Input
+                  type="number"
+                  min="1"
+                  max="720"
+                  value={draft.auto_rollback.window_hours}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      auto_rollback: {
+                        ...draft.auto_rollback,
+                        window_hours: Math.max(1, Math.min(720, Number(e.target.value) || 24)),
+                      },
+                    })
+                  }
+                  className="h-7 w-[60px] px-2 text-xs"
+                />
+                h, OR resolution drop ≥
+                <Input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  max="1"
+                  value={draft.auto_rollback.resolution_drop}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      auto_rollback: {
+                        ...draft.auto_rollback,
+                        resolution_drop: Math.max(0, Math.min(1, Number(e.target.value) || 0)),
+                      },
+                    })
+                  }
+                  className="h-7 w-[64px] px-2 text-xs"
+                />
+              </div>
+            ) : (
+              <span className="mono">
+                CSAT drop ≥ {draft.auto_rollback.csat_drop} within {draft.auto_rollback.window_hours}
+                h, OR resolution rate drop ≥ {(draft.auto_rollback.resolution_drop * 100).toFixed(0)}%
+              </span>
+            )
+          }
+          control={
+            <Button variant="outline" size="sm" onClick={() => setEditingThreshold((v) => !v)}>
+              {editingThreshold ? 'Done' : 'Edit'}
+            </Button>
+          }
+        />
+        <Row
+          name="Notify on rollback"
+          desc="Where the agent posts a heads-up"
+          hint={
+            editingNotify ? (
+              <Input
+                type="text"
+                value={draft.auto_rollback.notify_channels.join(', ')}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    auto_rollback: {
+                      ...draft.auto_rollback,
+                      notify_channels: e.target.value
+                        .split(',')
+                        .map((s) => s.trim())
+                        .filter(Boolean),
+                    },
+                  })
+                }
+                placeholder="email, slack:#agent-evolution"
+                className="w-[260px]"
+              />
+            ) : draft.auto_rollback.notify_channels.length === 0 ? (
+              '(none)'
+            ) : (
+              draft.auto_rollback.notify_channels.join(' + ')
+            )
+          }
+          control={
+            <Button variant="outline" size="sm" onClick={() => setEditingNotify((v) => !v)}>
+              {editingNotify ? 'Done' : 'Edit'}
+            </Button>
+          }
+        />
+      </Card>
+
+      <Card className="mb-6 flex-row items-start gap-3.5 px-4 py-4">
         <div
-          style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'var(--info-soft)',
-            color: 'var(--info-fg)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md"
+          style={{ background: 'var(--info-soft)', color: 'var(--info-fg)' }}
         >
           <Icon name="info" size={16} />
         </div>
         <div>
-          <div style={{ fontWeight: 500, marginBottom: 4, fontSize: 13.5 }}>
-            How auto-promote works
-          </div>
-          <div className="dim" style={{ fontSize: 13, lineHeight: 1.6 }}>
+          <div className="mb-1 text-[13.5px] font-medium">How auto-promote works</div>
+          <div className="dim text-[13px] leading-relaxed">
             The agent runs each candidate change against your eval set offline before shipping.
             Auto mode promotes only when projected lift exceeds the threshold and no critic blocks.
             Per-kind overrides win over the global default. Production traffic ramps gradually
             once it's on. Rollback is automatic if any auto-rollback rule fires.
           </div>
         </div>
-      </div>
+      </Card>
 
       <div
-        style={{
-          position: 'sticky',
-          bottom: 16,
-          display: 'flex',
-          gap: 10,
-          alignItems: 'center',
-          padding: '12px 16px',
-          background: 'var(--bg-elev)',
-          border: '1px solid var(--border)',
-          borderRadius: 'var(--radius)',
-          boxShadow: '0 4px 16px rgb(0 0 0 / 8%)',
-        }}
+        className="sticky bottom-4 flex items-center gap-2.5 rounded-[var(--radius)] border border-border bg-card px-4 py-3 shadow-lg"
       >
-        <button className="btn primary" onClick={save} disabled={!dirty || saving}>
+        <Button onClick={save} disabled={!dirty || saving}>
           <Icon name="check" size={14} /> {saving ? 'Saving…' : 'Save changes'}
-        </button>
-        <button
-          className="btn ghost"
+        </Button>
+        <Button
+          variant="ghost"
           onClick={() => {
             if (policy) setDraft(policy);
             setEditingThreshold(false);
@@ -503,13 +437,9 @@ export const Policies = () => {
           disabled={!dirty || saving}
         >
           Reset
-        </button>
-        {dirty && (
-          <span className="dim" style={{ fontSize: 12.5 }}>Unsaved changes</span>
-        )}
-        {!dirty && savedAt && !saving && (
-          <span className="dim" style={{ fontSize: 12.5 }}>Saved.</span>
-        )}
+        </Button>
+        {dirty && <span className="dim text-xs">Unsaved changes</span>}
+        {!dirty && savedAt && !saving && <span className="dim text-xs">Saved.</span>}
       </div>
     </div>
   );
