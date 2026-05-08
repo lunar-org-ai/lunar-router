@@ -13,9 +13,14 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Link } from '@tanstack/react-router';
 import { Icon } from '../components/Icon';
 import { Sparkline } from '../components/Sparkline';
 import { Tag, StatusTag, KindIcon, KindLabel } from '../components/Tag';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
+import { preserveSearch } from '../router';
+import { useRootContext } from '../routes/__root';
 import {
   ApiError,
   getMetricsOverview,
@@ -23,13 +28,6 @@ import {
   type LessonSummary,
   type MetricsOverview,
 } from '../api';
-
-interface Props {
-  onOpenLesson: (id: string) => void;
-  onNav: (route: string) => void;
-  onOpenAgent: () => void;
-  dayZero: boolean;
-}
 
 const fmtDay = (iso: string | null): string => {
   if (!iso) return '—';
@@ -49,7 +47,9 @@ const tlNodeClass = (l: LessonSummary): string => {
 
 type Filter = 'all' | 'approved' | 'rolled_back';
 
-export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) => {
+export const Evolution = () => {
+  const { openAgent } = useRootContext();
+  const dayZero = false;
   const [lessons, setLessons] = useState<LessonSummary[]>([]);
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -137,9 +137,9 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
               <div className="help">A channel — WhatsApp, Slack, API, or web.</div>
             </div>
           </div>
-          <button className="btn primary" onClick={onOpenAgent}>
+          <Button onClick={openAgent}>
             Set up agent <Icon name="chevron" size={14} />
-          </button>
+          </Button>
           <div className="dim" style={{ fontSize: 12.5, marginTop: 14 }}>
             Once it's running, this page fills with everything it learns.
           </div>
@@ -167,9 +167,11 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
           <span className="l">flagged for review</span>
         </span>
         <span style={{ marginLeft: 'auto' }}>
-          <button className="btn ghost sm" onClick={() => onNav('talk')}>
-            Ask the agent <Icon name="chevron" size={12} />
-          </button>
+          <Button asChild variant="ghost" size="sm">
+            <Link to="/talk" search={preserveSearch}>
+              Ask the agent <Icon name="chevron" size={12} />
+            </Link>
+          </Button>
         </span>
       </div>
 
@@ -188,7 +190,7 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
             production.
           </p>
         </div>
-        <div className="card" style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 18 }}>
+        <Card className="flex flex-row items-center gap-4 px-4 py-3.5">
           <div>
             <div
               className="dim"
@@ -210,7 +212,7 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
             </div>
           </div>
           <Sparkline data={metrics?.trust_history_30d ?? []} w={180} h={48} />
-        </div>
+        </Card>
       </div>
 
       <div className="metrics-row">
@@ -224,51 +226,40 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
       </div>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
-            {error}
-          </p>
-        </div>
+        <Card className="mb-4 border-destructive p-4">
+          <p className="dim m-0 text-destructive">{error}</p>
+        </Card>
       )}
 
       {pending.length > 0 && (
-        <div
-          className="card"
+        <Card
+          className="mb-7 flex flex-row items-center gap-3 px-4 py-3.5"
           style={{
-            marginBottom: 28,
             borderColor: 'var(--warn-soft)',
-            background: 'linear-gradient(0deg, var(--warn-soft) 0%, var(--bg-elev) 30%)',
+            background: 'linear-gradient(0deg, var(--warn-soft) 0%, var(--card) 30%)',
           }}
         >
-          <div style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div
-              style={{
-                width: 32,
-                height: 32,
-                borderRadius: '50%',
-                background: 'var(--warn-soft)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--warn-fg)',
-              }}
-            >
-              <Icon name="bell" size={16} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>
-                The agent has {pending.length} change{pending.length > 1 ? 's' : ''} waiting for
-                your review
-              </div>
-              <div className="dim" style={{ fontSize: 12.5, marginTop: 2 }}>
-                Review and approve, or let it roll back automatically in 24h.
-              </div>
-            </div>
-            <button className="btn primary" onClick={() => onNav('review')}>
-              Review now <Icon name="chevron" size={14} />
-            </button>
+          <div
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full"
+            style={{ background: 'var(--warn-soft)', color: 'var(--warn-fg)' }}
+          >
+            <Icon name="bell" size={16} />
           </div>
-        </div>
+          <div className="flex-1">
+            <div className="text-sm font-semibold">
+              The agent has {pending.length} change{pending.length > 1 ? 's' : ''} waiting for your
+              review
+            </div>
+            <div className="dim mt-0.5 text-xs">
+              Review and approve, or let it roll back automatically in 24h.
+            </div>
+          </div>
+          <Button asChild>
+            <Link to="/review" search={preserveSearch}>
+              Review now <Icon name="chevron" size={14} />
+            </Link>
+          </Button>
+        </Card>
       )}
 
       <div
@@ -282,38 +273,41 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, letterSpacing: '-0.01em' }}>
           What I've been learning
         </h2>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            className={`btn sm ${filter === 'all' ? '' : 'ghost'}`}
+        <div className="flex gap-1.5">
+          <Button
+            variant={filter === 'all' ? 'outline' : 'ghost'}
+            size="sm"
             onClick={() => setFilter('all')}
           >
             All
-          </button>
-          <button
-            className={`btn sm ${filter === 'approved' ? '' : 'ghost'}`}
+          </Button>
+          <Button
+            variant={filter === 'approved' ? 'outline' : 'ghost'}
+            size="sm"
             onClick={() => setFilter('approved')}
           >
             Approved
-          </button>
-          <button
-            className={`btn sm ${filter === 'rolled_back' ? '' : 'ghost'}`}
+          </Button>
+          <Button
+            variant={filter === 'rolled_back' ? 'outline' : 'ghost'}
+            size="sm"
             onClick={() => setFilter('rolled_back')}
           >
             Rolled back
-          </button>
+          </Button>
         </div>
       </div>
 
       {loading && lessons.length === 0 ? (
         <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>Loading lessons…</div>
       ) : lessons.length === 0 ? (
-        <div className="card card-pad" style={{ textAlign: 'center', padding: '48px 20px' }}>
-          <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>No lessons yet</div>
-          <div className="dim" style={{ fontSize: 13, maxWidth: 480, margin: '0 auto' }}>
+        <Card className="px-5 py-12 text-center">
+          <div className="mb-1.5 text-[15px] font-medium">No lessons yet</div>
+          <div className="dim mx-auto max-w-[480px] text-[13px]">
             The agent hasn't promoted any change yet. Run the harness loop to generate
             candidates — promotions land here as they happen.
           </div>
-        </div>
+        </Card>
       ) : (
         <div className="timeline">
           {filtered.map((l) => {
@@ -322,7 +316,12 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
               <div className="tl-item" key={l.id}>
                 <div className={`tl-node ${tlNodeClass(l)}`} />
                 <div className="tl-date">{fmtDay(l.promoted_at)}</div>
-                <div className="card lesson-card" onClick={() => onOpenLesson(l.id)}>
+                <Link
+                  to="/lesson/$id"
+                  params={{ id: l.id }}
+                  search={preserveSearch}
+                  className="card lesson-card"
+                >
                   <div className="head">
                     <Tag>
                       <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
@@ -363,7 +362,7 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
                       Open <Icon name="chevron" size={12} />
                     </span>
                   </div>
-                </div>
+                </Link>
               </div>
             );
           })}

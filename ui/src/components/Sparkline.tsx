@@ -2,7 +2,7 @@ export const Sparkline = ({
   data,
   w = 240,
   h = 56,
-  accent = 'var(--accent)',
+  accent = 'var(--primary)',
   fill = true,
 }: {
   data: number[];

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
+import { Badge } from '../components/ui/badge';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
 import { ApiError, listVersions, rollbackVersion, type VersionInfo } from '../api';
 import { CompareWithLive } from './CompareWithLive';
 import { ReplayTraces } from './ReplayTraces';
@@ -19,6 +22,10 @@ const formatDate = (iso: string | null): string => {
     return iso;
   }
 };
+
+const SectionLabel = ({ children }: { children: React.ReactNode }) => (
+  <div className="dim mb-2.5 text-[11px] font-medium uppercase tracking-[0.05em]">{children}</div>
+);
 
 export const Versions = () => {
   const [versions, setVersions] = useState<VersionInfo[]>([]);
@@ -83,12 +90,8 @@ export const Versions = () => {
     return (
       <div className="content">
         <h1 className="page-title">Versions</h1>
-        <p className="page-sub" style={{ color: 'var(--bad)' }}>
-          {error}
-        </p>
-        <button className="btn" onClick={refresh}>
-          Retry
-        </button>
+        <p className="page-sub text-destructive">{error}</p>
+        <Button onClick={refresh}>Retry</Button>
       </div>
     );
   }
@@ -97,7 +100,9 @@ export const Versions = () => {
     return (
       <div className="content">
         <h1 className="page-title">Versions</h1>
-        <p className="page-sub">No versions yet. Promote a candidate via the harness to create the first one.</p>
+        <p className="page-sub">
+          No versions yet. Promote a candidate via the harness to create the first one.
+        </p>
       </div>
     );
   }
@@ -113,159 +118,121 @@ export const Versions = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
-            {error}
-          </p>
-        </div>
+        <Card className="mb-4 border-destructive p-4">
+          <p className="dim m-0 text-destructive">{error}</p>
+        </Card>
       )}
 
-      <div className="versions">
-        <div className="version-list">
-          {versions.map((v) => (
-            <button
-              key={v.id}
-              className={`version-item ${v.id === active.id ? 'active' : ''}`}
-              onClick={() => setActiveId(v.id)}
-              style={{ border: 'none', width: '100%' }}
-            >
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div className="vname">{v.id}</div>
-                <div
-                  className="vlabel"
-                  style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                >
-                  {v.lesson?.title ?? '(no lesson)'}
+      <div className="grid min-h-[520px] grid-cols-[220px_1fr] overflow-hidden rounded-[var(--radius)] border border-border bg-card">
+        <div className="overflow-y-auto border-r border-border bg-muted py-3">
+          {versions.map((v) => {
+            const isActive = v.id === active.id;
+            return (
+              <button
+                key={v.id}
+                onClick={() => setActiveId(v.id)}
+                className={`flex w-full items-center gap-2.5 border-l-2 px-4 py-2.5 text-left text-[13px] transition-colors ${
+                  isActive
+                    ? 'border-l-foreground bg-card font-medium'
+                    : 'border-l-transparent hover:bg-[var(--bg-sunken)]'
+                }`}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="mono text-xs">{v.id}</div>
+                  <div className="truncate text-[11px] text-muted-foreground">
+                    {v.lesson?.title ?? '(no lesson)'}
+                  </div>
                 </div>
-              </div>
-              <div className="vmeta">
-                {v.is_live && <span className="live">LIVE</span>}
-                {v.status === 'rolled_back' && (
-                  <Tag kind="bad">
-                    <span className="dot" />
-                  </Tag>
-                )}
-              </div>
-            </button>
-          ))}
+                <div className="ml-auto flex items-center gap-1.5">
+                  {v.is_live && (
+                    <span className="rounded bg-primary px-1.5 py-px text-[10px] font-semibold tracking-wider text-primary-foreground">
+                      LIVE
+                    </span>
+                  )}
+                  {v.status === 'rolled_back' && (
+                    <Badge variant="bad" className="h-4 w-4 p-0" />
+                  )}
+                </div>
+              </button>
+            );
+          })}
         </div>
-        <div style={{ padding: 28, overflow: 'auto' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-            <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>
-              {active.id}
-            </span>
-            {active.is_live && (
-              <Tag kind="success">
-                <span className="dot" /> Live now
-              </Tag>
-            )}
-            {active.status === 'rolled_back' && (
-              <Tag kind="bad">
-                <span className="dot" /> Rolled back
-              </Tag>
-            )}
-            {active.status === 'archived' && (
-              <Tag kind="">
-                <span className="dot" /> Archived
-              </Tag>
-            )}
-            <span className="dim" style={{ marginLeft: 'auto', fontSize: 13 }}>
+
+        <div className="overflow-auto p-7">
+          <div className="mb-2 flex items-center gap-3">
+            <span className="mono text-[18px] font-semibold">{active.id}</span>
+            {active.is_live && <Tag kind="success">Live now</Tag>}
+            {active.status === 'rolled_back' && <Tag kind="bad">Rolled back</Tag>}
+            {active.status === 'archived' && <Tag>Archived</Tag>}
+            <span className="dim ml-auto text-[13px]">
               Promoted {formatDate(active.promoted_at)}
             </span>
           </div>
-          <div
-            style={{ fontSize: 18, fontWeight: 500, letterSpacing: '-0.01em', marginBottom: 24 }}
-          >
+          <div className="mb-6 text-[18px] font-medium leading-tight tracking-tight">
             {lesson?.title ?? '(no lesson attached to this version)'}
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
-            <div className="card card-pad">
-              <div
-                className="dim"
-                style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}
-              >
-                Parent version
-              </div>
-              <div className="mono" style={{ fontSize: 14, fontWeight: 500 }}>
-                {lesson?.parent_version ?? 'initial'}
-              </div>
-            </div>
-            <div className="card card-pad">
-              <div
-                className="dim"
-                style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}
-              >
-                {active.status === 'rolled_back' ? 'Rolled back' : 'Status'}
-              </div>
-              <div style={{ fontSize: 14, fontWeight: 500 }}>
+          <div className="mb-6 grid grid-cols-2 gap-3">
+            <Card className="px-4 py-3.5">
+              <SectionLabel>Parent version</SectionLabel>
+              <div className="mono text-[14px] font-medium">{lesson?.parent_version ?? 'initial'}</div>
+            </Card>
+            <Card className="px-4 py-3.5">
+              <SectionLabel>{active.status === 'rolled_back' ? 'Rolled back' : 'Status'}</SectionLabel>
+              <div className="text-[14px] font-medium">
                 {active.status === 'rolled_back'
                   ? formatDate(active.rolled_back_at)
                   : active.is_live
                   ? 'Live'
                   : 'Archived'}
               </div>
-            </div>
+            </Card>
           </div>
 
           {lesson && (
             <>
-              <div
-                className="dim"
-                style={{
-                  fontSize: 11,
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  fontWeight: 500,
-                  marginBottom: 10,
-                }}
-              >
-                Change in this version
-              </div>
-              <div className="card card-pad" style={{ marginBottom: 16 }}>
-                {lesson.voice && (
-                  <div style={{ fontStyle: 'italic', color: 'var(--fg)', fontSize: 14, lineHeight: 1.55 }}>
-                    “{lesson.voice}”
+              <SectionLabel>Change in this version</SectionLabel>
+              <Card className="mb-4 px-4 py-3.5">
+                {lesson.voice ? (
+                  <div className="text-[14px] italic leading-relaxed text-foreground">
+                    "{lesson.voice}"
                   </div>
-                )}
-                {!lesson.voice && (
-                  <div style={{ color: 'var(--fg)', fontSize: 14, lineHeight: 1.55 }}>
-                    {lesson.summary}
-                  </div>
+                ) : (
+                  <div className="text-[14px] leading-relaxed text-foreground">{lesson.summary}</div>
                 )}
                 {lesson.mutations.length > 0 && (
-                  <div className="dim" style={{ fontSize: 12, marginTop: 12, fontFamily: 'var(--font-mono)' }}>
+                  <div className="dim mono mt-3 text-xs">
                     {lesson.mutations.map((m) => (
                       <div key={m}>{m}</div>
                     ))}
                   </div>
                 )}
                 {lesson.delta?.overall_score !== undefined && (
-                  <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>
+                  <div className="dim mt-2 text-xs">
                     Δoverall: {lesson.delta.overall_score! >= 0 ? '+' : ''}
                     {lesson.delta.overall_score!.toFixed(4)}
                   </div>
                 )}
-              </div>
+              </Card>
             </>
           )}
 
-          <div style={{ display: 'flex', gap: 8, paddingTop: 20, borderTop: '1px solid var(--border)' }}>
-            <button className="btn" onClick={() => setOverlay('compare')}>
+          <div className="flex items-center gap-2 border-t border-border pt-5">
+            <Button variant="outline" onClick={() => setOverlay('compare')}>
               <Icon name="eye" size={14} /> Compare with live
-            </button>
-            <button className="btn" onClick={() => setOverlay('replay')}>
+            </Button>
+            <Button variant="outline" onClick={() => setOverlay('replay')}>
               <Icon name="play" size={14} /> Replay traces
-            </button>
+            </Button>
             {!active.is_live && (
-              <button
-                className="btn primary"
-                style={{ marginLeft: 'auto' }}
+              <Button
+                className="ml-auto"
                 onClick={() => onRollback(active.id)}
                 disabled={rollingBack}
               >
-                <Icon name="rollback" size={14} /> {rollingBack ? 'Rolling back…' : `Roll back to ${active.id}`}
-              </button>
+                <Icon name="rollback" size={14} />{' '}
+                {rollingBack ? 'Rolling back…' : `Roll back to ${active.id}`}
+              </Button>
             )}
           </div>
         </div>

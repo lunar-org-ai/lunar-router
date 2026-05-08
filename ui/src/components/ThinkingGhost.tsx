@@ -66,8 +66,8 @@ export const ThinkingGhost = ({ steps = DEFAULT_STEPS, intervalMs = 900 }: Props
                     d="M7 1.2 C3.4 1.2 1.6 3.6 1.6 7.2 L1.6 14 C1.6 14.7 2.2 15 2.7 14.5 L3.8 13.6 C4.2 13.3 4.7 13.3 5.1 13.6 L5.9 14.3 C6.3 14.6 6.8 14.6 7.2 14.3 L8 13.6 C8.4 13.3 8.9 13.3 9.3 13.6 L10.4 14.5 C10.9 14.9 11.6 14.7 11.6 14 L11.6 7.2 C11.6 3.6 9.6 1.2 7 1.2 Z"
                     fill="currentColor"
                   />
-                  <circle cx="5" cy="6.6" r="0.7" fill="var(--bg-elev)" />
-                  <circle cx="9" cy="6.6" r="0.7" fill="var(--bg-elev)" />
+                  <circle cx="5" cy="6.6" r="0.7" fill="var(--card)" />
+                  <circle cx="9" cy="6.6" r="0.7" fill="var(--card)" />
                 </svg>
               )}
             </span>

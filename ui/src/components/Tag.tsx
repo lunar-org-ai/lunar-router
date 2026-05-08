@@ -1,13 +1,47 @@
 import type { ReactNode } from 'react';
+import { Badge } from './ui/badge';
 import { Icon, type IconName } from './Icon';
 
 export type TagKind = '' | 'success' | 'warn' | 'bad' | 'info' | 'solid';
 
+const KIND_TO_VARIANT = {
+  '': 'neutral',
+  success: 'success',
+  warn: 'warn',
+  bad: 'bad',
+  info: 'info',
+  solid: 'solid',
+} as const;
+
 export const Tag = ({ kind, children }: { kind?: TagKind; children: ReactNode }) => (
-  <span className={`tag ${kind || ''}`}>{children}</span>
+  <Badge variant={KIND_TO_VARIANT[kind ?? '']} className="gap-1">
+    {children}
+  </Badge>
 );
 
 export type LessonStatus = 'pending' | 'approved' | 'rolled_back' | 'auto_promoted' | 'awaiting_review' | 'human_rejected';
+
+const STATUS_DOT_COLOR: Record<TagKind, string> = {
+  '': 'var(--muted-foreground)',
+  success: 'var(--accent-fg)',
+  warn: 'var(--warn-fg)',
+  bad: 'var(--bad-fg)',
+  info: 'var(--info-fg)',
+  solid: 'var(--primary-foreground)',
+};
+
+const StatusDot = ({ kind }: { kind: TagKind }) => (
+  <span
+    aria-hidden
+    style={{
+      width: 6,
+      height: 6,
+      borderRadius: '50%',
+      background: STATUS_DOT_COLOR[kind],
+      display: 'inline-block',
+    }}
+  />
+);
 
 export const StatusTag = ({ status }: { status: LessonStatus | string }) => {
   const map: Record<string, { kind: TagKind; label: string; dot: boolean }> = {
@@ -21,7 +55,7 @@ export const StatusTag = ({ status }: { status: LessonStatus | string }) => {
   const m = map[status] || { kind: '' as TagKind, label: status, dot: false };
   return (
     <Tag kind={m.kind}>
-      {m.dot && <span className="dot" />}
+      {m.dot && <StatusDot kind={m.kind} />}
       {m.label}
     </Tag>
   );

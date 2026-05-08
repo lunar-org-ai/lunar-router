@@ -3,14 +3,17 @@
  *
  * Lists lessons with status="awaiting_review" (provisional lessons the harness
  * loop wrote when policy.mode=review). Approving runs promote_queued() on the
- * backend (snapshots live, copies the candidate dir over, bumps version,
- * writes a promote ledger entry); rejecting writes a rejected entry. Either
- * way the lesson is mutated on disk and the timeline reflects it.
+ * backend; rejecting writes a rejected entry. Either way the lesson is mutated
+ * on disk and the timeline reflects it.
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from '@tanstack/react-router';
 import { Icon } from '../components/Icon';
 import { Tag, KindIcon, KindLabel } from '../components/Tag';
+import { Button } from '../components/ui/button';
+import { Card } from '../components/ui/card';
+import { preserveSearch } from '../router';
 import {
   ApiError,
   approveLesson,
@@ -22,8 +25,34 @@ import {
 
 const fmtRubric = (v: number) => `${v >= 0 ? '+' : ''}${v.toFixed(4)}`;
 
-export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void }) => {
+const DECIDED_STATUSES = new Set(['approved', 'auto_promoted', 'human_rejected']);
+
+const decidedKind = (status: string): 'approved' | 'auto' | 'rejected' =>
+  status === 'human_rejected' ? 'rejected' : status === 'auto_promoted' ? 'auto' : 'approved';
+
+// Lesson IDs are L-YYYYMMDD-HHMMSS-xxxx — parse the timestamp prefix.
+const fmtLessonTime = (id: string): string => {
+  const m = id.match(/^L-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  if (!m) return '';
+  const [, y, mo, d, h, mi] = m;
+  return `${y}-${mo}-${d} ${h}:${mi}`;
+};
+
+const HISTORY_LIMIT = 20;
+
+const deltaColor = (v: number): string =>
+  v > 0 ? 'var(--accent-fg)' : v < 0 ? 'var(--bad-fg)' : 'var(--muted-foreground)';
+
+const SectionLabel = ({ children, hint }: { children: React.ReactNode; hint?: React.ReactNode }) => (
+  <div className="dim mb-2 flex items-center gap-2 text-[12px] font-medium uppercase tracking-[0.05em]">
+    <span>{children}</span>
+    {hint && <span className="mono opacity-70">{hint}</span>}
+  </div>
+);
+
+export const Review = () => {
   const [queue, setQueue] = useState<LessonSummary[]>([]);
+  const [history, setHistory] = useState<LessonSummary[]>([]);
   const [decided, setDecided] = useState<
     { id: string; title: string; action: 'approve' | 'reject' }[]
   >([]);
@@ -37,6 +66,11 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
     try {
       const all = await listLessons();
       setQueue(all.filter((l) => l.status === 'awaiting_review'));
+      setHistory(
+        all
+          .filter((l) => DECIDED_STATUSES.has(l.status))
+          .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)),
+      );
     } catch (e) {
       setError(
         e instanceof ApiError
@@ -73,7 +107,24 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
     }
   };
 
-  if (loading && queue.length === 0 && decided.length === 0) {
+  const requeue = async (id: string) => {
+    setActing((s) => ({ ...s, [id]: 'approve' }));
+    try {
+      await requeueLesson(id);
+      setDecided((d) => d.filter((x) => x.id !== id));
+      await refresh();
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? `Undo failed: ${e.status} — ${e.message}`
+          : `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setActing((s) => ({ ...s, [id]: null }));
+    }
+  };
+
+  if (loading && queue.length === 0 && decided.length === 0 && history.length === 0) {
     return (
       <div className="content">
         <h1 className="page-title">Pending review</h1>
@@ -91,36 +142,22 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
-            {error}
-          </p>
-        </div>
+        <Card className="mb-4 border-destructive p-4">
+          <p className="dim m-0 text-destructive">{error}</p>
+        </Card>
       )}
 
       {queue.length === 0 && (
-        <div
-          className="card card-pad empty"
-          style={{
-            padding: 64,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            textAlign: 'center',
-          }}
-        >
+        <Card className="flex flex-col items-center justify-center gap-3 p-16 text-center">
           <Icon name="check" size={32} />
-          <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--fg)', marginTop: 12 }}>
-            Inbox zero.
-          </div>
-          <div style={{ marginTop: 4 }}>
+          <div className="text-base font-medium">Inbox zero.</div>
+          <div className="dim">
             The agent will check in again when it has something new to suggest.
           </div>
-        </div>
+        </Card>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="flex flex-col gap-4">
         {queue.map((l) => {
           const perRubric = l.delta?.per_rubric ?? {};
           const rubricKeys = Object.keys(perRubric);
@@ -128,140 +165,60 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
           const busy = acting[l.id];
 
           return (
-            <div className="proposal" key={l.id}>
-              <div className="h">
+            <Card key={l.id} className="gap-0 py-0">
+              <div className="flex items-center gap-2 border-b border-border px-4 py-3">
                 <Tag>
                   <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
                 </Tag>
-                <span className="title">{l.title}</span>
-                <span
-                  className="dim mono"
-                  style={{ marginLeft: 'auto', fontSize: 11.5 }}
-                >
-                  {l.id}
-                </span>
+                <span className="text-[14px] font-medium">{l.title}</span>
+                <span className="dim mono ml-auto text-[11.5px]">{l.id}</span>
               </div>
-              <div className="b">
+              <div className="grid grid-cols-[1fr_320px] gap-6 px-4 py-4">
                 <div>
-                  {l.voice && <div className="quote">"{l.voice}"</div>}
-                  <div
-                    className="dim"
-                    style={{
-                      fontSize: 12.5,
-                      marginBottom: 8,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      fontWeight: 500,
-                    }}
-                  >
-                    What changes
-                  </div>
+                  {l.voice && (
+                    <div className="mb-3 italic text-foreground leading-relaxed">"{l.voice}"</div>
+                  )}
+                  <SectionLabel>What changes</SectionLabel>
                   {l.mutations.length === 0 ? (
-                    <div className="dim" style={{ fontSize: 13 }}>No mutations recorded.</div>
+                    <div className="dim text-[13px]">No mutations recorded.</div>
                   ) : (
-                    <div
-                      className="card"
-                      style={{
-                        background: 'var(--bg-muted)',
-                        padding: '10px 12px',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 12.5,
-                        lineHeight: 1.7,
-                      }}
-                    >
+                    <div className="mono rounded-[var(--radius)] bg-muted px-3 py-2.5 text-[12.5px] leading-[1.7]">
                       {l.mutations.map((m, i) => (
                         <div key={i}>{m}</div>
                       ))}
                     </div>
                   )}
-                  <div
-                    className="dim"
-                    style={{ fontSize: 12, marginTop: 10, lineHeight: 1.5 }}
-                  >
-                    Branched from{' '}
-                    <span className="mono">{l.parent_version || '—'}</span>; candidate ID{' '}
-                    <span className="mono">{l.id}</span>
+                  <div className="dim mt-2.5 text-xs leading-snug">
+                    Branched from <span className="mono">{l.parent_version || '—'}</span>; candidate
+                    ID <span className="mono">{l.id}</span>
                   </div>
                 </div>
                 <div>
-                  <div
-                    className="dim"
-                    style={{
-                      fontSize: 12.5,
-                      marginBottom: 10,
-                      textTransform: 'uppercase',
-                      letterSpacing: '0.05em',
-                      fontWeight: 500,
-                    }}
-                  >
-                    Eval movement
-                  </div>
+                  <SectionLabel>Eval movement</SectionLabel>
                   {typeof overall === 'number' && (
-                    <div
-                      style={{
-                        padding: '10px 12px',
-                        background: 'var(--bg-muted)',
-                        borderRadius: 'var(--radius)',
-                        marginBottom: 10,
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center',
-                        fontSize: 13,
-                      }}
-                    >
+                    <div className="mb-2.5 flex items-center justify-between rounded-[var(--radius)] bg-muted px-3 py-2.5 text-[13px]">
                       <span>Δ overall</span>
                       <span
-                        className="mono"
-                        style={{
-                          fontWeight: 500,
-                          color:
-                            overall > 0
-                              ? 'var(--accent-fg)'
-                              : overall < 0
-                              ? 'var(--bad-fg)'
-                              : 'var(--fg-muted)',
-                        }}
+                        className="mono font-medium"
+                        style={{ color: deltaColor(overall) }}
                       >
                         {fmtRubric(overall)}
                       </span>
                     </div>
                   )}
                   {rubricKeys.length > 0 && (
-                    <div
-                      style={{
-                        border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius)',
-                        overflow: 'hidden',
-                        marginBottom: 14,
-                      }}
-                    >
+                    <div className="mb-3.5 overflow-hidden rounded-[var(--radius)] border border-border">
                       {rubricKeys.map((k, i) => {
                         const v = perRubric[k] ?? 0;
                         return (
                           <div
                             key={k}
-                            style={{
-                              padding: '8px 10px',
-                              borderBottom:
-                                i < rubricKeys.length - 1 ? '1px solid var(--border)' : 'none',
-                              display: 'flex',
-                              justifyContent: 'space-between',
-                              fontSize: 12.5,
-                            }}
+                            className={`flex items-center justify-between px-2.5 py-2 text-[12.5px] ${
+                              i < rubricKeys.length - 1 ? 'border-b border-border' : ''
+                            }`}
                           >
                             <span>{k}</span>
-                            <span
-                              className="mono"
-                              style={{
-                                color:
-                                  v > 0
-                                    ? 'var(--accent-fg)'
-                                    : v < 0
-                                    ? 'var(--bad-fg)'
-                                    : 'var(--fg-muted)',
-                                fontWeight: 500,
-                              }}
-                            >
+                            <span className="mono font-medium" style={{ color: deltaColor(v) }}>
                               {fmtRubric(v)}
                             </span>
                           </div>
@@ -269,98 +226,122 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
                       })}
                     </div>
                   )}
-                  <button
-                    className="btn sm ghost"
-                    onClick={() => onOpenLesson(l.id)}
-                    style={{ padding: '0 10px' }}
-                  >
-                    <Icon name="eye" size={12} /> See full reasoning
-                  </button>
+                  <Button asChild variant="ghost" size="sm" className="px-2.5">
+                    <Link to="/lesson/$id" params={{ id: l.id }} search={preserveSearch}>
+                      <Icon name="eye" size={12} /> See full reasoning
+                    </Link>
+                  </Button>
                 </div>
               </div>
-              <div className="actions">
-                <span className="left">
+              <div className="flex items-center gap-2 border-t border-border bg-[var(--bg-sunken)] px-4 py-3">
+                <span className="dim text-xs flex-1">
                   Auto-decision in <span className="mono">24h</span> per policy
                 </span>
-                <button
-                  className="btn danger"
+                <Button
+                  variant="destructive"
+                  size="sm"
                   onClick={() => onAction(l, 'reject')}
                   disabled={!!busy}
                 >
                   <Icon name="x" size={14} /> {busy === 'reject' ? 'Rejecting…' : 'Reject'}
-                </button>
-                <button
-                  className="btn success"
+                </Button>
+                <Button
+                  size="sm"
                   onClick={() => onAction(l, 'approve')}
                   disabled={!!busy}
                 >
                   <Icon name="check" size={14} />{' '}
                   {busy === 'approve' ? 'Promoting…' : 'Approve & ship'}
-                </button>
+                </Button>
               </div>
-            </div>
+            </Card>
           );
         })}
       </div>
 
       {decided.length > 0 && (
-        <div style={{ marginTop: 24 }}>
-          <div
-            className="dim"
-            style={{
-              fontSize: 12,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              marginBottom: 8,
-              fontWeight: 500,
-            }}
-          >
-            Decided just now
-          </div>
-          {decided.map(({ id, title, action }) => (
-            <div
-              key={id}
-              className="card"
-              style={{
-                padding: '12px 16px',
-                marginBottom: 8,
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12,
-                fontSize: 13.5,
-              }}
-            >
-              <Tag kind={action === 'approve' ? 'success' : 'bad'}>
-                <span className="dot" /> {action === 'approve' ? 'Approved' : 'Rejected'}
-              </Tag>
-              <span>{title}</span>
-              <button
-                className="btn ghost sm"
-                style={{ marginLeft: 'auto' }}
-                disabled={!!acting[id]}
-                onClick={async () => {
-                  setActing((s) => ({ ...s, [id]: 'approve' }));
-                  try {
-                    await requeueLesson(id);
-                    setDecided((d) => d.filter((x) => x.id !== id));
-                    await refresh();
-                  } catch (e) {
-                    setError(
-                      e instanceof ApiError
-                        ? `Undo failed: ${e.status} — ${e.message}`
-                        : `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
-                    );
-                  } finally {
-                    setActing((s) => ({ ...s, [id]: null }));
-                  }
-                }}
+        <div className="mt-6">
+          <SectionLabel>Decided just now</SectionLabel>
+          <div className="flex flex-col gap-2">
+            {decided.map(({ id, title, action }) => (
+              <Card
+                key={id}
+                className="flex flex-row items-center gap-3 px-4 py-3 text-[13.5px]"
               >
-                {acting[id] ? 'Undoing…' : 'Undo'}
-              </button>
-            </div>
-          ))}
+                <Tag kind={action === 'approve' ? 'success' : 'bad'}>
+                  {action === 'approve' ? 'Approved' : 'Rejected'}
+                </Tag>
+                <span className="flex-1 truncate">{title}</span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!!acting[id]}
+                  onClick={() => requeue(id)}
+                >
+                  {acting[id] ? 'Undoing…' : 'Undo'}
+                </Button>
+              </Card>
+            ))}
+          </div>
         </div>
       )}
+
+      {(() => {
+        const decidedNowIds = new Set(decided.map((d) => d.id));
+        const earlier = history.filter((l) => !decidedNowIds.has(l.id));
+        if (earlier.length === 0) return null;
+        const shown = earlier.slice(0, HISTORY_LIMIT);
+        return (
+          <div className="mt-6">
+            <SectionLabel
+              hint={
+                earlier.length > HISTORY_LIMIT
+                  ? `showing ${HISTORY_LIMIT} of ${earlier.length}`
+                  : `${earlier.length}`
+              }
+            >
+              Earlier decisions
+            </SectionLabel>
+            <div className="flex flex-col gap-2">
+              {shown.map((l) => {
+                const kind = decidedKind(l.status);
+                const tagKind = kind === 'rejected' ? 'bad' : 'success';
+                const label =
+                  kind === 'rejected' ? 'Rejected' : kind === 'auto' ? 'Auto-promoted' : 'Approved';
+                const when = (kind !== 'rejected' && l.promoted_at) || fmtLessonTime(l.id);
+                return (
+                  <Card
+                    key={l.id}
+                    className="flex flex-row items-center gap-3 px-4 py-3 text-[13.5px]"
+                  >
+                    <Tag kind={tagKind}>{label}</Tag>
+                    <Tag>
+                      <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
+                    </Tag>
+                    <span className="flex-1 truncate">{l.title}</span>
+                    {when && <span className="dim mono text-[11.5px]">{when}</span>}
+                    <Button asChild variant="ghost" size="sm">
+                      <Link to="/lesson/$id" params={{ id: l.id }} search={preserveSearch}>
+                        <Icon name="eye" size={12} /> Details
+                      </Link>
+                    </Button>
+                    {kind === 'rejected' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={!!acting[l.id]}
+                        onClick={() => requeue(l.id)}
+                      >
+                        {acting[l.id] ? 'Requeuing…' : 'Requeue'}
+                      </Button>
+                    )}
+                  </Card>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };
