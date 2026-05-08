@@ -540,10 +540,11 @@ const TraceDrawer = ({
   const verdict: Verdict = trace ? (trace.success && !trace.error ? 'pass' : 'fail') : 'pass';
 
   // Pull the full session for traces that carry a session_id. If there's
-  // more than one trace with the same session_id, we can render the entire
-  // dialog (across multiple /run calls) instead of just this single turn.
+  // more than one trace with the same session_id, we render the entire
+  // dialog (across multiple /run calls) by default — single-turn view is
+  // opt-in via "Show this turn only".
   const [session, setSession] = useState<SessionDetail | null>(null);
-  const [showSession, setShowSession] = useState(false);
+  const [forceTurnOnly, setForceTurnOnly] = useState(false);
   useEffect(() => {
     if (!trace?.session_id) {
       setSession(null);
@@ -562,7 +563,14 @@ const TraceDrawer = ({
     };
   }, [trace?.session_id]);
 
+  // When the user navigates to a different trace, reset the toggle so the
+  // default (full session view) kicks in again.
+  useEffect(() => {
+    setForceTurnOnly(false);
+  }, [traceId]);
+
   const sessionHasMore = !!session && session.n_turns > 1;
+  const showSession = sessionHasMore && !forceTurnOnly;
   const totalTurns = trace ? (trace.history?.length || 0) + 1 : 0;
 
   const copyJson = async () => {
@@ -698,11 +706,13 @@ const TraceDrawer = ({
                       }}
                     >
                       <span className="dim">
-                        This trace is one turn of a {session?.n_turns}-turn session.
+                        {showSession
+                          ? `Showing all ${session?.n_turns} turns of this session.`
+                          : `This trace is one turn of a ${session?.n_turns}-turn session.`}
                       </span>
                       <button
                         className="btn sm ghost"
-                        onClick={() => setShowSession((v) => !v)}
+                        onClick={() => setForceTurnOnly((v) => !v)}
                       >
                         {showSession ? 'Show this turn only' : 'View full session'}
                       </button>
