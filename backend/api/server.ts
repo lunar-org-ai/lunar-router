@@ -4,6 +4,7 @@ import { logger } from 'hono/logger'
 import { apiKeyAuth } from '../auth/api_key'
 import { introspectRouter } from '../channels/introspect/handler'
 import { lessonsRouter } from '../channels/lessons/handler'
+import { metricsRouter } from '../channels/metrics/handler'
 import { versionsRouter } from '../channels/versions/handler'
 import { webhookRouter } from '../channels/webhook/handler'
 
@@ -27,6 +28,7 @@ app.route('/v1/webhook', webhookRouter)
 app.route('/v1/introspect', introspectRouter)
 app.route('/v1/versions', versionsRouter)
 app.route('/v1/lessons', lessonsRouter)
+app.route('/v1/metrics', metricsRouter)
 
 // Convention: 8001 = python runtime, 8002 = ts backend.
 const port = Number(process.env.PORT ?? 8002)

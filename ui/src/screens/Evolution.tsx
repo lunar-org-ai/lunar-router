@@ -1,20 +1,28 @@
 /**
  * Evolution — the home of the agent.
  *
- * AHE paper (arxiv 2604.25850) three pillars structure each card:
+ * AHE paper (arxiv 2604.25850) three pillars structure each lesson card:
  *   - decision   → voice (the agent's first-person rationale, top of card)
  *   - component  → mutations (the file/knob change, mono dim row)
- *   - experience → delta.overall_score / delta.pass_rate (small Δ chip)
+ *   - experience → delta.overall_score (small Δ chip)
  *
- * Operational metrics (CSAT, Resolution rate, Trust score, "in conversation
- * now" ticker) are intentionally absent until the agent is hooked into real
- * production traffic. Showing synthesized numbers here would be theatre.
+ * The lesson timeline is the only panel running on real backend data today
+ * (listLessons → /v1/lessons). The live strip, trust score, and overall
+ * metrics row are still on illustrative values from data.ts — they'll move
+ * to real signals when production telemetry lands.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Icon } from '../components/Icon';
+import { Sparkline } from '../components/Sparkline';
 import { Tag, StatusTag, KindIcon, KindLabel } from '../components/Tag';
-import { ApiError, listLessons, type LessonSummary } from '../api';
+import {
+  ApiError,
+  getMetricsOverview,
+  listLessons,
+  type LessonSummary,
+  type MetricsOverview,
+} from '../api';
 
 interface Props {
   onOpenLesson: (id: string) => void;
@@ -43,6 +51,7 @@ type Filter = 'all' | 'approved' | 'rolled_back';
 
 export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) => {
   const [lessons, setLessons] = useState<LessonSummary[]>([]);
+  const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<Filter>('all');
@@ -51,8 +60,9 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
     setLoading(true);
     setError(null);
     try {
-      const items = await listLessons();
+      const [items, m] = await Promise.all([listLessons(), getMetricsOverview().catch(() => null)]);
       setLessons(items);
+      if (m) setMetrics(m);
     } catch (e) {
       setError(
         e instanceof ApiError
@@ -72,6 +82,27 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
     () => lessons.filter((l) => l.status === 'pending' || l.status === 'awaiting_review'),
     [lessons],
   );
+
+  const overallMetrics = useMemo(() => {
+    const m = metrics;
+    const trustValue = m ? String(m.trust_score) : '—';
+    const trustDelta = m
+      ? `${m.trust_score_delta_30d >= 0 ? '+' : ''}${m.trust_score_delta_30d} / 30d`
+      : '—';
+    const trustDir: 'up' | 'down' = m && m.trust_score_delta_30d >= 0 ? 'up' : 'down';
+
+    const res = m?.resolution_rate;
+    const resValue = res != null ? `${(res * 100).toFixed(0)}%` : '—';
+
+    return [
+      { label: 'Trust score', value: trustValue, delta: trustDelta, dir: trustDir },
+      { label: 'Resolution rate', value: resValue, delta: '—', dir: 'up' as const },
+      // No real cost / CSAT signal yet (stubs don't track tokens; no customer
+      // feedback loop). These cells stay as illustrative placeholders.
+      { label: 'Avg cost / conv', value: '—', delta: '—', dir: 'up' as const },
+      { label: 'CSAT', value: '—', delta: '—', dir: 'up' as const },
+    ];
+  }, [metrics]);
 
   const filtered = useMemo(() => {
     if (filter === 'approved') {
@@ -117,50 +148,79 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
     );
   }
 
-  if (loading && lessons.length === 0) {
-    return (
-      <div className="content">
-        <h1 className="page-title">Agent evolution</h1>
-        <p className="page-sub">Loading…</p>
-      </div>
-    );
-  }
-
-  if (error && lessons.length === 0) {
-    return (
-      <div className="content">
-        <h1 className="page-title">Agent evolution</h1>
-        <p className="page-sub" style={{ color: 'var(--bad)' }}>
-          {error}
-        </p>
-        <button className="btn" onClick={load}>
-          Retry
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div className="content">
+      <div className="live-strip">
+        <span className="pulse-dot" />
+        <span style={{ fontWeight: 500 }}>Live now</span>
+        <span className="sep" />
+        <span className="stat-mini">
+          <b>{metrics?.active_5min ?? '—'}</b>
+          <span className="l">in conversation</span>
+        </span>
+        <span className="stat-mini">
+          <b>{metrics?.today_count ?? '—'}</b>
+          <span className="l">today</span>
+        </span>
+        <span className="stat-mini">
+          <b>{metrics?.pending_review ?? pending.length}</b>
+          <span className="l">flagged for review</span>
+        </span>
+        <span style={{ marginLeft: 'auto' }}>
+          <button className="btn ghost sm" onClick={() => onNav('talk')}>
+            Ask the agent <Icon name="chevron" size={12} />
+          </button>
+        </span>
+      </div>
+
       <div
         style={{
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'flex-end',
           marginBottom: 28,
-          gap: 16,
         }}
       >
         <div>
           <h1 className="page-title">Agent evolution</h1>
           <p className="page-sub" style={{ margin: 0 }}>
-            Everything your agent has learned, why it changed, and how those changes performed
-            against its evals.
+            Everything your agent has learned, why it changed, and how those changes performed in
+            production.
           </p>
         </div>
-        <button className="btn ghost sm" onClick={() => onNav('talk')}>
-          <Icon name="chat" size={14} /> Ask the agent
-        </button>
+        <div className="card" style={{ padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 18 }}>
+          <div>
+            <div
+              className="dim"
+              style={{
+                fontSize: 11,
+                textTransform: 'uppercase',
+                letterSpacing: '0.05em',
+                marginBottom: 2,
+              }}
+            >
+              Trust score
+            </div>
+            <div style={{ fontSize: 26, fontWeight: 600, letterSpacing: '-0.01em' }}>
+              {metrics?.trust_score ?? '—'}
+              <span className="dim" style={{ fontSize: 14, fontWeight: 400 }}>
+                {' '}
+                / 100
+              </span>
+            </div>
+          </div>
+          <Sparkline data={metrics?.trust_history_30d ?? []} w={180} h={48} />
+        </div>
+      </div>
+
+      <div className="metrics-row">
+        {overallMetrics.map((m) => (
+          <div className="metric" key={m.label}>
+            <div className="label">{m.label}</div>
+            <div className="value">{m.value}</div>
+            <div className={`delta ${m.dir}`}>{m.delta}</div>
+          </div>
+        ))}
       </div>
 
       {error && (
@@ -201,7 +261,7 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
                 your review
               </div>
               <div className="dim" style={{ fontSize: 12.5, marginTop: 2 }}>
-                Review and approve, or let it auto-rollback per policy.
+                Review and approve, or let it roll back automatically in 24h.
               </div>
             </div>
             <button className="btn primary" onClick={() => onNav('review')}>
@@ -211,104 +271,102 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
         </div>
       )}
 
-      {lessons.length === 0 ? (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 16,
+        }}
+      >
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, letterSpacing: '-0.01em' }}>
+          What I've been learning
+        </h2>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <button
+            className={`btn sm ${filter === 'all' ? '' : 'ghost'}`}
+            onClick={() => setFilter('all')}
+          >
+            All
+          </button>
+          <button
+            className={`btn sm ${filter === 'approved' ? '' : 'ghost'}`}
+            onClick={() => setFilter('approved')}
+          >
+            Approved
+          </button>
+          <button
+            className={`btn sm ${filter === 'rolled_back' ? '' : 'ghost'}`}
+            onClick={() => setFilter('rolled_back')}
+          >
+            Rolled back
+          </button>
+        </div>
+      </div>
+
+      {loading && lessons.length === 0 ? (
+        <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>Loading lessons…</div>
+      ) : lessons.length === 0 ? (
         <div className="card card-pad" style={{ textAlign: 'center', padding: '48px 20px' }}>
-          <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            No lessons yet
-          </div>
+          <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>No lessons yet</div>
           <div className="dim" style={{ fontSize: 13, maxWidth: 480, margin: '0 auto' }}>
             The agent hasn't promoted any change yet. Run the harness loop to generate
             candidates — promotions land here as they happen.
           </div>
         </div>
       ) : (
-        <>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: 16,
-            }}
-          >
-            <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, letterSpacing: '-0.01em' }}>
-              What I've been learning
-            </h2>
-            <div style={{ display: 'flex', gap: 6 }}>
-              <button
-                className={`btn sm ${filter === 'all' ? '' : 'ghost'}`}
-                onClick={() => setFilter('all')}
-              >
-                All
-              </button>
-              <button
-                className={`btn sm ${filter === 'approved' ? '' : 'ghost'}`}
-                onClick={() => setFilter('approved')}
-              >
-                Approved
-              </button>
-              <button
-                className={`btn sm ${filter === 'rolled_back' ? '' : 'ghost'}`}
-                onClick={() => setFilter('rolled_back')}
-              >
-                Rolled back
-              </button>
-            </div>
-          </div>
-
-          <div className="timeline">
-            {filtered.map((l) => {
-              const overall = l.delta?.overall_score;
-              return (
-                <div className="tl-item" key={l.id}>
-                  <div className={`tl-node ${tlNodeClass(l)}`} />
-                  <div className="tl-date">{fmtDay(l.promoted_at)}</div>
-                  <div className="card lesson-card" onClick={() => onOpenLesson(l.id)}>
-                    <div className="head">
-                      <Tag>
-                        <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
-                      </Tag>
-                      {l.version && (
-                        <span className="mono dim" style={{ fontSize: 11.5 }}>
-                          {l.version}
-                        </span>
-                      )}
-                      <div style={{ marginLeft: 'auto' }}>
-                        <StatusTag status={l.status} />
-                      </div>
-                    </div>
-                    <div className="quote">{l.voice ? `"${l.voice}"` : l.summary}</div>
-                    <div className="footing">
-                      <div className="stats">
-                        {l.mutations.length > 0 && (
-                          <span className="stat" style={{ fontFamily: 'var(--font-mono)' }}>
-                            <Icon name="code" size={12} /> {l.mutations[0]}
-                            {l.mutations.length > 1 && ` +${l.mutations.length - 1}`}
-                          </span>
-                        )}
-                        {typeof overall === 'number' && (
-                          <span className="stat">
-                            <Icon name="bolt" size={12} />
-                            Δoverall {overall >= 0 ? '+' : ''}
-                            {overall.toFixed(4)}
-                          </span>
-                        )}
-                      </div>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        Open <Icon name="chevron" size={12} />
+        <div className="timeline">
+          {filtered.map((l) => {
+            const overall = l.delta?.overall_score;
+            return (
+              <div className="tl-item" key={l.id}>
+                <div className={`tl-node ${tlNodeClass(l)}`} />
+                <div className="tl-date">{fmtDay(l.promoted_at)}</div>
+                <div className="card lesson-card" onClick={() => onOpenLesson(l.id)}>
+                  <div className="head">
+                    <Tag>
+                      <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
+                    </Tag>
+                    {l.version && (
+                      <span className="mono dim" style={{ fontSize: 11.5 }}>
+                        {l.version}
                       </span>
+                    )}
+                    <div style={{ marginLeft: 'auto' }}>
+                      <StatusTag status={l.status} />
                     </div>
                   </div>
+                  <div className="quote">{l.voice ? `"${l.voice}"` : l.summary}</div>
+                  <div className="footing">
+                    <div className="stats">
+                      {l.mutations.length > 0 && (
+                        <span className="stat" style={{ fontFamily: 'var(--font-mono)' }}>
+                          <Icon name="code" size={12} /> {l.mutations[0]}
+                          {l.mutations.length > 1 && ` +${l.mutations.length - 1}`}
+                        </span>
+                      )}
+                      {typeof overall === 'number' && (
+                        <span className="stat">
+                          <Icon name="bolt" size={12} />
+                          Δoverall {overall >= 0 ? '+' : ''}
+                          {overall.toFixed(4)}
+                        </span>
+                      )}
+                    </div>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      Open <Icon name="chevron" size={12} />
+                    </span>
+                  </div>
                 </div>
-              );
-            })}
-            {filtered.length === 0 && (
-              <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>
-                No lessons match this filter.
               </div>
-            )}
-          </div>
-        </>
+            );
+          })}
+          {filtered.length === 0 && (
+            <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>
+              No lessons match this filter.
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

@@ -13,6 +13,7 @@ Endpoints:
   POST /versions/{version}/rollback    — restore live agent/ to a prior version.
   GET  /lessons                        — flat lesson feed (Evolution timeline).
   GET  /lessons/{id}                   — single lesson by id.
+  GET  /metrics/overview               — derived dashboard metrics.
 """
 
 from __future__ import annotations
@@ -332,6 +333,142 @@ async def rollback_version(version: str, payload: Optional[RollbackRequest] = No
     reason = (payload.reason if payload else None) or "ui rollback"
     rollback_to(version, reason=reason)
     return RollbackResponse(version=version, previous_version=previous, rolled_back=True)
+
+
+# ---------- metrics ----------
+#
+# Dashboard numbers derived from what we actually have on disk:
+#   - traces/raw/<YYYY-MM-DD>.jsonl  → today_count, active_5min, resolution_rate, latency
+#   - ledger/entries/*.jsonl         → promote/rollback ratio → trust_score + history
+#   - ledger/lessons/*.json          → pending_review
+#
+# Fields we can't derive yet (avg_cost_usd, csat) are returned as null so the
+# UI can render them as "—" until production traffic lands.
+
+
+class MetricsOverview(BaseModel):
+    today_count: int
+    active_5min: int
+    pending_review: int
+    trust_score: int
+    trust_score_delta_30d: int
+    trust_history_30d: list[int]
+    resolution_rate: Optional[float] = None
+    avg_latency_ms: Optional[float] = None
+    avg_cost_usd: Optional[float] = None
+    csat: Optional[float] = None
+    computed_at: str
+
+
+@app.get("/metrics/overview", response_model=MetricsOverview)
+async def metrics_overview() -> MetricsOverview:
+    import json
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path
+
+    from ledger.writer import read_entries, read_lessons
+
+    now = datetime.now(timezone.utc)
+    today_str = now.date().isoformat()
+    five_min_ago = now - timedelta(minutes=5)
+
+    traces_dir = Path(__file__).resolve().parent.parent / "traces" / "raw"
+
+    def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        if not path.exists():
+            return rows
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    pass
+        return rows
+
+    today_traces = _load_jsonl(traces_dir / f"{today_str}.jsonl")
+    today_count = len(today_traces)
+
+    active_5min = 0
+    for t in today_traces:
+        ts_raw = t.get("timestamp")
+        if not ts_raw:
+            continue
+        try:
+            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            if ts > five_min_ago:
+                active_5min += 1
+        except Exception:
+            pass
+
+    recent_traces: list[dict[str, Any]] = []
+    if traces_dir.exists():
+        for fp in sorted(traces_dir.glob("*.jsonl"), reverse=True)[:7]:
+            recent_traces.extend(_load_jsonl(fp))
+
+    resolution_rate: Optional[float] = None
+    avg_latency_ms: Optional[float] = None
+    if recent_traces:
+        def _ok(t: dict[str, Any]) -> bool:
+            if not t.get("response"):
+                return False
+            for s in t.get("stages") or []:
+                if s.get("error"):
+                    return False
+            return True
+
+        ok_count = sum(1 for t in recent_traces if _ok(t))
+        resolution_rate = ok_count / len(recent_traces)
+        avg_latency_ms = sum(float(t.get("duration_ms", 0) or 0) for t in recent_traces) / len(
+            recent_traces
+        )
+
+    entries = read_entries()
+    by_date_p: dict[str, int] = defaultdict(int)
+    by_date_r: dict[str, int] = defaultdict(int)
+    for e in entries:
+        d = (e.timestamp or "")[:10]
+        if not d:
+            continue
+        if e.kind == "promote":
+            by_date_p[d] += 1
+        elif e.kind == "rollback":
+            by_date_r[d] += 1
+
+    history: list[int] = []
+    cum_p, cum_r = 0, 0
+    for i in range(29, -1, -1):
+        d = (now - timedelta(days=i)).date().isoformat()
+        cum_p += by_date_p.get(d, 0)
+        cum_r += by_date_r.get(d, 0)
+        if cum_p > 0:
+            history.append(max(0, min(100, int(round((1 - cum_r / cum_p) * 100)))))
+        else:
+            history.append(70)  # baseline before any promotions
+
+    trust_score = history[-1]
+    trust_score_delta_30d = trust_score - history[0]
+
+    lessons = read_lessons()
+    pending = sum(1 for l in lessons if l.status in ("pending", "awaiting_review"))
+
+    return MetricsOverview(
+        today_count=today_count,
+        active_5min=active_5min,
+        pending_review=pending,
+        trust_score=trust_score,
+        trust_score_delta_30d=trust_score_delta_30d,
+        trust_history_30d=history,
+        resolution_rate=resolution_rate,
+        avg_latency_ms=avg_latency_ms,
+        avg_cost_usd=None,
+        csat=None,
+        computed_at=now.isoformat(),
+    )
 
 
 @app.post("/run", response_model=RunResponse)

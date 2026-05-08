@@ -132,6 +132,31 @@ export async function listLessons(): Promise<LessonSummary[]> {
   return (await res.json()) as LessonSummary[];
 }
 
+// ---------- metrics overview ----------
+
+export interface MetricsOverview {
+  today_count: number;
+  active_5min: number;
+  pending_review: number;
+  trust_score: number;
+  trust_score_delta_30d: number;
+  trust_history_30d: number[];
+  resolution_rate: number | null;
+  avg_latency_ms: number | null;
+  avg_cost_usd: number | null;
+  csat: number | null;
+  computed_at: string;
+}
+
+export async function getMetricsOverview(): Promise<MetricsOverview> {
+  const res = await fetch('/v1/metrics/overview');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as MetricsOverview;
+}
+
 export async function getLesson(id: string): Promise<LessonSummary> {
   const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}`);
   if (!res.ok) {
