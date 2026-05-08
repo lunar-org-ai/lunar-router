@@ -4,6 +4,7 @@ import { Tag } from '../components/Tag';
 import {
   ApiError,
   getReport,
+  getSession,
   getSuite,
   getTrace,
   listReports,
@@ -11,6 +12,7 @@ import {
   listTraces,
   type ReportDetail,
   type ReportSummary,
+  type SessionDetail,
   type SuiteDetail,
   type SuiteSummary,
   type TraceDetail,
@@ -104,16 +106,63 @@ const excerptOf = (t: TraceSummary): string => {
   return '(empty)';
 };
 
-// Single-turn traces today — request becomes the customer line, response
-// the agent line. When we add session/conversation grouping, this becomes
-// the real conversation thread.
-const buildTranscript = (t: TraceDetail): { role: 'user' | 'agent'; text: string }[] => {
-  const out: { role: 'user' | 'agent'; text: string }[] = [];
+// Build the conversation thread for a trace.
+//
+// `trace.history` is every turn the caller already had in context when this
+// trace ran; the trace itself contributes one more (request → response).
+// Result: the full dialog up to and including this turn, rendered as chat.
+//
+// If the trace also belongs to a session_id and the session has more turns
+// AFTER this one (e.g. another /run call later), the drawer offers a
+// "View full session" toggle that swaps in the cross-trace transcript.
+
+type Role = 'user' | 'agent' | 'tool' | 'system';
+
+const normalizeRole = (raw: string): Role => {
+  const r = (raw || '').toLowerCase();
+  if (r === 'user' || r === 'customer' || r === 'human') return 'user';
+  if (r === 'tool') return 'tool';
+  if (r === 'system') return 'system';
+  return 'agent';
+};
+
+const buildTranscript = (t: TraceDetail): { role: Role; text: string }[] => {
+  const out: { role: Role; text: string }[] = [];
+  for (const h of t.history || []) {
+    out.push({ role: normalizeRole(h.role), text: h.content });
+  }
   out.push({ role: 'user', text: t.request || '(empty request)' });
   if (t.response) {
     out.push({ role: 'agent', text: t.response });
   } else if (t.error) {
     out.push({ role: 'agent', text: `[error] ${t.error}` });
+  }
+  return out;
+};
+
+const buildSessionTranscript = (
+  s: SessionDetail,
+  highlightTraceId: string | null,
+): { role: Role; text: string; trace_id: string; isCurrent: boolean }[] => {
+  const out: { role: Role; text: string; trace_id: string; isCurrent: boolean }[] = [];
+  for (const turn of s.turns) {
+    const isCurrent = turn.trace_id === highlightTraceId;
+    out.push({
+      role: 'user',
+      text: turn.request || '(empty)',
+      trace_id: turn.trace_id,
+      isCurrent,
+    });
+    if (turn.response) {
+      out.push({ role: 'agent', text: turn.response, trace_id: turn.trace_id, isCurrent });
+    } else if (turn.error) {
+      out.push({
+        role: 'agent',
+        text: `[error] ${turn.error}`,
+        trace_id: turn.trace_id,
+        isCurrent,
+      });
+    }
   }
   return out;
 };
@@ -490,6 +539,32 @@ const TraceDrawer = ({
   const routingModel = trace?.stages.find((s) => s.stage === 'route')?.routing_model || null;
   const verdict: Verdict = trace ? (trace.success && !trace.error ? 'pass' : 'fail') : 'pass';
 
+  // Pull the full session for traces that carry a session_id. If there's
+  // more than one trace with the same session_id, we can render the entire
+  // dialog (across multiple /run calls) instead of just this single turn.
+  const [session, setSession] = useState<SessionDetail | null>(null);
+  const [showSession, setShowSession] = useState(false);
+  useEffect(() => {
+    if (!trace?.session_id) {
+      setSession(null);
+      return;
+    }
+    let cancelled = false;
+    getSession(trace.session_id)
+      .then((s) => {
+        if (!cancelled) setSession(s);
+      })
+      .catch(() => {
+        /* session fetch failure is non-fatal — single-trace view still works */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [trace?.session_id]);
+
+  const sessionHasMore = !!session && session.n_turns > 1;
+  const totalTurns = trace ? (trace.history?.length || 0) + 1 : 0;
+
   const copyJson = async () => {
     if (!trace) return;
     try {
@@ -526,7 +601,12 @@ const TraceDrawer = ({
                 <span>·</span>
                 <span className="mono">{routingModel || '—'}</span>
                 <span>·</span>
-                <span>1 turn</span>
+                <span>
+                  {totalTurns} turn{totalTurns !== 1 ? 's' : ''}
+                  {sessionHasMore && session && session.n_turns > totalTurns && (
+                    <span style={{ marginLeft: 4 }}>· {session.n_turns} in session</span>
+                  )}
+                </span>
                 <span>·</span>
                 <span className="mono">— tok</span>
                 <span>·</span>
@@ -535,6 +615,14 @@ const TraceDrawer = ({
                 <span className="mono">{fmtDuration(trace.duration_ms)}</span>
                 <span>·</span>
                 <span className="mono">{trace.agent_version || '—'}</span>
+                {trace.session_id && (
+                  <>
+                    <span>·</span>
+                    <span className="mono" title="Session id">
+                      {trace.session_id.slice(0, 14)}…
+                    </span>
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -594,20 +682,85 @@ const TraceDrawer = ({
 
             <div className="sheet-body">
               {tab === 'transcript' && (
-                <div className="transcript">
-                  {transcript.map((m, i) => (
-                    <div key={i} className={`msg msg-${m.role}`}>
-                      <div className="msg-role">{m.role === 'agent' ? 'Agent' : 'Customer'}</div>
-                      <div className="msg-body">{m.text}</div>
-                    </div>
-                  ))}
-                  {trace.success && transcript.length === 1 && (
-                    <div className="dim" style={{ fontSize: 12, marginTop: 12, lineHeight: 1.5 }}>
-                      Single-turn trace — the pipeline returned no response. Check the Stages tab
-                      for the per-stage breakdown.
+                <>
+                  {sessionHasMore && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                        marginBottom: 12,
+                        padding: '8px 12px',
+                        background: 'var(--bg-muted)',
+                        borderRadius: 8,
+                        fontSize: 12.5,
+                      }}
+                    >
+                      <span className="dim">
+                        This trace is one turn of a {session?.n_turns}-turn session.
+                      </span>
+                      <button
+                        className="btn sm ghost"
+                        onClick={() => setShowSession((v) => !v)}
+                      >
+                        {showSession ? 'Show this turn only' : 'View full session'}
+                      </button>
                     </div>
                   )}
-                </div>
+                  <div className="transcript">
+                    {showSession && session
+                      ? buildSessionTranscript(session, traceId).map((m, i) => (
+                          <div
+                            key={i}
+                            className={`msg msg-${m.role}`}
+                            style={{
+                              opacity: m.isCurrent ? 1 : 0.85,
+                            }}
+                            title={m.trace_id === traceId ? 'This trace' : `Other trace · ${m.trace_id.slice(0, 8)}…`}
+                          >
+                            <div className="msg-role">
+                              {m.role === 'agent' ? 'Agent' : 'Customer'}
+                              {m.isCurrent && (
+                                <span
+                                  className="dim mono"
+                                  style={{ fontSize: 10, marginLeft: 6 }}
+                                >
+                                  · this turn
+                                </span>
+                              )}
+                            </div>
+                            <div className="msg-body">{m.text}</div>
+                          </div>
+                        ))
+                      : transcript.map((m, i) => (
+                          <div key={i} className={`msg msg-${m.role}`}>
+                            <div className="msg-role">
+                              {m.role === 'agent'
+                                ? 'Agent'
+                                : m.role === 'tool'
+                                ? 'Tool'
+                                : m.role === 'system'
+                                ? 'System'
+                                : 'Customer'}
+                            </div>
+                            <div className="msg-body">{m.text}</div>
+                          </div>
+                        ))}
+                    {trace.success &&
+                      transcript.length <= 1 &&
+                      !showSession &&
+                      !sessionHasMore && (
+                        <div
+                          className="dim"
+                          style={{ fontSize: 12, marginTop: 12, lineHeight: 1.5 }}
+                        >
+                          Single-turn trace — caller didn't pass a history. Future calls that
+                          include prior turns will render the full thread here.
+                        </div>
+                      )}
+                  </div>
+                </>
               )}
 
               {tab === 'stages' && (

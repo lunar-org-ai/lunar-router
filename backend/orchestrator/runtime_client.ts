@@ -68,6 +68,7 @@ function resolveUrl(opts: ClientOptions): string {
 export async function runAgent(
   request: string,
   history: HistoryMessage[] | undefined = undefined,
+  session_id?: string,
   opts: ClientOptions = {},
 ): Promise<RunResponse> {
   const url = resolveUrl(opts) + '/run'
@@ -79,7 +80,7 @@ export async function runAgent(
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ request, history }),
+      body: JSON.stringify({ request, history, session_id }),
       signal: controller.signal,
     })
 

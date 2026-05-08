@@ -173,6 +173,11 @@ export interface TraceStageView {
   error: string | null;
 }
 
+export interface HistoryTurn {
+  role: string;
+  content: string;
+}
+
 export interface TraceSummary {
   trace_id: string;
   timestamp: string;
@@ -184,6 +189,8 @@ export interface TraceSummary {
   agent_version: string | null;
   n_stages: number;
   routing_model: string | null;
+  session_id: string | null;
+  n_turns: number;
 }
 
 export interface TracesPage {
@@ -197,6 +204,35 @@ export interface TracesPage {
 export interface TraceDetail extends TraceSummary {
   stages: TraceStageView[];
   metadata: Record<string, unknown>;
+  history: HistoryTurn[];
+}
+
+export interface SessionTurn {
+  trace_id: string;
+  timestamp: string;
+  request: string;
+  response: string | null;
+  success: boolean;
+  error: string | null;
+  agent_version: string | null;
+  duration_ms: number;
+}
+
+export interface SessionDetail {
+  session_id: string;
+  n_turns: number;
+  started_at: string;
+  last_at: string;
+  turns: SessionTurn[];
+}
+
+export async function getSession(id: string): Promise<SessionDetail> {
+  const res = await fetch(`/v1/sessions/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as SessionDetail;
 }
 
 export async function listTraces(opts: {

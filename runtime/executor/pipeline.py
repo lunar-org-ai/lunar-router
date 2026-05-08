@@ -33,7 +33,12 @@ class StageRecord:
 
 @dataclass
 class ExecutionRecord:
-    """Full execution record — the trace event for one request."""
+    """Full execution record — the trace event for one request.
+
+    Persists `history` so the UI can render the full conversation thread
+    instead of just the single turn — every prior turn the caller passed
+    in via /run becomes part of the trace's transcript.
+    """
 
     request: str
     response: Optional[str]
@@ -43,6 +48,8 @@ class ExecutionRecord:
     error: Optional[str] = None
     agent_version: Optional[str] = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    history: list[dict[str, Any]] = field(default_factory=list)
+    session_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -58,8 +65,14 @@ class PipelineExecutor:
         self,
         request: str,
         history: Optional[list[Message]] = None,
+        session_id: Optional[str] = None,
     ) -> tuple[Context, ExecutionRecord]:
         ctx = Context(request=request, history=list(history or []))
+        # Snapshot the history we received so the trace can render the full
+        # conversation thread later, not just this single turn.
+        history_serialized: list[dict[str, Any]] = [
+            {"role": m.role, "content": m.content} for m in (history or [])
+        ]
         records: list[StageRecord] = []
         success = True
         error: Optional[str] = None
@@ -101,5 +114,7 @@ class PipelineExecutor:
             success=success,
             error=error,
             agent_version=self.pipeline.config.version,
+            history=history_serialized,
+            session_id=session_id,
         )
         return ctx, record

@@ -17,6 +17,7 @@ const HistoryMessageSchema = z.object({
 const WebhookBodySchema = z.object({
   request: z.string().min(1),
   history: z.array(HistoryMessageSchema).optional(),
+  session_id: z.string().optional(),
 })
 
 export const webhookRouter = new Hono()
@@ -35,7 +36,11 @@ webhookRouter.post('/', async (c) => {
   }
 
   try {
-    const result = await runAgent(parsed.data.request, parsed.data.history)
+    const result = await runAgent(
+      parsed.data.request,
+      parsed.data.history,
+      parsed.data.session_id,
+    )
     return c.json({
       response: result.response,
       trace_id: result.trace_id,

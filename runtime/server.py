@@ -25,7 +25,8 @@ Endpoints:
   PUT  /agent/prompt                   — rewrite agent/prompts/system.md.
   PUT  /agent/route                    — rewrite route.yaml model knobs.
   GET  /traces                         — list raw traces (Technical / Traces).
-  GET  /traces/{trace_id}              — single trace with full stages.
+  GET  /traces/{trace_id}              — single trace with full stages + history.
+  GET  /sessions/{session_id}          — every trace sharing a session id (dialog).
   GET  /evals/suites                   — list eval suites (Technical / Eval).
   GET  /evals/suites/{name}            — suite detail (goldens + rubrics).
   GET  /evals/reports                  — recent runs (filterable by suite).
@@ -62,6 +63,7 @@ class HistoryMessage(BaseModel):
 class RunRequest(BaseModel):
     request: str
     history: Optional[list[HistoryMessage]] = None
+    session_id: Optional[str] = None
 
 
 class StageOutcome(BaseModel):
@@ -767,6 +769,11 @@ class TraceStageView(BaseModel):
     error: Optional[str] = None
 
 
+class HistoryTurn(BaseModel):
+    role: str
+    content: str
+
+
 class TraceSummary(BaseModel):
     trace_id: str
     timestamp: str
@@ -778,6 +785,8 @@ class TraceSummary(BaseModel):
     agent_version: Optional[str] = None
     n_stages: int = 0
     routing_model: Optional[str] = None  # picked off the route stage
+    session_id: Optional[str] = None
+    n_turns: int = 1  # history length + this turn
 
 
 class TracesPage(BaseModel):
@@ -791,6 +800,7 @@ class TracesPage(BaseModel):
 class TraceDetail(TraceSummary):
     stages: list[TraceStageView] = []
     metadata: dict[str, Any] = {}
+    history: list[HistoryTurn] = []  # the conversation up to (not including) this turn
 
 
 _TRACES_DIR = Path(__file__).resolve().parent.parent / "traces" / "raw"
@@ -820,6 +830,7 @@ def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
         if s.get("stage") == "route" and s.get("routing_model"):
             routing_model = s["routing_model"]
             break
+    history = t.get("history") or []
     return TraceSummary(
         trace_id=t.get("trace_id", ""),
         timestamp=t.get("timestamp", ""),
@@ -831,6 +842,8 @@ def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
         agent_version=t.get("agent_version"),
         n_stages=len(stages),
         routing_model=routing_model,
+        session_id=t.get("session_id"),
+        n_turns=len(history) + 1,
     )
 
 
@@ -920,12 +933,78 @@ async def get_trace(trace_id: str) -> TraceDetail:
             if t.get("trace_id") == trace_id:
                 summary = _trace_to_summary(t)
                 stages = [TraceStageView(**s) for s in (t.get("stages") or [])]
+                history = [
+                    HistoryTurn(role=h.get("role", ""), content=h.get("content", ""))
+                    for h in (t.get("history") or [])
+                    if isinstance(h, dict)
+                ]
                 return TraceDetail(
                     **summary.model_dump(),
                     stages=stages,
                     metadata=t.get("metadata") or {},
+                    history=history,
                 )
     raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+
+# ---------- sessions (multi-turn conversations grouped by session_id) ----------
+
+
+class SessionTurn(BaseModel):
+    trace_id: str
+    timestamp: str
+    request: str
+    response: Optional[str] = None
+    success: bool = False
+    error: Optional[str] = None
+    agent_version: Optional[str] = None
+    duration_ms: float = 0.0
+
+
+class SessionDetail(BaseModel):
+    session_id: str
+    n_turns: int
+    started_at: str
+    last_at: str
+    turns: list[SessionTurn] = []
+
+
+@app.get("/sessions/{session_id}", response_model=SessionDetail)
+async def get_session(session_id: str) -> SessionDetail:
+    """Return every trace that shares a session_id, ordered chronologically.
+    A session is the natural unit of conversation in the AHE paper's
+    "experience pillar" — multiple /run calls that build on each other's
+    history collapse into one thread for the UI to render as a dialog."""
+    matched: list[dict[str, Any]] = []
+    for d in _available_trace_dates():
+        for t in _load_traces_for_date(d):
+            if t.get("session_id") == session_id:
+                matched.append(t)
+    if not matched:
+        raise HTTPException(
+            status_code=404, detail=f"session {session_id!r} not found"
+        )
+    matched.sort(key=lambda t: t.get("timestamp", ""))
+    turns = [
+        SessionTurn(
+            trace_id=t.get("trace_id", ""),
+            timestamp=t.get("timestamp", ""),
+            request=t.get("request", ""),
+            response=t.get("response"),
+            success=bool(t.get("success", False)),
+            error=t.get("error"),
+            agent_version=t.get("agent_version"),
+            duration_ms=float(t.get("duration_ms", 0) or 0),
+        )
+        for t in matched
+    ]
+    return SessionDetail(
+        session_id=session_id,
+        n_turns=len(turns),
+        started_at=turns[0].timestamp if turns else "",
+        last_at=turns[-1].timestamp if turns else "",
+        turns=turns,
+    )
 
 
 # ---------- evals (Technical / Eval suites) ----------
@@ -1507,12 +1586,17 @@ async def update_route(payload: RouteUpdateRequest) -> RouteUpdateResponse:
 
 @app.post("/run", response_model=RunResponse)
 async def run(payload: RunRequest) -> RunResponse:
+    import uuid
+
     executor: Optional[PipelineExecutor] = _state.get("executor")
     if not executor:
         raise HTTPException(status_code=503, detail="agent not yet loaded")
 
     history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
-    _, rec = executor.run(payload.request, history=history)
+    # If the caller didn't supply a session_id, mint one. The trace persists
+    # it so the UI can group multi-turn calls into a single conversation.
+    session_id = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
+    _, rec = executor.run(payload.request, history=history, session_id=session_id)
     trace_id = write_trace(rec)
 
     return RunResponse(
