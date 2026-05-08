@@ -99,7 +99,17 @@ export const Review = ({ onOpenLesson }: { onOpenLesson: (id: string) => void })
       )}
 
       {queue.length === 0 && (
-        <div className="card card-pad empty" style={{ padding: 64 }}>
+        <div
+          className="card card-pad empty"
+          style={{
+            padding: 64,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            textAlign: 'center',
+          }}
+        >
           <Icon name="check" size={32} />
           <div style={{ fontSize: 16, fontWeight: 500, color: 'var(--fg)', marginTop: 12 }}>
             Inbox zero.
