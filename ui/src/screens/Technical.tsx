@@ -66,6 +66,7 @@ const useAutoToast = (toast: string | null, setToast: (v: string | null) => void
 
 const PAGE_SIZE = 50;
 type Verdict = 'pass' | 'fail';
+type FilterMode = 'all' | 'pass' | 'flag' | 'fail';
 
 const fmtDuration = (ms: number): string => {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}μs`;
@@ -126,14 +127,37 @@ const normalizeRole = (raw: string): Role => {
   return 'agent';
 };
 
+// Stub responses from techniques/prompt_strategies/impl.py look like:
+//   [stub response] Would have called <model> (max_tokens=…, temperature=…)
+//   with prompt template '…' and N retrieved doc(s). Request was: '…'
+// Until P1.9 wires the real LLM, every agent response in production traces
+// is one of these. Reformat them in the UI so the conversation reads as
+// dialog rather than debug output.
+const STUB_PREFIX = '[stub response]';
+const reformatStubResponse = (text: string | null): string => {
+  if (!text) return '';
+  const trimmed = text.trim();
+  if (!trimmed.startsWith(STUB_PREFIX)) return trimmed;
+  // Pull out the model name; fall back to a generic label.
+  const m = trimmed.match(/Would have called ([^\s(]+)/);
+  if (m && m[1]) {
+    return `[Stub reply — would call ${m[1]}. Real LLM lands in P1.9.]`;
+  }
+  return '[Stub reply — pipeline ran without calling the LLM.]';
+};
+
 const buildTranscript = (t: TraceDetail): { role: Role; text: string }[] => {
   const out: { role: Role; text: string }[] = [];
   for (const h of t.history || []) {
-    out.push({ role: normalizeRole(h.role), text: h.content });
+    const role = normalizeRole(h.role);
+    out.push({
+      role,
+      text: role === 'agent' ? reformatStubResponse(h.content) : h.content,
+    });
   }
   out.push({ role: 'user', text: t.request || '(empty request)' });
   if (t.response) {
-    out.push({ role: 'agent', text: t.response });
+    out.push({ role: 'agent', text: reformatStubResponse(t.response) });
   } else if (t.error) {
     out.push({ role: 'agent', text: `[error] ${t.error}` });
   }
@@ -154,7 +178,12 @@ const buildSessionTranscript = (
       isCurrent,
     });
     if (turn.response) {
-      out.push({ role: 'agent', text: turn.response, trace_id: turn.trace_id, isCurrent });
+      out.push({
+        role: 'agent',
+        text: reformatStubResponse(turn.response),
+        trace_id: turn.trace_id,
+        isCurrent,
+      });
     } else if (turn.error) {
       out.push({
         role: 'agent',
@@ -170,7 +199,7 @@ const buildSessionTranscript = (
 export const Traces = () => {
   const [page, setPage] = useState<TracesPage | null>(null);
   const [date, setDate] = useState<string | null>(null);
-  const [filter, setFilter] = useState<'all' | Verdict>('all');
+  const [filter, setFilter] = useState<FilterMode>('all');
   const [versionFilter, setVersionFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -180,6 +209,11 @@ export const Traces = () => {
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
+  // Local-only flag set — persisting flag state to the ledger is deferred
+  // (no flag concept on the backend yet). When you flag a trace from the
+  // drawer, it joins this set; refresh wipes. Sufficient for triage; real
+  // persistence wires later alongside the auto-rollback signals.
+  const [flagged, setFlagged] = useState<Record<string, boolean>>({});
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
 
@@ -194,6 +228,9 @@ export const Traces = () => {
     try {
       const opts: Parameters<typeof listTraces>[0] = { limit: PAGE_SIZE, offset };
       if (date) opts.date = date;
+      // Flag is a client-side overlay — backend doesn't know about it. We
+      // still send the success filter for pass/fail; flagged traces are
+      // filtered post-fetch via the `flagged` set.
       if (filter === 'pass') opts.success = true;
       else if (filter === 'fail') opts.success = false;
       if (versionFilter !== 'all') opts.agent_version = versionFilter;
@@ -238,17 +275,37 @@ export const Traces = () => {
   };
 
   const flagAsFail = (id: string) => {
-    setToast(`Flagged ${id.slice(0, 12)}…  (UI state only — flag persistence not wired yet)`);
+    setFlagged((f) => {
+      const next = { ...f, [id]: !f[id] };
+      setToast(
+        next[id]
+          ? `Flagged ${id.slice(0, 8)}… (local only until persistence lands)`
+          : `Unflagged ${id.slice(0, 8)}…`,
+      );
+      return next;
+    });
   };
 
+  const flaggedCount = Object.values(flagged).filter(Boolean).length;
+
   const counts = useMemo(() => {
-    if (!page) return { all: 0, pass: 0, fail: 0 };
+    if (!page) return { all: 0, pass: 0, flag: flaggedCount, fail: 0 };
     return {
       all: page.total_filtered,
       pass: page.items.filter((t) => verdictOf(t) === 'pass').length,
+      flag: flaggedCount,
       fail: page.items.filter((t) => verdictOf(t) === 'fail').length,
     };
-  }, [page]);
+  }, [page, flaggedCount]);
+
+  // The "flag" filter applies client-side over the page the backend already
+  // returned. When `filter === 'flag'`, we drop traces that aren't in the
+  // flagged set.
+  const visibleItems = useMemo(() => {
+    if (!page) return [];
+    if (filter !== 'flag') return page.items;
+    return page.items.filter((t) => flagged[t.trace_id]);
+  }, [page, filter, flagged]);
 
   const showing = page?.items.length ?? 0;
   const total = page?.total_filtered ?? 0;
@@ -263,8 +320,8 @@ export const Traces = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+        <div className="card card-pad" style={{ borderColor: 'var(--destructive)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--destructive)', margin: 0 }}>
             {error}
           </p>
         </div>
@@ -276,13 +333,14 @@ export const Traces = () => {
             [
               ['all', 'All', counts.all],
               ['pass', 'Passed', counts.pass],
+              ['flag', 'Flagged', counts.flag],
               ['fail', 'Failed', counts.fail],
             ] as const
           ).map(([id, label, n]) => (
             <button
               key={id}
               className={`pill ${filter === id ? 'on' : ''}`}
-              onClick={() => setFilter(id as 'all' | Verdict)}
+              onClick={() => setFilter(id as FilterMode)}
             >
               {label}{' '}
               <span className="dim mono" style={{ fontSize: 11 }}>
@@ -401,10 +459,12 @@ export const Traces = () => {
             <div>Cost</div>
             <div></div>
           </div>
-          {page.items.length === 0 ? (
+          {visibleItems.length === 0 ? (
             <div className="empty-state">
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
-                No traces match those filters.
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
+                {filter === 'flag'
+                  ? 'No flagged traces yet. Flag one from the drawer to triage it later.'
+                  : 'No traces match those filters.'}
               </div>
               <button
                 className="btn sm ghost"
@@ -419,7 +479,7 @@ export const Traces = () => {
               </button>
             </div>
           ) : (
-            page.items.map((t) => {
+            visibleItems.map((t) => {
               const v = verdictOf(t);
               return (
                 <div
@@ -431,13 +491,18 @@ export const Traces = () => {
                     <div className="id-row">
                       <span className="id">{t.trace_id.slice(0, 8)}…</span>
                       {pinned[t.trace_id] && <Icon name="pin" size={11} />}
+                      {flagged[t.trace_id] && <Icon name="flag" size={11} />}
                     </div>
                     <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
                       {fmtRelative(t.timestamp)} · webhook
                     </div>
                   </div>
                   <div className="cell-excerpt">
-                    <Tag kind={v === 'pass' ? 'success' : 'bad'}>
+                    <Tag
+                      kind={
+                        flagged[t.trace_id] ? 'warn' : v === 'pass' ? 'success' : 'bad'
+                      }
+                    >
                       <span className="dot" />
                     </Tag>
                     <span className="preview">{excerptOf(t)}</span>
@@ -480,6 +545,7 @@ export const Traces = () => {
         <TraceDrawer
           traceId={openId}
           pinned={!!pinned[openId]}
+          flagged={!!flagged[openId]}
           onClose={() => setOpenId(null)}
           onTogglePin={() => togglePin(openId)}
           onFlag={() => flagAsFail(openId)}
@@ -494,12 +560,14 @@ export const Traces = () => {
 const TraceDrawer = ({
   traceId,
   pinned,
+  flagged,
   onClose,
   onTogglePin,
   onFlag,
 }: {
   traceId: string;
   pinned: boolean;
+  flagged: boolean;
   onClose: () => void;
   onTogglePin: () => void;
   onFlag: () => void;
@@ -540,10 +608,11 @@ const TraceDrawer = ({
   const verdict: Verdict = trace ? (trace.success && !trace.error ? 'pass' : 'fail') : 'pass';
 
   // Pull the full session for traces that carry a session_id. If there's
-  // more than one trace with the same session_id, we can render the entire
-  // dialog (across multiple /run calls) instead of just this single turn.
+  // more than one trace with the same session_id, we render the entire
+  // dialog (across multiple /run calls) by default — single-turn view is
+  // opt-in via "Show this turn only".
   const [session, setSession] = useState<SessionDetail | null>(null);
-  const [showSession, setShowSession] = useState(false);
+  const [forceTurnOnly, setForceTurnOnly] = useState(false);
   useEffect(() => {
     if (!trace?.session_id) {
       setSession(null);
@@ -562,8 +631,20 @@ const TraceDrawer = ({
     };
   }, [trace?.session_id]);
 
+  // When the user navigates to a different trace, reset the toggle so the
+  // default (full session view) kicks in again.
+  useEffect(() => {
+    setForceTurnOnly(false);
+  }, [traceId]);
+
   const sessionHasMore = !!session && session.n_turns > 1;
-  const totalTurns = trace ? (trace.history?.length || 0) + 1 : 0;
+  const showSession = sessionHasMore && !forceTurnOnly;
+  // Each /run call = 1 turn (one user request + one agent reply). The
+  // trace.history field carries context messages from previous turns but
+  // it doesn't represent additional turns this trace handled.
+  const turnIndexInSession = session
+    ? session.turns.findIndex((t) => t.trace_id === traceId)
+    : -1;
 
   const copyJson = async () => {
     if (!trace) return;
@@ -580,7 +661,7 @@ const TraceDrawer = ({
       <div className="sheet trace-sheet">
         <div className="sheet-head">
           <div style={{ flex: 1 }}>
-            <div className="mono" style={{ fontSize: 12, color: 'var(--fg-muted)' }}>
+            <div className="mono" style={{ fontSize: 12, color: 'var(--muted-foreground)' }}>
               {traceId}
             </div>
             <h2 style={{ marginTop: 2 }}>{trace ? excerptOf(trace) : 'Loading…'}</h2>
@@ -591,7 +672,7 @@ const TraceDrawer = ({
                   gap: 14,
                   marginTop: 8,
                   fontSize: 12,
-                  color: 'var(--fg-muted)',
+                  color: 'var(--muted-foreground)',
                   flexWrap: 'wrap',
                 }}
               >
@@ -602,10 +683,9 @@ const TraceDrawer = ({
                 <span className="mono">{routingModel || '—'}</span>
                 <span>·</span>
                 <span>
-                  {totalTurns} turn{totalTurns !== 1 ? 's' : ''}
-                  {sessionHasMore && session && session.n_turns > totalTurns && (
-                    <span style={{ marginLeft: 4 }}>· {session.n_turns} in session</span>
-                  )}
+                  {sessionHasMore && session && turnIndexInSession >= 0
+                    ? `Turn ${turnIndexInSession + 1} of ${session.n_turns}`
+                    : '1 turn'}
                 </span>
                 <span>·</span>
                 <span className="mono">— tok</span>
@@ -692,17 +772,19 @@ const TraceDrawer = ({
                         gap: 12,
                         marginBottom: 12,
                         padding: '8px 12px',
-                        background: 'var(--bg-muted)',
+                        background: 'var(--muted)',
                         borderRadius: 8,
                         fontSize: 12.5,
                       }}
                     >
                       <span className="dim">
-                        This trace is one turn of a {session?.n_turns}-turn session.
+                        {showSession
+                          ? `Showing all ${session?.n_turns} turns of this session.`
+                          : `This trace is one turn of a ${session?.n_turns}-turn session.`}
                       </span>
                       <button
                         className="btn sm ghost"
-                        onClick={() => setShowSession((v) => !v)}
+                        onClick={() => setForceTurnOnly((v) => !v)}
                       >
                         {showSession ? 'Show this turn only' : 'View full session'}
                       </button>
@@ -714,21 +796,14 @@ const TraceDrawer = ({
                           <div
                             key={i}
                             className={`msg msg-${m.role}`}
-                            style={{
-                              opacity: m.isCurrent ? 1 : 0.85,
-                            }}
-                            title={m.trace_id === traceId ? 'This trace' : `Other trace · ${m.trace_id.slice(0, 8)}…`}
+                            title={
+                              m.trace_id === traceId
+                                ? `Trace you opened · ${m.trace_id.slice(0, 8)}…`
+                                : `Other trace · ${m.trace_id.slice(0, 8)}…`
+                            }
                           >
                             <div className="msg-role">
                               {m.role === 'agent' ? 'Agent' : 'Customer'}
-                              {m.isCurrent && (
-                                <span
-                                  className="dim mono"
-                                  style={{ fontSize: 10, marginLeft: 6 }}
-                                >
-                                  · this turn
-                                </span>
-                              )}
                             </div>
                             <div className="msg-body">{m.text}</div>
                           </div>
@@ -778,7 +853,7 @@ const TraceDrawer = ({
                           className="card card-pad"
                           style={{
                             padding: '12px 14px',
-                            borderColor: failed ? 'var(--bad)' : undefined,
+                            borderColor: failed ? 'var(--destructive)' : undefined,
                           }}
                         >
                           <div
@@ -810,7 +885,7 @@ const TraceDrawer = ({
                               display: 'flex',
                               gap: 12,
                               fontSize: 12,
-                              color: 'var(--fg-muted)',
+                              color: 'var(--muted-foreground)',
                               flexWrap: 'wrap',
                             }}
                           >
@@ -823,7 +898,7 @@ const TraceDrawer = ({
                             {s.routing_model && (
                               <span>
                                 routing →{' '}
-                                <span className="mono" style={{ color: 'var(--fg)' }}>
+                                <span className="mono" style={{ color: 'var(--foreground)' }}>
                                   {s.routing_model}
                                 </span>
                               </span>
@@ -917,8 +992,8 @@ const TraceDrawer = ({
               <button className={`btn sm ${pinned ? '' : 'ghost'}`} onClick={onTogglePin}>
                 <Icon name="pin" size={12} /> {pinned ? 'Pinned' : 'Pin for learning'}
               </button>
-              <button className="btn sm ghost" onClick={onFlag}>
-                <Icon name="flag" size={12} /> Flag as failure
+              <button className={`btn sm ${flagged ? '' : 'ghost'}`} onClick={onFlag}>
+                <Icon name="flag" size={12} /> {flagged ? 'Flagged' : 'Flag as failure'}
               </button>
               <button className="btn sm ghost" style={{ marginLeft: 'auto' }} onClick={copyJson}>
                 <Icon name="copy" size={12} /> Copy trace
@@ -1014,8 +1089,8 @@ export const EvalSuites = () => {
       </p>
 
       {error && (
-        <div className="card card-pad" style={{ borderColor: 'var(--bad)', marginBottom: 16 }}>
-          <p className="dim" style={{ color: 'var(--bad)', margin: 0 }}>
+        <div className="card card-pad" style={{ borderColor: 'var(--destructive)', marginBottom: 16 }}>
+          <p className="dim" style={{ color: 'var(--destructive)', margin: 0 }}>
             {error}
           </p>
         </div>
@@ -1067,7 +1142,7 @@ export const EvalSuites = () => {
           </div>
           {filtered.length === 0 ? (
             <div className="empty-state" style={{ padding: 48 }}>
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
                 {suites.length === 0
                   ? 'No suites defined yet. Add a YAML to evals/suites/.'
                   : 'No suites match.'}
@@ -1217,7 +1292,7 @@ const SuiteDrawer = ({
             </div>
             <h2 style={{ marginTop: 4 }}>{name}</h2>
             {detail?.description && (
-              <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginTop: 6, lineHeight: 1.5 }}>
                 {detail.description}
               </div>
             )}
@@ -1266,11 +1341,11 @@ const SuiteDrawer = ({
                     <path
                       d={sparkline.path}
                       fill="none"
-                      stroke="var(--accent)"
+                      stroke="var(--primary)"
                       strokeWidth="1.6"
                     />
                     {sparkline.pts.map((p, i) => (
-                      <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--accent)" />
+                      <circle key={i} cx={p[0]} cy={p[1]} r="2" fill="var(--primary)" />
                     ))}
                   </svg>
                 ) : (
@@ -1757,7 +1832,7 @@ export const RouterConfig = () => {
         </div>
         {filtered.length === 0 ? (
           <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No rules match.</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No rules match.</div>
             <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
               Clear filters
             </button>
@@ -1865,10 +1940,10 @@ const RuleDrawer = ({
               {rule.auth === 'agent' ? 'Agent-authored' : 'You authored'} · {rule.enabled ? 'active' : 'paused'}
             </div>
             <h2 style={{ marginTop: 4 }}>{rule.name}</h2>
-            <div className="mono" style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginTop: 6 }}>
+            <div className="mono" style={{ fontSize: 12.5, color: 'var(--muted-foreground)', marginTop: 6 }}>
               if {rule.when}
               <span style={{ margin: '0 8px', opacity: 0.5 }}>→</span>
-              <span style={{ color: 'var(--fg)', fontWeight: 500 }}>{rule.then}</span>
+              <span style={{ color: 'var(--foreground)', fontWeight: 500 }}>{rule.then}</span>
             </div>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
@@ -1885,7 +1960,7 @@ const RuleDrawer = ({
             <div>
               <div className="sheet-section">
                 <h3>Rationale</h3>
-                <p style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--fg-muted)', margin: 0 }}>{rule.rationale}</p>
+                <p style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--muted-foreground)', margin: 0 }}>{rule.rationale}</p>
               </div>
               <div className="meta-grid">
                 <div className="meta-row"><div className="dim">Share of traffic</div><div className="mono">{(rule.share * 100).toFixed(0)}%</div></div>
@@ -2201,7 +2276,7 @@ export const Datasets = () => {
       {filtered.length === 0 ? (
         <div className="card">
           <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)' }}>No datasets match.</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No datasets match.</div>
             <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
               Clear filters
             </button>
@@ -2292,7 +2367,7 @@ const DatasetDrawer = ({
               {dataset.owner === 'agent' ? 'Agent-curated' : 'You created'} · {dataset.growing ? 'auto-collecting' : 'static'}
             </div>
             <h2 style={{ marginTop: 4 }}>{dataset.name}</h2>
-            <div style={{ fontSize: 13, color: 'var(--fg-muted)', marginTop: 6, lineHeight: 1.5 }}>{dataset.desc}</div>
+            <div style={{ fontSize: 13, color: 'var(--muted-foreground)', marginTop: 6, lineHeight: 1.5 }}>{dataset.desc}</div>
           </div>
           <button className="icon-btn" onClick={onClose} aria-label="Close">×</button>
         </div>

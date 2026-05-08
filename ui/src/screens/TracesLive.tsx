@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from '@tanstack/react-router';
 import { Icon } from '../components/Icon';
 import {
   ApiError,
@@ -37,12 +38,10 @@ const fmtRelative = (iso: string): string => {
   return new Date(t).toLocaleDateString();
 };
 
-interface Props {
-  onOpenTrace?: (id: string) => void;
-  onOpenSession?: (id: string) => void;
-}
+export const TracesLive = () => {
+  const navigate = useNavigate();
+  const goTraces = () => navigate({ to: '/technical/traces' });
 
-export const TracesLive = ({ onOpenTrace, onOpenSession }: Props) => {
   const [rows, setRows] = useState<Row[]>([]);
   const [paused, setPaused] = useState(false);
   const [status, setStatus] = useState<'connecting' | 'live' | 'paused' | 'error' | 'idle'>(
@@ -135,7 +134,7 @@ export const TracesLive = ({ onOpenTrace, onOpenSession }: Props) => {
               <div
                 key={r.trace_id}
                 className={`trace-row clickable ${r._live ? 'live-fresh' : ''}`}
-                onClick={() => onOpenTrace?.(r.trace_id)}
+                onClick={goTraces}
               >
                 <div className="cell-trace">
                   <div className="id-row">
@@ -156,7 +155,7 @@ export const TracesLive = ({ onOpenTrace, onOpenSession }: Props) => {
                         className="link"
                         onClick={(e) => {
                           e.stopPropagation();
-                          onOpenSession?.(r.session_id as string);
+                          goTraces();
                         }}
                         style={{
                           background: 'none',

@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
+import { Sheet, SheetContent } from '../components/ui/sheet';
 import {
   ApiError,
   getAgentConfig,
@@ -173,9 +174,13 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
   ];
 
   return (
-    <>
-      <div className="sheet-backdrop" onClick={onClose} />
-      <div className="sheet" role="dialog" aria-label="Agent settings">
+    <Sheet open onOpenChange={(o) => !o && onClose()}>
+      <SheetContent
+        side="right"
+        showCloseButton={false}
+        aria-label="Agent settings"
+        className="flex flex-col gap-0 p-0 sm:max-w-[560px]"
+      >
         <div className="sheet-head">
           <div className="sidebar-mark" style={{ width: 26, height: 26, borderRadius: 8 }} />
           <div style={{ flex: 1 }}>
@@ -208,9 +213,9 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
           {error && (
             <div
               className="card card-pad"
-              style={{ borderColor: 'var(--bad)', margin: 16 }}
+              style={{ borderColor: 'var(--destructive)', margin: 16 }}
             >
-              <p className="dim" style={{ color: 'var(--bad)', margin: 0, fontSize: 12.5 }}>
+              <p className="dim" style={{ color: 'var(--destructive)', margin: 0, fontSize: 12.5 }}>
                 {error}
               </p>
             </div>
@@ -306,7 +311,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                         style={{
                           cursor: 'pointer',
                           borderColor:
-                            smallModelDraft === m.id ? 'var(--fg)' : undefined,
+                            smallModelDraft === m.id ? 'var(--foreground)' : undefined,
                           margin: 0,
                           textAlign: 'left',
                         }}
@@ -340,7 +345,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                         className="row-item"
                         style={{
                           cursor: 'pointer',
-                          borderColor: bigModelDraft === m.id ? 'var(--fg)' : undefined,
+                          borderColor: bigModelDraft === m.id ? 'var(--foreground)' : undefined,
                           margin: 0,
                           textAlign: 'left',
                         }}
@@ -547,7 +552,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
             </div>
           )}
         </div>
-      </div>
-    </>
+      </SheetContent>
+    </Sheet>
   );
 };
