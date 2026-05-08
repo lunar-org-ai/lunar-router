@@ -90,6 +90,7 @@ export interface LessonSummary {
   promoted_at: string | null;
   ledger_entry_id: string | null;
   proposal_source: string | null;
+  n_traces: number | null;
 }
 
 export interface VersionInfo {

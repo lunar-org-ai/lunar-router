@@ -190,6 +190,31 @@ class LessonSummary(BaseModel):
     promoted_at: Optional[str] = None
     ledger_entry_id: Optional[str] = None
     proposal_source: Optional[str] = None
+    n_traces: Optional[int] = None  # cases in candidate eval report, if persisted
+
+
+def _lesson_trace_count(candidate_id: Optional[str]) -> Optional[int]:
+    """Cheap on-disk lookup so the Evolution timeline can show "N traces" per
+    lesson without paying a per-card round-trip."""
+    if not candidate_id:
+        return None
+    import json
+    from pathlib import Path
+
+    report_path = (
+        Path(__file__).resolve().parent.parent
+        / "evals"
+        / "reports"
+        / f"cand_{candidate_id}.json"
+    )
+    if not report_path.exists():
+        return None
+    try:
+        with report_path.open() as f:
+            report = json.load(f)
+        return len(report.get("cases", []))
+    except Exception:
+        return None
 
 
 def _lesson_to_summary(lesson: Any) -> "LessonSummary":
@@ -208,6 +233,7 @@ def _lesson_to_summary(lesson: Any) -> "LessonSummary":
         promoted_at=lesson.promoted_at,
         ledger_entry_id=lesson.ledger_entry_id,
         proposal_source=lesson.proposal_source,
+        n_traces=_lesson_trace_count(lesson.candidate_id),
     )
 
 

@@ -1,7 +1,7 @@
 {
   "id": "L-20260508-050652-32b2",
   "kind": "rag",
-  "status": "awaiting_review",
+  "status": "approved",
   "title": "Adjusted how much context I read per question",
   "summary": "Queued for your review. Branched from v0.0.2; candidate didn't move evals much but didn't regress either.",
   "proposal_source": "heuristic_sweep",
@@ -20,8 +20,8 @@
   ],
   "parent_version": "v0.0.2",
   "candidate_id": "cand_20260508T050652_2c93",
-  "version": null,
-  "promoted_at": null,
-  "ledger_entry_id": "led_20260508T050652_7f8f7d",
+  "version": "v0.0.3",
+  "promoted_at": "2026-05-08T05:26:37Z",
+  "ledger_entry_id": "led_20260508T052637_dca7b5",
   "voice": "I noticed I was sometimes either missing useful context or getting distracted by less relevant retrieval. I adjusted how much I read per question. The eval barely moved, but I'm leaving it in for now to see how real traffic responds."
 }

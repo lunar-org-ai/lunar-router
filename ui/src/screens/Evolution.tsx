@@ -345,6 +345,12 @@ export const Evolution = ({ onOpenLesson, onNav, onOpenAgent, dayZero }: Props) 
                           {l.mutations.length > 1 && ` +${l.mutations.length - 1}`}
                         </span>
                       )}
+                      {typeof l.n_traces === 'number' && l.n_traces > 0 && (
+                        <span className="stat">
+                          <Icon name="timeline" size={12} /> {l.n_traces} trace
+                          {l.n_traces > 1 ? 's' : ''}
+                        </span>
+                      )}
                       {typeof overall === 'number' && (
                         <span className="stat">
                           <Icon name="bolt" size={12} />
