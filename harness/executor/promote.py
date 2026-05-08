@@ -6,6 +6,11 @@ Steps:
   3. Bump version in live agent.yaml (patch +1)
   4. Append LedgerEntry (kind=promote) tying old/new versions to the candidate.
   5. Write a Lesson (UI card) summarizing the change + delta.
+
+Two entry points:
+  - promote(outcome): used by the auto loop with an in-memory LoopOutcome.
+  - promote_queued(lesson_id): used by the approve endpoint to finalize a
+    previously-queued review lesson (status=awaiting_review → approved).
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ import secrets
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Optional
 
 import yaml
 
@@ -21,7 +27,7 @@ from experiments.branching import candidate_agent_path
 from harness.types import LoopOutcome
 from ledger.types import Lesson
 from ledger.versioning import LIVE_AGENT, read_version, snapshot_agent
-from ledger.writer import write_entry, write_lesson
+from ledger.writer import read_lesson, update_lesson, write_entry, write_lesson
 
 
 def _bump_patch(version: str) -> str:
@@ -146,12 +152,44 @@ def _voice_for(
     return title, voice
 
 
-def _make_lesson(
+def _summary_for(status: str, parent_version: str, delta_overall: float) -> str:
+    moved = abs(delta_overall) > 0.0005
+    if status == "auto_promoted":
+        if moved:
+            return f"Auto-promoted from {parent_version}. Δoverall on the eval suite: {delta_overall:+.3f}."
+        return (
+            f"Auto-promoted from {parent_version}. Eval didn't move much, but the change was "
+            "non-regressing and the policy auto-approved it."
+        )
+    if status == "approved":
+        if moved:
+            return f"Approved from {parent_version} after human review. Δoverall: {delta_overall:+.3f}."
+        return f"Approved from {parent_version} after human review. Eval barely moved."
+    if status == "awaiting_review":
+        if moved:
+            return (
+                f"Queued for your review. Branched from {parent_version}; "
+                f"candidate Δoverall: {delta_overall:+.3f}."
+            )
+        return (
+            f"Queued for your review. Branched from {parent_version}; "
+            "candidate didn't move evals much but didn't regress either."
+        )
+    return f"Change rooted at {parent_version} (status={status})."
+
+
+def build_lesson(
     outcome: LoopOutcome,
-    new_version: str,
+    *,
+    status: str,
     parent_version: str,
-    entry_id: str,
+    new_version: Optional[str] = None,
+    entry_id: Optional[str] = None,
+    promoted_at: Optional[str] = None,
 ) -> Lesson:
+    """Pure builder — no filesystem side effects. Used by both auto-promote
+    and queue-for-review paths.
+    """
     mutations = [m.describe() for m in outcome.proposal.mutations]
     kind = _kind_from_mutations(mutations)
     lesson_id = (
@@ -164,21 +202,13 @@ def _make_lesson(
         outcome.proposal.prediction.rationale if outcome.proposal.prediction else None
     )
     title, voice = _voice_for(kind, mutations, delta_overall, prediction_rationale)
-
-    summary = (
-        f"Auto-promoted from {parent_version}. "
-        + (
-            f"Δoverall on the eval suite: {delta_overall:+.3f}."
-            if abs(delta_overall) > 0.0005
-            else "Eval didn't move much, but the change was non-regressing and the policy auto-approved it."
-        )
-    )
+    summary = _summary_for(status, parent_version, delta_overall)
 
     return Lesson(
         id=lesson_id,
         version=new_version,
         kind=kind,
-        status="auto_promoted",
+        status=status,
         title=title,
         summary=summary,
         proposal_source=outcome.proposal.source,
@@ -186,9 +216,7 @@ def _make_lesson(
         mutations=mutations,
         parent_version=parent_version,
         candidate_id=outcome.candidate_id or "",
-        promoted_at=datetime.now(timezone.utc)
-        .isoformat(timespec="seconds")
-        .replace("+00:00", "Z"),
+        promoted_at=promoted_at,
         ledger_entry_id=entry_id,
         voice=voice,
     )
@@ -258,7 +286,111 @@ def promote(
     )
 
     # 5. Lesson
-    lesson = _make_lesson(outcome, new_version, old_version, entry.entry_id)
+    lesson = build_lesson(
+        outcome,
+        status="auto_promoted",
+        parent_version=old_version,
+        new_version=new_version,
+        entry_id=entry.entry_id,
+        promoted_at=datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    )
     write_lesson(lesson)
 
     return new_version, lesson.id
+
+
+def promote_queued(
+    lesson_id: str,
+    *,
+    agent_dir: Path | str = LIVE_AGENT,
+    reviewer: Optional[str] = None,
+) -> Lesson:
+    """Finalize a previously queued review lesson.
+
+    The candidate is still on disk under experiments/candidates/<cand_id>/.
+    We snapshot live, copy candidate over, bump version, write a promote
+    ledger entry that references the queued_review entry as parent, and
+    mutate the lesson in place (status=approved, version, promoted_at,
+    ledger_entry_id pointing to the new promote entry).
+    """
+    lesson = read_lesson(lesson_id)
+    if lesson is None:
+        raise FileNotFoundError(f"lesson {lesson_id!r} not found")
+    if lesson.status != "awaiting_review":
+        raise ValueError(
+            f"lesson {lesson_id!r} has status {lesson.status!r}; only awaiting_review can be approved"
+        )
+    if not lesson.candidate_id:
+        raise ValueError(f"lesson {lesson_id!r} carries no candidate_id; cannot promote")
+
+    agent_dir = Path(agent_dir)
+    cand_agent_dir = candidate_agent_path(lesson.candidate_id).parent
+    if not cand_agent_dir.exists():
+        raise FileNotFoundError(
+            f"candidate dir {cand_agent_dir} missing — cannot promote queued lesson"
+        )
+
+    old_version, _ = snapshot_agent(agent_dir)
+
+    if agent_dir.exists():
+        shutil.rmtree(agent_dir)
+    shutil.copytree(cand_agent_dir, agent_dir)
+
+    new_version = _bump_patch(old_version)
+    _set_version(agent_dir / "agent.yaml", new_version)
+
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+    payload: dict[str, Any] = {
+        "mutations": lesson.mutations,
+        "delta": lesson.delta,
+        "lesson_id": lesson.id,
+        "human_approved": True,
+    }
+    if reviewer:
+        payload["reviewer"] = reviewer
+
+    entry = write_entry(
+        kind="promote",
+        candidate_id=lesson.candidate_id,
+        agent_version_before=old_version,
+        agent_version_after=new_version,
+        parent_entry_id=lesson.ledger_entry_id,
+        summary=f"approved + promoted from review queue (lesson {lesson.id})",
+        payload=payload,
+    )
+
+    return update_lesson(
+        lesson.id,
+        status="approved",
+        version=new_version,
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+    )
+
+
+def reject_queued(lesson_id: str, *, reason: Optional[str] = None) -> Lesson:
+    """Mark a queued review lesson as human_rejected; no live agent change."""
+    lesson = read_lesson(lesson_id)
+    if lesson is None:
+        raise FileNotFoundError(f"lesson {lesson_id!r} not found")
+    if lesson.status != "awaiting_review":
+        raise ValueError(
+            f"lesson {lesson_id!r} has status {lesson.status!r}; only awaiting_review can be rejected"
+        )
+
+    entry = write_entry(
+        kind="rejected",
+        candidate_id=lesson.candidate_id or None,
+        parent_entry_id=lesson.ledger_entry_id,
+        summary=f"human rejected lesson {lesson.id}" + (f": {reason}" if reason else ""),
+        payload={"lesson_id": lesson.id, "reason": reason},
+    )
+
+    return update_lesson(
+        lesson.id, status="human_rejected", ledger_entry_id=entry.entry_id
+    )

@@ -39,16 +39,20 @@ class LedgerEntry:
 
 @dataclass
 class Lesson:
-    """A curated, user-visible record of one approved change.
+    """A curated, user-visible record of one approved or queued change.
 
-    Maps to the lesson cards in ui/. Generated when a promotion lands; carries
-    the change kind, the proof (eval delta), and the trace lineage.
+    Maps to the lesson cards in ui/. Generated when a promotion lands or when
+    the policy queues a candidate for human review. Carries the change kind,
+    the proof (eval delta), and the trace lineage.
+
+    Provisional lessons (status=awaiting_review) leave version and promoted_at
+    as None until a human approves and the candidate is actually promoted.
     """
 
     id: str
-    version: str            # the new live version after promotion
     kind: str               # "prompt" | "router" | "rag" | "rerank" | …
-    status: str             # "approved" | "auto_promoted" | "rolled_back"
+    status: str             # "auto_promoted" | "approved" | "awaiting_review"
+                            #   | "human_rejected" | "rolled_back"
     title: str
     summary: str
     proposal_source: str    # "heuristic" | "claude_code" | "human"
@@ -56,6 +60,7 @@ class Lesson:
     mutations: list[str]    # describe() output
     parent_version: str
     candidate_id: str
-    promoted_at: str
-    ledger_entry_id: str
-    voice: Optional[str] = None  # one-line "in my own words" rendering
+    version: Optional[str] = None        # set on promotion
+    promoted_at: Optional[str] = None    # set on promotion
+    ledger_entry_id: Optional[str] = None
+    voice: Optional[str] = None          # one-line "in my own words" rendering

@@ -114,3 +114,30 @@ def read_lessons(lessons_dir: Path | str = LESSONS_DIR) -> list[Lesson]:
             d = json.load(f)
         out.append(Lesson(**d))
     return out
+
+
+def read_lesson(lesson_id: str, lessons_dir: Path | str = LESSONS_DIR) -> Optional[Lesson]:
+    """Read a single Lesson by id. Returns None if not found."""
+    p = Path(lessons_dir) / f"{lesson_id}.json"
+    if not p.exists():
+        return None
+    with p.open() as f:
+        return Lesson(**json.load(f))
+
+
+def update_lesson(
+    lesson_id: str, *, lessons_dir: Path | str = LESSONS_DIR, **fields: Any
+) -> Lesson:
+    """Mutate a Lesson on disk. Provisional lessons are written by the loop
+    and later mutated when a human approves or rejects them — that's the only
+    legitimate path for a Lesson to change. Returns the updated Lesson.
+    """
+    lesson = read_lesson(lesson_id, lessons_dir)
+    if lesson is None:
+        raise FileNotFoundError(f"lesson {lesson_id!r} not found")
+    for k, v in fields.items():
+        if not hasattr(lesson, k):
+            raise AttributeError(f"Lesson has no field {k!r}")
+        setattr(lesson, k, v)
+    write_lesson(lesson, lessons_dir)
+    return lesson

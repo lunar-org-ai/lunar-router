@@ -13,6 +13,8 @@ Endpoints:
   POST /versions/{version}/rollback    — restore live agent/ to a prior version.
   GET  /lessons                        — flat lesson feed (Evolution timeline).
   GET  /lessons/{id}                   — single lesson by id.
+  POST /lessons/{id}/approve           — approve a queued review lesson + promote.
+  POST /lessons/{id}/reject            — reject a queued review lesson.
   GET  /metrics/overview               — derived dashboard metrics.
 """
 
@@ -303,6 +305,43 @@ async def get_lesson(lesson_id: str) -> LessonSummary:
         if l.id == lesson_id:
             return _lesson_to_summary(l)
     raise HTTPException(status_code=404, detail=f"unknown lesson {lesson_id!r}")
+
+
+class ReviewActionRequest(BaseModel):
+    reviewer: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@app.post("/lessons/{lesson_id}/approve", response_model=LessonSummary)
+async def approve_lesson(
+    lesson_id: str, payload: Optional[ReviewActionRequest] = None
+) -> LessonSummary:
+    from harness.executor.promote import promote_queued
+
+    try:
+        lesson = promote_queued(
+            lesson_id, reviewer=(payload.reviewer if payload else None) or "ui"
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _lesson_to_summary(lesson)
+
+
+@app.post("/lessons/{lesson_id}/reject", response_model=LessonSummary)
+async def reject_lesson(
+    lesson_id: str, payload: Optional[ReviewActionRequest] = None
+) -> LessonSummary:
+    from harness.executor.promote import reject_queued
+
+    try:
+        lesson = reject_queued(lesson_id, reason=(payload.reason if payload else None))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _lesson_to_summary(lesson)
 
 
 class RollbackRequest(BaseModel):

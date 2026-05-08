@@ -24,6 +24,9 @@ from experiments.runner import CandidateResult, run_candidate
 from harness.approver import ApprovalDecision, Policy, decide
 from harness.critics import Critic, CriticStage, make_critic
 from harness.executor import promote
+from harness.executor.promote import build_lesson
+from ledger.versioning import LIVE_AGENT, read_version
+from ledger.writer import write_entry, write_lesson
 from harness.types import (
     CriticContext,
     CriticVerdict,
@@ -44,6 +47,7 @@ class LoopRound:
     decision: ApprovalDecision
     promoted_version: Optional[str] = None
     promoted_lesson_id: Optional[str] = None
+    queued_lesson_id: Optional[str] = None
 
 
 def _split_critics(
@@ -168,6 +172,44 @@ def run_loop(
 
     decisions = [decide(o, pol) for o in outcomes]
     rounds = [LoopRound(outcome=o, decision=d) for o, d in zip(outcomes, decisions)]
+
+    # Queue-for-human path. Write a provisional lesson + queued_review entry
+    # so the UI Review queue can surface the candidate. The candidate's agent
+    # already lives at experiments/candidates/<cand_id>/ — promote_queued()
+    # reads it back when a human approves.
+    live_version = read_version(LIVE_AGENT)
+    for r in rounds:
+        if r.decision != ApprovalDecision.QUEUE_HUMAN:
+            continue
+        if r.outcome.candidate_id is None:
+            continue  # no branching happened (rejected at pre-flight)
+        if r.queued_lesson_id is not None:
+            continue  # idempotency
+
+        delta = (
+            r.outcome.candidate_result.delta if r.outcome.candidate_result else {}
+        )
+        delta_overall = delta.get("overall_score", 0.0) if delta else 0.0
+
+        entry = write_entry(
+            kind="queued_review",
+            candidate_id=r.outcome.candidate_id,
+            agent_version_before=live_version,
+            summary=f"queued for human review (Δoverall={delta_overall:+.4f})",
+            payload={
+                "mutations": [m.describe() for m in r.outcome.proposal.mutations],
+                "delta": delta,
+                "policy_mode": pol.mode,
+            },
+        )
+        lesson = build_lesson(
+            r.outcome,
+            status="awaiting_review",
+            parent_version=live_version,
+            entry_id=entry.entry_id,
+        )
+        write_lesson(lesson)
+        r.queued_lesson_id = lesson.id
 
     if not auto_promote or promote_strategy == "none":
         return rounds

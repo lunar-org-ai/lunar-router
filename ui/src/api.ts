@@ -166,6 +166,38 @@ export async function getLesson(id: string): Promise<LessonSummary> {
   return (await res.json()) as LessonSummary;
 }
 
+export async function approveLesson(
+  id: string,
+  reviewer?: string,
+): Promise<LessonSummary> {
+  const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}/approve`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reviewer }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonSummary;
+}
+
+export async function rejectLesson(
+  id: string,
+  reason?: string,
+): Promise<LessonSummary> {
+  const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}/reject`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonSummary;
+}
+
 export async function rollbackVersion(version: string, reason?: string): Promise<RollbackResult> {
   const res = await fetch(`/v1/versions/${encodeURIComponent(version)}/rollback`, {
     method: 'POST',
