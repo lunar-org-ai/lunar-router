@@ -43,14 +43,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from runtime.compiler.builder import compile_agent
 from runtime.compiler.loader import load_agent
 from runtime.executor.pipeline import PipelineExecutor
+from runtime.executor.tracing import bus as trace_bus
 from runtime.executor.tracing import write_trace
 from runtime.protocols import Message
+from runtime.store import traces as traces_store
 
 logger = logging.getLogger(__name__)
 
@@ -111,11 +114,16 @@ _state: dict[str, Any] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio as _asyncio
+
     cfg = load_agent("agent/agent.yaml")
     pipeline = compile_agent(cfg)
     executor = PipelineExecutor(pipeline)
     _state["cfg"] = cfg
     _state["executor"] = executor
+    # TraceBus needs the running event loop to schedule fan-out from the
+    # synchronous write_trace path back onto async subscriber queues.
+    trace_bus.attach_loop(_asyncio.get_running_loop())
     logger.info("agent %s ready (%d stages)", cfg.version, len(pipeline.stages))
     yield
     _state.clear()
@@ -544,70 +552,16 @@ class MetricsOverview(BaseModel):
 
 @app.get("/metrics/overview", response_model=MetricsOverview)
 async def metrics_overview() -> MetricsOverview:
-    import json
     from collections import defaultdict
     from datetime import datetime, timedelta, timezone
-    from pathlib import Path
 
     from ledger.writer import read_entries, read_lessons
 
     now = datetime.now(timezone.utc)
-    today_str = now.date().isoformat()
-    five_min_ago = now - timedelta(minutes=5)
 
-    traces_dir = Path(__file__).resolve().parent.parent / "traces" / "raw"
-
-    def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        if not path.exists():
-            return rows
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    pass
-        return rows
-
-    today_traces = _load_jsonl(traces_dir / f"{today_str}.jsonl")
-    today_count = len(today_traces)
-
-    active_5min = 0
-    for t in today_traces:
-        ts_raw = t.get("timestamp")
-        if not ts_raw:
-            continue
-        try:
-            ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
-            if ts > five_min_ago:
-                active_5min += 1
-        except Exception:
-            pass
-
-    recent_traces: list[dict[str, Any]] = []
-    if traces_dir.exists():
-        for fp in sorted(traces_dir.glob("*.jsonl"), reverse=True)[:7]:
-            recent_traces.extend(_load_jsonl(fp))
-
-    resolution_rate: Optional[float] = None
-    avg_latency_ms: Optional[float] = None
-    if recent_traces:
-        def _ok(t: dict[str, Any]) -> bool:
-            if not t.get("response"):
-                return False
-            for s in t.get("stages") or []:
-                if s.get("error"):
-                    return False
-            return True
-
-        ok_count = sum(1 for t in recent_traces if _ok(t))
-        resolution_rate = ok_count / len(recent_traces)
-        avg_latency_ms = sum(float(t.get("duration_ms", 0) or 0) for t in recent_traces) / len(
-            recent_traces
-        )
+    # Trace-derived metrics: today_count, active_5min, resolution_rate,
+    # avg_latency_ms — one DuckDB query over the JSONL+Parquet union.
+    trace_metrics = traces_store.metrics_traces_window(window_days=7)
 
     entries = read_entries()
     by_date_p: dict[str, int] = defaultdict(int)
@@ -639,14 +593,14 @@ async def metrics_overview() -> MetricsOverview:
     pending = sum(1 for l in lessons if l.status in ("pending", "awaiting_review"))
 
     return MetricsOverview(
-        today_count=today_count,
-        active_5min=active_5min,
+        today_count=trace_metrics["today_count"],
+        active_5min=trace_metrics["active_5min"],
         pending_review=pending,
         trust_score=trust_score,
         trust_score_delta_30d=trust_score_delta_30d,
         trust_history_30d=history,
-        resolution_rate=resolution_rate,
-        avg_latency_ms=avg_latency_ms,
+        resolution_rate=trace_metrics["resolution_rate"],
+        avg_latency_ms=trace_metrics["avg_latency_ms"],
         avg_cost_usd=None,
         csat=None,
         computed_at=now.isoformat(),
@@ -803,60 +757,6 @@ class TraceDetail(TraceSummary):
     history: list[HistoryTurn] = []  # the conversation up to (not including) this turn
 
 
-_TRACES_DIR = Path(__file__).resolve().parent.parent / "traces" / "raw"
-
-
-def _load_traces_for_date(date: str) -> list[dict[str, Any]]:
-    path = _TRACES_DIR / f"{date}.jsonl"
-    rows: list[dict[str, Any]] = []
-    if not path.exists():
-        return rows
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                pass
-    return rows
-
-
-def _trace_to_summary(t: dict[str, Any]) -> TraceSummary:
-    stages = t.get("stages") or []
-    routing_model: Optional[str] = None
-    for s in stages:
-        if s.get("stage") == "route" and s.get("routing_model"):
-            routing_model = s["routing_model"]
-            break
-    history = t.get("history") or []
-    return TraceSummary(
-        trace_id=t.get("trace_id", ""),
-        timestamp=t.get("timestamp", ""),
-        request=t.get("request", ""),
-        response=t.get("response"),
-        duration_ms=float(t.get("duration_ms", 0) or 0),
-        success=bool(t.get("success", False)),
-        error=t.get("error"),
-        agent_version=t.get("agent_version"),
-        n_stages=len(stages),
-        routing_model=routing_model,
-        session_id=t.get("session_id"),
-        n_turns=len(history) + 1,
-    )
-
-
-def _available_trace_dates() -> list[str]:
-    if not _TRACES_DIR.exists():
-        return []
-    dates: list[str] = []
-    for p in sorted(_TRACES_DIR.glob("*.jsonl"), reverse=True):
-        # filename = YYYY-MM-DD.jsonl
-        dates.append(p.stem)
-    return dates
-
-
 @app.get("/traces", response_model=TracesPage)
 async def list_traces(
     date: Optional[str] = None,
@@ -866,7 +766,7 @@ async def list_traces(
     agent_version: Optional[str] = None,
     q: Optional[str] = None,
 ) -> TracesPage:
-    available = _available_trace_dates()
+    available = traces_store.available_dates()
     if not available:
         return TracesPage(
             date=date or "",
@@ -888,63 +788,79 @@ async def list_traces(
             has_more=False,
         )
 
-    raw = _load_traces_for_date(chosen_date)
-
-    # Filter
-    filtered: list[dict[str, Any]] = []
-    needle = (q or "").lower().strip()
-    for t in raw:
-        if success is not None and bool(t.get("success", False)) != success:
-            continue
-        if agent_version and t.get("agent_version") != agent_version:
-            continue
-        if needle:
-            blob = (
-                str(t.get("request", "")).lower()
-                + " "
-                + str(t.get("response", "")).lower()
-            )
-            if needle not in blob:
-                continue
-        filtered.append(t)
-
-    # Newest first
-    filtered.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
-
     limit = max(1, min(int(limit), 200))
     offset = max(0, int(offset))
-    page = filtered[offset : offset + limit]
+
+    items, total = traces_store.query_traces(
+        date=chosen_date,
+        success=success,
+        agent_version=agent_version,
+        q=q,
+        limit=limit,
+        offset=offset,
+    )
 
     return TracesPage(
         date=chosen_date,
         available_dates=available,
-        total_filtered=len(filtered),
-        items=[_trace_to_summary(t) for t in page],
-        has_more=offset + limit < len(filtered),
+        total_filtered=total,
+        items=[TraceSummary(**i) for i in items],
+        has_more=offset + limit < total,
+    )
+
+
+@app.get("/traces/stream")
+async def stream_traces(request: Request) -> StreamingResponse:
+    """Server-sent events of trace summaries. Each event payload is the
+    same shape as TraceSummary minus the heavy fields (no full request
+    body, no stages array). Subscribers connect, get future writes only;
+    backfill is done client-side via GET /traces?limit=...
+
+    A 15s heartbeat keeps proxies from idling the connection."""
+    queue = trace_bus.subscribe()
+
+    async def gen() -> Any:
+        import asyncio as _asyncio
+
+        try:
+            yield ": connected\n\n"
+            while True:
+                if await request.is_disconnected():
+                    return
+                try:
+                    event = await _asyncio.wait_for(queue.get(), timeout=15.0)
+                except _asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"event: trace\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            trace_bus.unsubscribe(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+        },
     )
 
 
 @app.get("/traces/{trace_id}", response_model=TraceDetail)
 async def get_trace(trace_id: str) -> TraceDetail:
-    """Find a trace by id. Scans newest day first so lookups for recent
-    traffic stay fast."""
-    for d in _available_trace_dates():
-        for t in _load_traces_for_date(d):
-            if t.get("trace_id") == trace_id:
-                summary = _trace_to_summary(t)
-                stages = [TraceStageView(**s) for s in (t.get("stages") or [])]
-                history = [
-                    HistoryTurn(role=h.get("role", ""), content=h.get("content", ""))
-                    for h in (t.get("history") or [])
-                    if isinstance(h, dict)
-                ]
-                return TraceDetail(
-                    **summary.model_dump(),
-                    stages=stages,
-                    metadata=t.get("metadata") or {},
-                    history=history,
-                )
-    raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+    """Find a trace by id (DuckDB indexed lookup across JSONL+Parquet)."""
+    detail = traces_store.get_trace(trace_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+    stages = [TraceStageView(**s) for s in detail.get("stages", [])]
+    history = [HistoryTurn(**h) for h in detail.get("history", [])]
+    summary = {k: v for k, v in detail.items() if k not in ("stages", "history", "metadata")}
+    return TraceDetail(
+        **summary,
+        stages=stages,
+        metadata=detail.get("metadata") or {},
+        history=history,
+    )
 
 
 # ---------- sessions (multi-turn conversations grouped by session_id) ----------
@@ -975,29 +891,12 @@ async def get_session(session_id: str) -> SessionDetail:
     A session is the natural unit of conversation in the AHE paper's
     "experience pillar" — multiple /run calls that build on each other's
     history collapse into one thread for the UI to render as a dialog."""
-    matched: list[dict[str, Any]] = []
-    for d in _available_trace_dates():
-        for t in _load_traces_for_date(d):
-            if t.get("session_id") == session_id:
-                matched.append(t)
-    if not matched:
+    rows = traces_store.get_session_turns(session_id)
+    if not rows:
         raise HTTPException(
             status_code=404, detail=f"session {session_id!r} not found"
         )
-    matched.sort(key=lambda t: t.get("timestamp", ""))
-    turns = [
-        SessionTurn(
-            trace_id=t.get("trace_id", ""),
-            timestamp=t.get("timestamp", ""),
-            request=t.get("request", ""),
-            response=t.get("response"),
-            success=bool(t.get("success", False)),
-            error=t.get("error"),
-            agent_version=t.get("agent_version"),
-            duration_ms=float(t.get("duration_ms", 0) or 0),
-        )
-        for t in matched
-    ]
+    turns = [SessionTurn(**r) for r in rows]
     return SessionDetail(
         session_id=session_id,
         n_turns=len(turns),

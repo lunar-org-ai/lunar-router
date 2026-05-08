@@ -8,6 +8,7 @@ import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { AgentSheet } from './screens/AgentSheet';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
+import { TracesLive } from './screens/TracesLive';
 import { listLessons, ApiError } from './api';
 
 type RouteName =
@@ -18,6 +19,7 @@ type RouteName =
   | 'talk'
   | 'policies'
   | 'traces'
+  | 'tracesLive'
   | 'evals'
   | 'router'
   | 'datasets';
@@ -135,6 +137,15 @@ export const App = () => {
       crumbs = ['Traces'];
       content = <Traces />;
       break;
+    case 'tracesLive':
+      crumbs = ['Traces', 'Live'];
+      content = (
+        <TracesLive
+          onOpenTrace={() => goTo('traces')}
+          onOpenSession={() => goTo('traces')}
+        />
+      );
+      break;
     case 'evals':
       crumbs = ['Eval suites'];
       content = <EvalSuites />;
@@ -187,6 +198,13 @@ export const App = () => {
           >
             <Icon name="timeline" size={15} />
             <span>Traces</span>
+          </button>
+          <button
+            className={`sidebar-item ${route.name === 'tracesLive' ? 'active' : ''}`}
+            onClick={() => goTo('tracesLive')}
+          >
+            <Icon name="timeline" size={15} />
+            <span>Traces · Live</span>
           </button>
           <button
             className={`sidebar-item ${route.name === 'evals' ? 'active' : ''}`}

@@ -10,6 +10,7 @@ dependencies = [
     "uvicorn[standard]>=0.27",
     "mcp>=1.0.0",
     "anthropic>=0.40",
+    "duckdb>=1.1",
 ]
 
 [project.optional-dependencies]

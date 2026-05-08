@@ -269,6 +269,44 @@ export async function getTrace(id: string): Promise<TraceDetail> {
   return (await res.json()) as TraceDetail;
 }
 
+export interface LiveTraceEvent {
+  trace_id: string;
+  timestamp: string;
+  session_id: string | null;
+  agent_version: string | null;
+  duration_ms: number;
+  success: boolean;
+  error: string | null;
+  n_stages: number;
+  n_turns: number;
+  request_preview: string;
+}
+
+export interface TraceStreamHandlers {
+  onTrace: (event: LiveTraceEvent) => void;
+  onOpen?: () => void;
+  onError?: (e: Event) => void;
+}
+
+/**
+ * Subscribe to /v1/traces/stream (SSE). Returns a close fn.
+ * The browser auto-reconnects on transient drops.
+ */
+export function subscribeTraces(handlers: TraceStreamHandlers): () => void {
+  const es = new EventSource('/v1/traces/stream');
+  if (handlers.onOpen) es.addEventListener('open', handlers.onOpen);
+  if (handlers.onError) es.addEventListener('error', handlers.onError);
+  es.addEventListener('trace', (msg) => {
+    try {
+      const event = JSON.parse((msg as MessageEvent<string>).data) as LiveTraceEvent;
+      handlers.onTrace(event);
+    } catch {
+      // malformed event; skip
+    }
+  });
+  return () => es.close();
+}
+
 // ---------- evals (Technical / Eval suites) ----------
 
 export interface RubricSpec {
