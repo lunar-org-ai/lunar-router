@@ -41,3 +41,34 @@ export async function runAgent(
   }
   return (await res.json()) as AgentRunResponse;
 }
+
+export interface IntrospectToolCall {
+  tool: string;
+  input: Record<string, unknown>;
+  output_preview: string;
+}
+
+export interface IntrospectResponse {
+  response: string;
+  tool_calls: IntrospectToolCall[];
+  success: boolean;
+  error: string | null;
+  model: string | null;
+  iterations: number;
+}
+
+export async function introspect(
+  request: string,
+  history?: HistoryMessage[],
+): Promise<IntrospectResponse> {
+  const res = await fetch('/v1/introspect', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ request, history }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as IntrospectResponse;
+}

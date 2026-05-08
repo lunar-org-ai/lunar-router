@@ -1102,14 +1102,15 @@ h1.page-title {
 .chat-wrap {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 56px - 64px);
+  max-height: calc(100vh - 56px - 64px);
   max-width: 760px;
   margin: 0 auto;
   width: 100%;
 }
 .chat-msgs {
-  flex: 1;
-  overflow-y: auto;
+  flex: 0 1 auto;        /* shrink-to-content; only grow within parent's max */
+  min-height: 0;         /* allow children to define content height */
+  overflow-y: auto;      /* scrollbar appears only when content overflows */
   padding: 8px 4px;
   display: flex;
   flex-direction: column;
@@ -1505,3 +1506,243 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   align-self: stretch;
   max-width: 100%;
 }
+
+/* Thinking trajectory — ported from Claude Design (OpenTracy Evolution.html) */
+.trajectory {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 4px 0;
+}
+.trajectory .trail {
+  position: absolute;
+  left: 7px;
+  top: 14px;
+  bottom: 14px;
+  width: 1px;
+}
+.trajectory .trail-line {
+  position: absolute; inset: 0;
+  background: var(--border);
+}
+.trajectory .trail-fill {
+  position: absolute; top: 0; left: 0; width: 1px;
+  background: var(--fg-subtle);
+  transition: height 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.tstep {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  position: relative;
+  z-index: 1;
+}
+.tnode {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  color: var(--fg-muted);
+  transition: all 0.25s ease;
+}
+.tstep.pending .tnode { background: var(--bg-card); border-color: var(--border); }
+.tstep.pending .tlabel { color: var(--fg-subtle); }
+
+.tstep.done .tnode {
+  background: var(--bg-elev);
+  border-color: var(--fg-subtle);
+  color: var(--fg-muted);
+}
+.tstep.done .tlabel { color: var(--fg-muted); }
+
+.tstep.active .tnode {
+  background: transparent;
+  border-color: transparent;
+  color: var(--fg-muted);
+  width: 14px; height: 14px;
+  animation: tnodeFloat 1.6s ease-in-out infinite;
+}
+.tstep.active .tlabel {
+  color: var(--fg);
+  font-weight: 500;
+  background: linear-gradient(90deg, var(--fg) 0%, var(--fg) 50%, var(--fg-muted) 50%, var(--fg-muted) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: tshimmer 1.8s linear infinite;
+}
+
+.tghost { display: block; }
+@keyframes tnodeFloat {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-1.5px); }
+}
+@keyframes tshimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.tlabel { line-height: 1.4; transition: color 0.25s ease; }
+.tmeta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-subtle);
+  margin-left: auto;
+}
+.tcaret {
+  width: 4px; height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  margin-left: 4px;
+  animation: tcaretPulse 1s ease-in-out infinite;
+}
+@keyframes tcaretPulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50%      { opacity: 1;   transform: scale(1.3); }
+}
+
+/* ---------- Ghost mascot ---------- */
+.ghost-mascot { display: inline-block; line-height: 0; }
+
+@keyframes gmFloat {
+  0%, 100% { transform: translateY(0px); }
+  50%      { transform: translateY(-6px); }
+}
+@keyframes gmTypeLeft {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  50%      { transform: rotate(-8deg) translateY(-1.5px); }
+}
+@keyframes gmTypeRight {
+  0%, 100% { transform: rotate(0deg) translateY(0); }
+  50%      { transform: rotate(8deg) translateY(-1.5px); }
+}
+@keyframes gmBlink {
+  0%, 96%, 100% { transform: scaleY(1); }
+  98%           { transform: scaleY(0.1); }
+}
+@keyframes gmPulseDot {
+  0%, 100% { opacity: 0.35; transform: scale(0.9); }
+  50%      { opacity: 1;    transform: scale(1.1); }
+}
+@keyframes gmSteam {
+  0%   { opacity: 0;   transform: translateY(0)   scale(1); }
+  50%  { opacity: 0.55; transform: translateY(-5px) scale(1.1); }
+  100% { opacity: 0;   transform: translateY(-10px) scale(1); }
+}
+@keyframes gmBob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-2.5px); }
+}
+@keyframes gmFloatZ {
+  0%   { opacity: 0;    transform: translate(0, 0)        scale(0.8); }
+  20%  { opacity: 1;    transform: translate(4px, -8px)   scale(1); }
+  80%  { opacity: 0.8;  transform: translate(12px, -24px) scale(1.1); }
+  100% { opacity: 0;    transform: translate(16px, -32px) scale(1.2); }
+}
+@keyframes gmPulseLine {
+  0%, 100% { opacity: 0.65; transform: scaleX(0.95); }
+  50%      { opacity: 1;    transform: scaleX(1.05); }
+}
+
+.gm-float    { animation: gmFloat       4.5s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.gm-bob      { animation: gmBob         2.2s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.gm-blink    { animation: gmBlink       5.5s ease-in-out infinite; transform-origin: center; }
+.gm-pulse    { animation: gmPulseDot    1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+.gm-type-l   { animation: gmTypeLeft    0.32s ease-in-out infinite alternate; transform-origin: top left; }
+.gm-type-r   { animation: gmTypeRight   0.36s ease-in-out infinite alternate; transform-origin: top right; }
+.gm-steam-1  { animation: gmSteam       2.1s ease-in-out infinite; }
+.gm-steam-2  { animation: gmSteam       2.6s ease-in-out infinite 0.6s; }
+.gm-line     { animation: gmPulseLine   2s   ease-in-out infinite; transform-origin: right; }
+.gm-z        { font-family: var(--font-sans); }
+.gm-z-1      { animation: gmFloatZ      3s   linear infinite; }
+.gm-z-2      { animation: gmFloatZ      3s   linear infinite 1s; }
+.gm-z-3      { animation: gmFloatZ      3s   linear infinite 2s; }
+
+.gm-d100 { animation-delay: 0.10s; }
+.gm-d200 { animation-delay: 0.20s; }
+.gm-d300 { animation-delay: 0.30s; }
+
+/* ---------- Markdown rendering inside chat messages ---------- */
+.chat-msgs .msg .body .md > * { margin: 0 0 8px; }
+.chat-msgs .msg .body .md > *:last-child { margin-bottom: 0; }
+.chat-msgs .msg .body .md p { line-height: 1.55; }
+.chat-msgs .msg .body .md h1,
+.chat-msgs .msg .body .md h2,
+.chat-msgs .msg .body .md h3,
+.chat-msgs .msg .body .md h4 {
+  font-weight: 600;
+  margin: 14px 0 6px;
+  line-height: 1.3;
+}
+.chat-msgs .msg .body .md h1 { font-size: 18px; }
+.chat-msgs .msg .body .md h2 { font-size: 16px; }
+.chat-msgs .msg .body .md h3 { font-size: 14px; }
+.chat-msgs .msg .body .md h4 { font-size: 13px; }
+.chat-msgs .msg .body .md ul,
+.chat-msgs .msg .body .md ol {
+  padding-left: 20px;
+}
+.chat-msgs .msg .body .md li { margin: 2px 0; line-height: 1.5; }
+.chat-msgs .msg .body .md li > p { margin: 0 0 4px; }
+.chat-msgs .msg .body .md code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: var(--fg);
+}
+.chat-msgs .msg .body .md pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.chat-msgs .msg .body .md pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+.chat-msgs .msg .body .md blockquote {
+  border-left: 3px solid var(--border-strong);
+  padding-left: 10px;
+  color: var(--fg-muted);
+  margin: 8px 0;
+}
+.chat-msgs .msg .body .md a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.chat-msgs .msg .body .md table {
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin: 6px 0;
+}
+.chat-msgs .msg .body .md th,
+.chat-msgs .msg .body .md td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.chat-msgs .msg .body .md th {
+  background: var(--bg-muted);
+  font-weight: 600;
+}
+.chat-msgs .msg .body .md hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+.chat-msgs .msg .body .md strong { font-weight: 600; }

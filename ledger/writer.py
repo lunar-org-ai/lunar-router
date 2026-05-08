@@ -19,8 +19,12 @@ from typing import Any, Optional
 
 from ledger.types import ENTRY_KINDS, LedgerEntry, Lesson
 
-ENTRIES_DIR = Path("ledger/entries")
-LESSONS_DIR = Path("ledger/lessons")
+# Anchor to project root so MCP-server-launched subprocesses (which can have
+# arbitrary cwd) still find the ledger reliably.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+ENTRIES_DIR = _PROJECT_ROOT / "ledger" / "entries"
+LESSONS_DIR = _PROJECT_ROOT / "ledger" / "lessons"
 
 
 def _now_iso() -> str:

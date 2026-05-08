@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "opentracy-harness": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "harness.introspection.mcp_server"]
+    }
+  }
+}

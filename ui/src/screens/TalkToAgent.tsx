@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { Icon } from '../components/Icon';
-import { ApiError, runAgent, type HistoryMessage } from '../api';
+import { ThinkingGhost } from '../components/ThinkingGhost';
+import { ApiError, introspect, type HistoryMessage, type IntrospectToolCall } from '../api';
 
 interface Msg {
   who: 'agent' | 'user';
   text: string;
-  traceId?: string;
-  durationMs?: number;
+  toolCalls?: IntrospectToolCall[];
+  iterations?: number;
+  model?: string | null;
   error?: boolean;
 }
 
@@ -31,20 +35,20 @@ export const TalkToAgent = () => {
     setInput('');
     setLoading(true);
 
-    // Build history from prior turns (skip the initial greeting)
     const history: HistoryMessage[] = msgs
       .slice(1)
       .map((m) => ({ role: m.who === 'user' ? 'user' : 'assistant', content: m.text }));
 
     try {
-      const result = await runAgent(q, history);
+      const result = await introspect(q, history);
       setMsgs((m) => [
         ...m,
         {
           who: 'agent',
-          text: result.response ?? '(empty response)',
-          traceId: result.trace_id,
-          durationMs: result.duration_ms,
+          text: result.response,
+          toolCalls: result.tool_calls,
+          iterations: result.iterations,
+          model: result.model,
           error: !result.success,
         },
       ]);
@@ -60,10 +64,10 @@ export const TalkToAgent = () => {
   };
 
   const quick = [
-    'Where is order #555?',
-    "What's your refund policy?",
-    'I want to cancel my order',
-    'How long does shipping take to Brazil?',
+    'What changed today?',
+    'Show me recent promotions and their predictions',
+    'Which predictions have we gotten right vs wrong?',
+    'Why was v0.0.2 rolled back?',
   ];
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -77,13 +81,13 @@ export const TalkToAgent = () => {
     <div className="content">
       <h1 className="page-title">Talk to your agent</h1>
       <p className="page-sub">
-        Ask the agent about its own behavior — what it's learning, why it changed, how it decided. It cites traces and
-        evals where relevant.
+        Ask the agent about its own behavior — what it's learning, why it changed, how it decided.
+        It cites traces and evals where relevant.
       </p>
 
       <div className="chat-quick">
         {quick.map((q) => (
-          <button key={q} className="chip" onClick={() => ask(q)}>
+          <button key={q} className="chip" onClick={() => ask(q)} disabled={loading}>
             {q}
           </button>
         ))}
@@ -96,23 +100,29 @@ export const TalkToAgent = () => {
               <div className="av">{m.who === 'user' ? 'You' : ''}</div>
               <div className="body">
                 <div className="who">{m.who === 'agent' ? 'Agent' : 'You'}</div>
-                {m.text.split('\n').map((line, j) => (
-                  <p key={j} className={m.error ? 'dim' : ''}>{line}</p>
-                ))}
-                {m.traceId && (
+                <div className={`md ${m.error ? 'dim' : ''}`}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                </div>
+                {m.toolCalls && m.toolCalls.length > 0 && (
                   <p className="dim" style={{ fontSize: 11, marginTop: 4 }}>
-                    trace {m.traceId.slice(0, 8)}… · {m.durationMs?.toFixed(1)}ms
+                    {m.iterations} iter · {m.model ?? '?'} · tools:{' '}
+                    {m.toolCalls.map((t) => t.tool).join(', ')}
+                  </p>
+                )}
+                {m.toolCalls && m.toolCalls.length === 0 && m.model && (
+                  <p className="dim" style={{ fontSize: 11, marginTop: 4 }}>
+                    {m.model}
                   </p>
                 )}
               </div>
             </div>
           ))}
           {loading && (
-            <div className="msg agent">
+            <div className="msg agent thinking-msg">
               <div className="av"></div>
               <div className="body">
                 <div className="who">Agent</div>
-                <p className="dim">thinking…</p>
+                <ThinkingGhost />
               </div>
             </div>
           )}

@@ -1,13 +1,14 @@
-"""HTTP service exposing the runtime over POST /run.
+"""HTTP service exposing the runtime over POST /run + /introspect.
 
 This is the in-process target for the TS backend. The server compiles
 agent.yaml once at startup; when the harness promotes a new version, restart
 the service (hot-reload comes in a later phase).
 
 Endpoints:
-  POST /run    — execute one request through the compiled pipeline.
-  GET  /health — liveness + agent version.
-  GET  /agent  — current agent.yaml summary.
+  POST /run        — execute one request through the compiled pipeline.
+  POST /introspect — ask the harness about itself (LLM + tool use over ledger).
+  GET  /health     — liveness + agent version.
+  GET  /agent      — current agent.yaml summary.
 """
 
 from __future__ import annotations
@@ -120,6 +121,45 @@ async def agent() -> AgentInfo:
         ],
         cross_cutting=cfg.cross_cutting.model_dump(),
         budget=cfg.budget.model_dump(),
+    )
+
+
+class IntrospectRequest(BaseModel):
+    request: str
+    history: Optional[list[HistoryMessage]] = None
+
+
+class IntrospectToolCall(BaseModel):
+    tool: str
+    input: dict[str, Any]
+    output_preview: str
+
+
+class IntrospectResponse(BaseModel):
+    response: str
+    tool_calls: list[IntrospectToolCall]
+    success: bool
+    error: Optional[str] = None
+    model: Optional[str] = None
+    iterations: int = 0
+
+
+@app.post("/introspect", response_model=IntrospectResponse)
+async def introspect_endpoint(payload: IntrospectRequest) -> IntrospectResponse:
+    from harness.introspection.agent import introspect
+
+    history = [{"role": m.role, "content": m.content} for m in (payload.history or [])]
+    result = introspect(payload.request, history)
+    return IntrospectResponse(
+        response=result.response,
+        tool_calls=[
+            IntrospectToolCall(tool=tc.tool, input=tc.input, output_preview=tc.output_preview)
+            for tc in result.tool_calls
+        ],
+        success=result.success,
+        error=result.error,
+        model=result.model,
+        iterations=result.iterations,
     )
 
 
