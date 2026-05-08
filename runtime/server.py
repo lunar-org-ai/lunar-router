@@ -1040,6 +1040,13 @@ class SuiteSummary(BaseModel):
     last_pass_rate: Optional[float] = None
     last_agent_version: Optional[str] = None
     n_runs: int = 0
+    # author: "human" if pinned by an operator, "agent" if auto-authored by a
+    # future proposer. Read from suite YAML's metadata.author, defaults to
+    # "human". Forward-looking — the harness has no suite proposer yet.
+    author: str = "human"
+    # Pass rate of the run before the most recent — used by the UI to label
+    # a suite as "regressed" when last_pass_rate < baseline_pass_rate.
+    baseline_pass_rate: Optional[float] = None
 
 
 class SuiteDetail(SuiteSummary):
@@ -1148,23 +1155,27 @@ def _list_suites() -> list[SuiteSummary]:
     if not suites_dir.exists():
         return []
 
-    # Pre-compute per-suite latest run from reports (one pass).
-    latest_by_suite: dict[str, ReportSummary] = {}
-    counts_by_suite: dict[str, int] = {}
+    # Group runs by suite, sorted newest-first, so we can pick latest + baseline
+    # in one pass.
+    runs_by_suite: dict[str, list[ReportSummary]] = {}
     for p in _list_report_files():
         meta = _load_report_meta(p)
         if meta is None or not meta.suite:
             continue
-        counts_by_suite[meta.suite] = counts_by_suite.get(meta.suite, 0) + 1
-        prev = latest_by_suite.get(meta.suite)
-        if prev is None or meta.finished_at > prev.finished_at:
-            latest_by_suite[meta.suite] = meta
+        runs_by_suite.setdefault(meta.suite, []).append(meta)
+    for runs in runs_by_suite.values():
+        runs.sort(key=lambda r: r.finished_at or r.started_at, reverse=True)
 
     out: list[SuiteSummary] = []
     for sp in sorted(suites_dir.glob("*.yaml")):
         d = _safe_yaml_load(sp)
         name = d.get("suite") or sp.stem
-        latest = latest_by_suite.get(name)
+        runs = runs_by_suite.get(name, [])
+        latest = runs[0] if runs else None
+        baseline = runs[1] if len(runs) >= 2 else None
+        author = ((d.get("metadata") or {}).get("author") or "human").lower()
+        if author not in ("human", "agent"):
+            author = "human"
         out.append(
             SuiteSummary(
                 name=name,
@@ -1176,7 +1187,9 @@ def _list_suites() -> list[SuiteSummary]:
                 last_overall_score=latest.overall_score if latest else None,
                 last_pass_rate=latest.pass_rate if latest else None,
                 last_agent_version=latest.agent_version if latest else None,
-                n_runs=counts_by_suite.get(name, 0),
+                n_runs=len(runs),
+                author=author,
+                baseline_pass_rate=baseline.pass_rate if baseline else None,
             )
         )
     return out
@@ -1230,6 +1243,67 @@ async def get_suite(name: str) -> SuiteDetail:
         goldens=goldens,
         rubrics=rubrics,
     )
+
+
+def _ts_safe(iso: str) -> str:
+    """Mirror runner._write_report's filename rule."""
+    return iso.replace(":", "").replace(".", "").replace("-", "")
+
+
+@app.post("/evals/suites/{name}/run", response_model=ReportSummary)
+async def run_suite_endpoint(name: str) -> ReportSummary:
+    """Synchronously run a suite and return the new report's summary.
+
+    Stub-LLM smoke suites complete in ~ms; we keep this synchronous so the UI
+    can refresh and open the report drawer in one round-trip. If real-LLM
+    suites land later this should move to a background job.
+    """
+    if not _REPORT_ID_RE.match(name):
+        raise HTTPException(status_code=400, detail=f"invalid suite name {name!r}")
+    suite_path = _EVALS_DIR / "suites" / f"{name}.yaml"
+    if not suite_path.exists():
+        raise HTTPException(status_code=404, detail=f"unknown suite {name!r}")
+
+    from evals.runners.runner import run_suite
+
+    try:
+        report = run_suite(suite_path, agent_path=_AGENT_DIR / "agent.yaml")
+    except Exception as e:  # surface load / compile / score errors verbatim
+        raise HTTPException(status_code=500, detail=f"run failed: {e}") from e
+
+    report_id = f"{report.suite}_{_ts_safe(report.started_at)}"
+    path = _EVALS_DIR / "reports" / f"{report_id}.json"
+    meta = _load_report_meta(path)
+    if meta is None:
+        raise HTTPException(status_code=500, detail="report written but not readable")
+    return meta
+
+
+@app.post("/evals/run_all")
+async def run_all_suites_endpoint() -> dict[str, Any]:
+    """Run every suite under evals/suites/ in series, return their report ids."""
+    suites_dir = _EVALS_DIR / "suites"
+    if not suites_dir.exists():
+        return {"reports": [], "errors": []}
+
+    from evals.runners.runner import run_suite
+
+    reports: list[ReportSummary] = []
+    errors: list[dict[str, str]] = []
+    for sp in sorted(suites_dir.glob("*.yaml")):
+        try:
+            report = run_suite(sp, agent_path=_AGENT_DIR / "agent.yaml")
+        except Exception as e:
+            errors.append({"suite": sp.stem, "error": str(e)})
+            continue
+        report_id = f"{report.suite}_{_ts_safe(report.started_at)}"
+        meta = _load_report_meta(_EVALS_DIR / "reports" / f"{report_id}.json")
+        if meta is not None:
+            reports.append(meta)
+    return {
+        "reports": [r.model_dump() for r in reports],
+        "errors": errors,
+    }
 
 
 @app.get("/evals/reports", response_model=list[ReportSummary])

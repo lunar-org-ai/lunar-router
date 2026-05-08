@@ -295,6 +295,8 @@ export interface SuiteSummary {
   last_pass_rate: number | null;
   last_agent_version: string | null;
   n_runs: number;
+  author: 'human' | 'agent';
+  baseline_pass_rate: number | null;
 }
 
 export interface SuiteDetail extends SuiteSummary {
@@ -376,6 +378,31 @@ export async function getReport(reportId: string): Promise<ReportDetail> {
     throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
   }
   return (await res.json()) as ReportDetail;
+}
+
+export async function runSuite(name: string): Promise<ReportSummary> {
+  const res = await fetch(`/v1/evals/suites/${encodeURIComponent(name)}/run`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as ReportSummary;
+}
+
+export interface RunAllResult {
+  reports: ReportSummary[];
+  errors: { suite: string; error: string }[];
+}
+
+export async function runAllSuites(): Promise<RunAllResult> {
+  const res = await fetch('/v1/evals/run_all', { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as RunAllResult;
 }
 
 // ---------- agent config ----------
