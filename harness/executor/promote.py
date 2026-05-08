@@ -60,6 +60,92 @@ def _kind_from_mutations(mutations: list[str]) -> str:
     return "other"
 
 
+def _parse_mutation(describe: str) -> tuple[str, str, str]:
+    """`pipeline/retrieve.yaml:knobs.k=12` → ('retrieve', 'k', '12')."""
+    file_part, rest = describe.split(":", 1)
+    path_part, value = rest.split("=", 1)
+    leaf = path_part.split(".")[-1]
+    stage = file_part.split("/")[-1].split(".")[0]
+    return stage, leaf, value
+
+
+_VOICES_PATH = Path(__file__).resolve().parent / "voices.yaml"
+_voices_cache: Optional[dict[str, Any]] = None
+
+
+def _voices() -> dict[str, Any]:
+    """Lazy-load voices.yaml. Templates live as data so non-engineers can edit."""
+    global _voices_cache
+    if _voices_cache is None:
+        with _VOICES_PATH.open() as f:
+            _voices_cache = yaml.safe_load(f) or {}
+    return _voices_cache
+
+
+def _outcome_phrase(delta: float) -> str:
+    outcomes = _voices().get("outcomes", {})
+    if delta > 0.005:
+        return outcomes.get("improvement", "")
+    if delta < -0.005:
+        return outcomes.get("regression", "")
+    return outcomes.get("neutral", "")
+
+
+def _voice_for(
+    kind: str,
+    mutations: list[str],
+    delta_overall: float,
+    prediction_rationale: Optional[str],
+) -> tuple[str, str]:
+    """Return (title, voice). All template content lives in voices.yaml.
+
+    Resolution order:
+      1. Prediction.rationale, if the proposer wrote one.
+      2. (kind, knob) lookup in templates.
+      3. (kind, "_default") fallback for the kind.
+      4. "other" generic.
+      Plus a "multi" path for multi-mutation lessons.
+    """
+    cfg = _voices()
+    outcome = _outcome_phrase(delta_overall)
+
+    # 1. Prediction-driven
+    if prediction_rationale:
+        rationale = prediction_rationale.strip().rstrip(".")
+        voice_tpl = cfg.get("prediction", {}).get("voice", "I figured {rationale}. {outcome}")
+        title = rationale.split(",")[0].split("→")[0].strip().capitalize()
+        if len(title) > 60:
+            title = title[:57].rstrip() + "…"
+        return title, voice_tpl.format(rationale=rationale, outcome=outcome).strip()
+
+    # 2. Multi-mutation
+    if len(mutations) > 1:
+        multi = cfg.get("multi", {})
+        title = multi.get("title", "Made {n} changes to my {kind}").format(
+            n=len(mutations), kind=kind
+        )
+        voice = multi.get(
+            "voice", "I tried out {n} adjustments to my {kind}. {outcome}"
+        ).format(n=len(mutations), kind=kind, outcome=outcome)
+        return title, voice.strip()
+
+    # 3. Single-mutation lookup
+    knob = ""
+    if mutations:
+        try:
+            _stage, knob, _value = _parse_mutation(mutations[0])
+        except ValueError:
+            knob = ""
+
+    by_kind = cfg.get("templates", {}).get(kind, {})
+    template = by_kind.get(knob) or by_kind.get("_default") or cfg.get("other", {})
+
+    title = template.get("title", "Made a change")
+    voice_body = template.get("voice", "I made a small adjustment.")
+    voice = f"{voice_body.strip()} {outcome}".strip()
+    return title, voice
+
+
 def _make_lesson(
     outcome: LoopOutcome,
     new_version: str,
@@ -73,14 +159,19 @@ def _make_lesson(
     )
     delta = outcome.candidate_result.delta if outcome.candidate_result else {}
     delta_overall = delta.get("overall_score", 0.0) if delta else 0.0
-    title = mutations[0] if len(mutations) == 1 else f"{len(mutations)} {kind} mutations"
-    summary = (
-        f"Candidate scored Δoverall={delta_overall:+.4f} vs baseline ({parent_version}); "
-        f"all critics passed."
+
+    prediction_rationale = (
+        outcome.proposal.prediction.rationale if outcome.proposal.prediction else None
     )
-    voice = (
-        f"I tweaked {kind}: {', '.join(mutations)}. "
-        f"Δoverall on the suite came out to {delta_overall:+.4f}, so I promoted it."
+    title, voice = _voice_for(kind, mutations, delta_overall, prediction_rationale)
+
+    summary = (
+        f"Auto-promoted from {parent_version}. "
+        + (
+            f"Δoverall on the eval suite: {delta_overall:+.3f}."
+            if abs(delta_overall) > 0.0005
+            else "Eval didn't move much, but the change was non-regressing and the policy auto-approved it."
+        )
     )
 
     return Lesson(

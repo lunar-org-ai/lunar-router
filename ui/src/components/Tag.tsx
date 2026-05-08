@@ -27,26 +27,47 @@ export const StatusTag = ({ status }: { status: LessonStatus | string }) => {
   );
 };
 
-export type LessonKind = 'prompt' | 'policy' | 'router' | 'eval' | 'rollback';
+// LessonKind covers both legacy mock kinds (prompt/policy/eval/rollback) and
+// the kinds the harness actually emits today (rag/rerank/router/memory/other).
+export type LessonKind =
+  | 'prompt'
+  | 'policy'
+  | 'router'
+  | 'eval'
+  | 'rollback'
+  | 'rag'
+  | 'rerank'
+  | 'memory'
+  | 'other';
 
-export const KindIcon = ({ kind }: { kind: LessonKind }) => {
-  const map: Record<LessonKind, IconName> = {
-    prompt: 'sparkles',
-    policy: 'shield',
-    router: 'route',
-    eval: 'flask',
-    rollback: 'rollback',
-  };
-  return <Icon name={map[kind] || 'sparkles'} size={14} />;
+const KIND_ICON: Record<string, IconName> = {
+  prompt: 'sparkles',
+  policy: 'shield',
+  router: 'route',
+  eval: 'flask',
+  rollback: 'rollback',
+  rag: 'book',
+  rerank: 'sliders',
+  memory: 'inbox',
+  other: 'settings',
 };
 
-export const KindLabel = ({ kind }: { kind: LessonKind }) => {
-  const map: Record<LessonKind, string> = {
-    prompt: 'Prompt change',
-    policy: 'Behavior change',
-    router: 'Routing change',
-    eval: 'New self-test',
-    rollback: 'Rolled back',
-  };
-  return <span>{map[kind] || kind}</span>;
+const KIND_LABEL: Record<string, string> = {
+  prompt: 'Prompt change',
+  policy: 'Behavior change',
+  router: 'Routing change',
+  eval: 'New self-test',
+  rollback: 'Rolled back',
+  rag: 'Retrieval change',
+  rerank: 'Reranking change',
+  memory: 'Memory change',
+  other: 'Adjustment',
 };
+
+export const KindIcon = ({ kind }: { kind: LessonKind | string }) => (
+  <Icon name={KIND_ICON[kind] || 'sparkles'} size={14} />
+);
+
+export const KindLabel = ({ kind }: { kind: LessonKind | string }) => (
+  <span>{KIND_LABEL[kind] || kind}</span>
+);

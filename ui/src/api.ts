@@ -72,3 +72,84 @@ export async function introspect(
   }
   return (await res.json()) as IntrospectResponse;
 }
+
+// ---------- versions ----------
+
+export interface LessonSummary {
+  id: string;
+  version: string | null;
+  kind: string;
+  status: string;
+  title: string;
+  summary: string;
+  voice: string | null;
+  delta: { overall_score?: number; pass_rate?: number; per_rubric?: Record<string, number> };
+  mutations: string[];
+  parent_version: string | null;
+  promoted_at: string | null;
+  ledger_entry_id: string | null;
+  proposal_source: string | null;
+}
+
+export interface VersionInfo {
+  id: string;
+  is_live: boolean;
+  status: 'live' | 'rolled_back' | 'archived';
+  snapshot_path: string;
+  promoted_at: string | null;
+  rolled_back_at: string | null;
+  lesson: LessonSummary | null;
+}
+
+export interface RollbackResult {
+  version: string;
+  previous_version: string;
+  rolled_back: boolean;
+}
+
+export async function listVersions(): Promise<VersionInfo[]> {
+  const res = await fetch('/v1/versions');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as VersionInfo[];
+}
+
+// ---------- lessons ----------
+//
+// AHE three-pillar fields ride along on LessonSummary:
+//   component  → mutations
+//   experience → delta (rubric movement) + (future) linked traces
+//   decision   → voice + proposal_source + (future) prediction.rationale
+
+export async function listLessons(): Promise<LessonSummary[]> {
+  const res = await fetch('/v1/lessons');
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonSummary[];
+}
+
+export async function getLesson(id: string): Promise<LessonSummary> {
+  const res = await fetch(`/v1/lessons/${encodeURIComponent(id)}`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as LessonSummary;
+}
+
+export async function rollbackVersion(version: string, reason?: string): Promise<RollbackResult> {
+  const res = await fetch(`/v1/versions/${encodeURIComponent(version)}/rollback`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as RollbackResult;
+}

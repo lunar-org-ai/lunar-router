@@ -1,0 +1,20 @@
+{
+  "epoch_id": "day:2026-05-08",
+  "kind": "day",
+  "started_at": "2026-05-08T00:00:00.000Z",
+  "ended_at": "2026-05-08T23:59:59.999Z",
+  "counts": {
+    "n_proposals": 0,
+    "n_branched": 0,
+    "n_promoted": 0,
+    "n_rolled_back": 0,
+    "n_rejected_by_critic": 0,
+    "n_rejected_by_policy": 0
+  },
+  "top_events": [],
+  "avg_overall_score": null,
+  "avg_delta_when_promoted": null,
+  "sessions": [],
+  "referenced_versions": [],
+  "summary": "Daily epoch 2026-05-08:, 0 promotion(s)."
+}

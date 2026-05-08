@@ -78,7 +78,7 @@ export const TalkToAgent = () => {
   };
 
   return (
-    <div className="content">
+    <div className="content content-chat">
       <h1 className="page-title">Talk to your agent</h1>
       <p className="page-sub">
         Ask the agent about its own behavior — what it's learning, why it changed, how it decided.

@@ -8,7 +8,7 @@ import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { AgentSheet } from './screens/AgentSheet';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
-import { lessons } from './data';
+import { listLessons, ApiError } from './api';
 
 type RouteName =
   | 'evolution'
@@ -66,7 +66,24 @@ export const App = () => {
     document.documentElement.style.setProperty('--accent-fg', a.fg);
   }, [accent]);
 
-  const pendingCount = lessons.filter((l) => l.status === 'pending').length;
+  const [pendingCount, setPendingCount] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await listLessons();
+        if (cancelled) return;
+        setPendingCount(
+          items.filter((l) => l.status === 'pending' || l.status === 'awaiting_review').length,
+        );
+      } catch (e) {
+        if (!(e instanceof ApiError)) console.warn('listLessons failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const goTo = useCallback((name: RouteName, params: Record<string, string> = {}) => {
     setRoute({ name, params });
@@ -88,8 +105,7 @@ export const App = () => {
       );
       break;
     case 'lesson': {
-      const lesson = lessons.find((l) => l.id === route.params.id);
-      crumbs = ['Evolution', lesson?.title || 'Lesson'];
+      crumbs = ['Evolution', 'Lesson'];
       content = <LessonDetail lessonId={route.params.id} onBack={() => goTo('evolution')} />;
       break;
     }

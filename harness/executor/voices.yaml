@@ -1,0 +1,122 @@
+# harness/executor/voices.yaml
+# Narrative templates used to render Lesson.voice / .title from a Mutation.
+#
+# Lookup is by (kind, knob). `_default` is the per-kind fallback when a knob
+# isn't listed. `_multi` covers multi-mutation lessons. `_other` covers any
+# kind not listed at all (e.g., "other"). `outcomes` produces the trailing
+# clause based on Δoverall sign.
+#
+# Edit freely — non-engineers can tune voice without touching Python.
+# {n} and {kind} are interpolated for `_multi`.
+
+outcomes:
+  improvement: "The eval picked it up as an improvement."
+  regression:  "The eval said it didn't quite land — I'm watching it."
+  neutral:     "The eval barely moved, but I'm leaving it in for now to see how real traffic responds."
+
+# Used when a Proposal carried a Prediction.rationale (Claude Code proposer).
+prediction:
+  voice: "I figured {rationale}. {outcome}"
+
+# Multi-mutation fallback.
+multi:
+  title: "Made {n} small changes to my {kind}"
+  voice: "I tried out {n} adjustments to my {kind} together. {outcome}"
+
+# Generic catch-all when neither (kind, knob) nor (kind, _default) match.
+# Note: the outcome clause is appended automatically — don't include it here.
+other:
+  title: "Made a change"
+  voice: "I made a small adjustment."
+
+templates:
+  rag:
+    k:
+      title: "Adjusted how much context I read per question"
+      voice: >-
+        I noticed I was sometimes either missing useful context or getting distracted by
+        less relevant retrieval. I adjusted how much I read per question.
+    chunk_size:
+      title: "Resized how I slice documentation"
+      voice: >-
+        I was either splitting context awkwardly or losing detail in big chunks. I resized
+        how finely I slice the documentation.
+    bm25_weight:
+      title: "Rebalanced keyword vs semantic search"
+      voice: >-
+        Keyword and semantic search each catch different kinds of questions. I rebalanced
+        how much weight I give each one.
+    embedder:
+      title: "Switched the embedder I use for retrieval"
+      voice: >-
+        I switched to a different embedder so I understand questions more naturally.
+    rerank_inline:
+      title: "Changed where reranking happens"
+      voice: "I moved reranking inline with retrieval to keep the pipeline tighter."
+    _default:
+      title: "Tuned my retrieval"
+      voice: "I tuned how I retrieve context."
+
+  rerank:
+    top_n:
+      title: "Adjusted how many candidates I keep after reranking"
+      voice: >-
+        I was either throwing away supporting context too aggressively or keeping too much
+        noise. I adjusted how many candidates I keep.
+    score_threshold:
+      title: "Adjusted my relevance threshold"
+      voice: "I changed how strict I am about which retrieved context I trust."
+    model:
+      title: "Switched my reranker"
+      voice: "I switched the model I use to reorder retrieved context."
+    _default:
+      title: "Tuned reranking"
+      voice: "I adjusted how I rerank retrieved context."
+
+  router:
+    confidence_threshold:
+      title: "Recalibrated when I escalate to a bigger model"
+      voice: >-
+        I noticed I was either being overconfident with the small model or going to the big
+        model when it wasn't necessary. I recalibrated when I escalate.
+    small:
+      title: "Switched my default fast model"
+      voice: >-
+        I changed the small model I default to, to better match the questions coming through.
+    big:
+      title: "Switched my fallback model"
+      voice: >-
+        I changed the bigger model I escalate to, to better handle the harder questions.
+    escalate_on_failure:
+      title: "Changed how I handle failed answers"
+      voice: "I adjusted whether I escalate to the bigger model when I stumble."
+    _default:
+      title: "Tuned routing"
+      voice: "I tweaked how I route questions between models."
+
+  prompt:
+    prompt:
+      title: "Rewrote my system prompt"
+      voice: "I rewrote my system prompt to better match how questions actually come in."
+    max_tokens:
+      title: "Changed how long my answers run"
+      voice: "I adjusted how long my answers can get."
+    temperature:
+      title: "Tuned my answer style"
+      voice: "I tuned how strictly I stick to the most likely phrasing."
+    _default:
+      title: "Adjusted my prompt strategy"
+      voice: "I changed how I compose prompts."
+
+  memory:
+    window:
+      title: "Adjusted how much conversation I remember"
+      voice: >-
+        I noticed I was either losing context across long conversations or holding onto too
+        much. I adjusted what I remember.
+    summarize_after:
+      title: "Changed when I summarize older conversation"
+      voice: "I tuned how aggressively I summarize older context to save room."
+    _default:
+      title: "Tuned memory"
+      voice: "I tuned how I handle conversation memory."

@@ -1,55 +1,113 @@
-import { useState } from 'react';
+/**
+ * LessonDetail — drills into one promotion.
+ *
+ * The five tabs map cleanly onto the AHE three pillars (arxiv 2604.25850):
+ *
+ *   Story     → decision pillar    (the agent's first-person rationale)
+ *   Diff      → component pillar   (the mutation applied to the agent config)
+ *   Evals     → experience pillar  (rubric delta from the candidate run)
+ *   Traces    → experience pillar  (which traces drove the change — TODO link)
+ *   Decision  → decision pillar    (proposal_source, parent_version, lineage)
+ *
+ * The harness today produces minimal but real data for Story/Diff/Evals/Decision.
+ * Traces and per-rubric before-numbers are not yet linked at the lesson level —
+ * we show honest empty states instead of fabricating placeholder rows.
+ */
+
+import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Tag, StatusTag, KindIcon, KindLabel } from '../components/Tag';
-import { ConfBar } from '../components/ConfBar';
-import { Diff } from '../components/Diff';
-import { lessons, fmtDay, type Eval } from '../data';
+import { ApiError, getLesson, type LessonSummary } from '../api';
 
-const triggerLabel = (kind: string) =>
-  kind === 'failed_traces'
-    ? 'Failed traces in production'
-    : kind === 'feedback'
-    ? 'Customer feedback signals'
-    : kind === 'cost'
-    ? 'Cost optimization scan'
-    : kind === 'experiment'
-    ? 'A/B experiment regression'
-    : kind;
+const fmtDay = (iso: string | null): string => {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  } catch {
+    return iso;
+  }
+};
 
-const fileLabelFor = (type: string) =>
-  type === 'system_prompt'
-    ? 'system_prompt.md'
-    : type === 'tool_wrapper'
-    ? 'tools/lookup_order.py'
-    : type === 'routing'
-    ? 'routing.yml'
-    : type === 'eval'
-    ? 'evals/'
-    : 'config.yml';
+const proposalSourceLabel = (src: string | null): string => {
+  if (!src) return 'Unknown source';
+  return (
+    {
+      heuristic: 'Heuristic proposer (sweep)',
+      claude_code: 'Claude Code proposer',
+      human: 'Human proposer',
+    }[src] || src
+  );
+};
 
-const fmtEval = (v: number | null, e: Eval) =>
-  v == null
-    ? '—'
-    : e.scale
-    ? v.toFixed(1)
-    : e.currency
-    ? `$${v.toFixed(3)}`
-    : v < 1 && v > 0
-    ? `${(v * 100).toFixed(0)}%`
-    : v.toFixed(0);
+type TabId = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
 
 export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: () => void }) => {
-  const l = lessons.find((x) => x.id === lessonId);
-  const [tab, setTab] = useState<'story' | 'traces' | 'evals' | 'diff' | 'decision'>('story');
-  if (!l) return null;
+  const [lesson, setLesson] = useState<LessonSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabId>('story');
 
-  const tabs = [
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const l = await getLesson(lessonId);
+      setLesson(l);
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? `Backend ${e.status}: ${e.message}`
+          : `Network error: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, [lessonId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading) {
+    return (
+      <div className="content">
+        <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 14, marginLeft: -8 }}>
+          <Icon name="chevron" size={12} style={{ transform: 'rotate(180deg)' }} /> Back to evolution
+        </button>
+        <p className="page-sub">Loading…</p>
+      </div>
+    );
+  }
+
+  if (error || !lesson) {
+    return (
+      <div className="content">
+        <button className="btn ghost sm" onClick={onBack} style={{ marginBottom: 14, marginLeft: -8 }}>
+          <Icon name="chevron" size={12} style={{ transform: 'rotate(180deg)' }} /> Back to evolution
+        </button>
+        <p className="page-sub" style={{ color: 'var(--bad)' }}>
+          {error || 'Lesson not found.'}
+        </p>
+        <button className="btn" onClick={load}>
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  const l = lesson;
+  const perRubric = l.delta?.per_rubric ?? {};
+  const rubricKeys = Object.keys(perRubric);
+  const overall = l.delta?.overall_score;
+  const passRate = l.delta?.pass_rate;
+
+  const tabs: Array<{ id: TabId; label: string; count?: number }> = [
     { id: 'story', label: 'Story' },
-    { id: 'traces', label: 'Traces', count: l.traces.length },
-    { id: 'evals', label: 'Evals', count: l.evals.length },
-    { id: 'diff', label: 'Diff' },
+    { id: 'traces', label: 'Traces' },
+    { id: 'evals', label: 'Evals', count: rubricKeys.length },
+    { id: 'diff', label: 'Diff', count: l.mutations.length },
     { id: 'decision', label: 'Decision' },
-  ] as const;
+  ];
 
   return (
     <div className="content">
@@ -61,23 +119,17 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
         <Tag>
           <KindIcon kind={l.kind} /> <KindLabel kind={l.kind} />
         </Tag>
-        <span className="mono dim" style={{ fontSize: 12 }}>
-          {l.id}
-        </span>
-        <span className="dim" style={{ fontSize: 12 }}>
-          ·
-        </span>
-        <span className="mono dim" style={{ fontSize: 12 }}>
-          {l.version}
-        </span>
-        <span className="dim" style={{ fontSize: 12 }}>
-          ·
-        </span>
-        <span className="dim" style={{ fontSize: 12 }}>
-          {fmtDay(l.date)}
-        </span>
+        <span className="mono dim" style={{ fontSize: 12 }}>{l.id}</span>
+        <span className="dim" style={{ fontSize: 12 }}>·</span>
+        {l.version && (
+          <>
+            <span className="mono dim" style={{ fontSize: 12 }}>{l.version}</span>
+            <span className="dim" style={{ fontSize: 12 }}>·</span>
+          </>
+        )}
+        <span className="dim" style={{ fontSize: 12 }}>{fmtDay(l.promoted_at)}</span>
         <div style={{ marginLeft: 'auto' }}>
-          <StatusTag status={l.status === 'approved' ? l.decision : l.status} />
+          <StatusTag status={l.status} />
         </div>
       </div>
 
@@ -88,7 +140,7 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
         {tabs.map((t) => (
           <button key={t.id} className={`tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
             {t.label}
-            {'count' in t && t.count != null && <span className="count">{t.count}</span>}
+            {t.count != null && t.count > 0 && <span className="count">{t.count}</span>}
           </button>
         ))}
       </div>
@@ -96,36 +148,29 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
       {tab === 'story' && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: 32 }}>
           <div>
-            <div className="msg msg-agent" style={{ marginBottom: 24 }}>
-              <div className="msg-role">In my own words</div>
-              <p className="msg-body" style={{ fontStyle: 'italic', fontSize: 16, lineHeight: 1.6 }}>
-                {l.voice}”
-              </p>
-            </div>
+            {l.voice && (
+              <div className="msg msg-agent" style={{ marginBottom: 24 }}>
+                <div className="msg-role">In my own words</div>
+                <p
+                  className="msg-body"
+                  style={{ fontStyle: 'italic', fontSize: 16, lineHeight: 1.6 }}
+                >
+                  "{l.voice}"
+                </p>
+              </div>
+            )}
 
-            <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 10px' }}>Why I made this change</h3>
-            <p style={{ fontSize: 14, lineHeight: 1.65, color: 'var(--fg)', margin: '0 0 24px' }}>{l.reasoning}</p>
+            <h3 style={{ fontSize: 14, fontWeight: 600, margin: '0 0 10px' }}>What changed</h3>
+            <p style={{ fontSize: 14, lineHeight: 1.65, color: 'var(--fg)', margin: '0 0 24px' }}>
+              {l.summary}
+            </p>
 
             <h3 style={{ fontSize: 14, fontWeight: 600, margin: '24px 0 10px' }}>What triggered it</h3>
             <div className="card card-pad">
-              <div className="kv">
-                <div className="k">Source</div>
-                <div>{triggerLabel(l.trigger.kind)}</div>
-                {l.trigger.count != null && (
-                  <>
-                    <div className="k">Volume</div>
-                    <div>{l.trigger.count} signals</div>
-                  </>
-                )}
-                <div className="k">Window</div>
-                <div>{l.trigger.window}</div>
-                <div className="k">Confidence</div>
-                <div>
-                  <ConfBar value={l.confidence} />{' '}
-                  <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>
-                    {l.confidence}/5
-                  </span>
-                </div>
+              <div className="dim" style={{ fontSize: 13 }}>
+                Trigger lineage isn't linked to lessons yet. When the harness wires Prediction
+                rationale and trace cohorts to each lesson, it'll appear here — for now the
+                Decision tab carries what we can reconstruct.
               </div>
             </div>
           </div>
@@ -133,98 +178,99 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
             <div className="card card-pad">
               <div
                 className="dim"
-                style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 10 }}
+                style={{
+                  fontSize: 11,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.05em',
+                  marginBottom: 10,
+                }}
               >
-                Impact
+                Eval movement
               </div>
-              {l.metrics.length === 0 && (
+              {typeof overall === 'number' ? (
+                <>
+                  <div
+                    style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      padding: '8px 0',
+                      borderBottom: '1px solid var(--border)',
+                      fontSize: 13,
+                    }}
+                  >
+                    <span>Δ overall</span>
+                    <span
+                      className="mono"
+                      style={{
+                        color:
+                          overall > 0
+                            ? 'var(--accent-fg)'
+                            : overall < 0
+                            ? 'var(--bad-fg)'
+                            : 'var(--fg-muted)',
+                        fontWeight: 500,
+                      }}
+                    >
+                      {overall >= 0 ? '+' : ''}
+                      {overall.toFixed(4)}
+                    </span>
+                  </div>
+                  {typeof passRate === 'number' && (
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        padding: '8px 0',
+                        fontSize: 13,
+                      }}
+                    >
+                      <span>Δ pass rate</span>
+                      <span
+                        className="mono"
+                        style={{
+                          color:
+                            passRate > 0
+                              ? 'var(--accent-fg)'
+                              : passRate < 0
+                              ? 'var(--bad-fg)'
+                              : 'var(--fg-muted)',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {passRate >= 0 ? '+' : ''}
+                        {passRate.toFixed(4)}
+                      </span>
+                    </div>
+                  )}
+                </>
+              ) : (
                 <div className="dim" style={{ fontSize: 13 }}>
-                  No production data yet.
+                  No eval delta recorded.
                 </div>
               )}
-              {l.metrics.map((m) => (
-                <div
-                  key={m.label}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    padding: '8px 0',
-                    borderBottom: '1px solid var(--border)',
-                    fontSize: 13,
-                  }}
-                >
-                  <span>{m.label}</span>
-                  <span
-                    className={m.delta > 0 ? '' : 'mono'}
-                    style={{ color: m.delta > 0 ? 'var(--accent-fg)' : 'var(--bad-fg)', fontWeight: 500 }}
-                  >
-                    {m.delta > 0 ? '+' : ''}
-                    {m.delta}
-                    {Math.abs(m.delta) > 5 ? '%' : ''}
-                  </span>
-                </div>
-              ))}
             </div>
-            {l.status === 'pending' && (
-              <div className="card card-pad" style={{ background: 'var(--warn-soft)', borderColor: 'transparent' }}>
-                <div style={{ fontSize: 12.5, color: 'var(--warn-fg)', fontWeight: 500, marginBottom: 8 }}>
-                  Awaiting your review
-                </div>
-                <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', marginBottom: 12 }}>
-                  Will auto-approve in 22h if untouched.
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button className="btn success sm" style={{ flex: 1, justifyContent: 'center' }}>
-                    <Icon name="check" size={12} /> Approve
-                  </button>
-                  <button className="btn danger sm" style={{ flex: 1, justifyContent: 'center' }}>
-                    <Icon name="x" size={12} /> Reject
-                  </button>
-                </div>
-              </div>
-            )}
           </aside>
         </div>
       )}
 
       {tab === 'traces' && (
-        <div className="card">
-          <div
-            style={{
-              padding: '12px 16px',
-              borderBottom: '1px solid var(--border)',
-              fontSize: 12,
-              color: 'var(--fg-muted)',
-              display: 'grid',
-              gridTemplateColumns: '80px 1fr 100px 80px 24px',
-              gap: 16,
-              textTransform: 'uppercase',
-              letterSpacing: '0.05em',
-              fontWeight: 500,
-            }}
-          >
-            <div>Trace</div>
-            <div>Excerpt</div>
-            <div>Verdict</div>
-            <div>Used as</div>
-            <div></div>
+        <div className="card card-pad">
+          <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>
+            Trace lineage not yet linked
           </div>
-          {l.traces.length === 0 && <div className="empty">No traces linked to this lesson.</div>}
-          {l.traces.map((t) => (
-            <div className="trace-row" key={t.id}>
-              <span className="id">{t.id}</span>
-              <span className="preview">{t.preview}</span>
-              <span>
-                <Tag kind={t.verdict === 'pass' ? 'success' : 'bad'}>
-                  {t.verdict === 'pass' ? 'Passed' : 'Failed'}
-                </Tag>
-              </span>
-              <span className="dim" style={{ fontSize: 12 }}>
-                {t.verdict === 'fail' ? 'Trigger' : 'Validation'}
-              </span>
-              <Icon name="chevron" size={12} />
+          <div className="dim" style={{ fontSize: 13, lineHeight: 1.6 }}>
+            Each lesson should carry the trace IDs that triggered the proposal and the trace IDs
+            it was validated against. The harness writes these into the ledger entry but doesn't
+            yet surface them on the lesson record. Coming in a future phase.
+          </div>
+          {l.ledger_entry_id && (
+            <div
+              className="dim mono"
+              style={{ fontSize: 12, marginTop: 12, fontFamily: 'var(--font-mono)' }}
+            >
+              Ledger entry: {l.ledger_entry_id}
             </div>
-          ))}
+          )}
         </div>
       )}
 
@@ -237,46 +283,42 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
               fontSize: 12,
               color: 'var(--fg-muted)',
               display: 'grid',
-              gridTemplateColumns: '1fr 80px 80px 90px',
+              gridTemplateColumns: '1fr 120px',
               gap: 12,
               textTransform: 'uppercase',
               letterSpacing: '0.05em',
               fontWeight: 500,
             }}
           >
-            <div>Eval</div>
-            <div>Before</div>
-            <div>After</div>
-            <div>Δ</div>
+            <div>Rubric</div>
+            <div style={{ textAlign: 'right' }}>Δ vs baseline</div>
           </div>
-          {l.evals.map((e, i) => {
-            const better = e.isLatency ? e.after < (e.before ?? Infinity) : e.after > (e.before ?? -Infinity);
-            const delta = e.before == null ? null : ((e.after - e.before) / Math.abs(e.before)) * 100;
-            const pct = e.scale ? e.after / e.scale : Math.min(1, e.after);
+          {rubricKeys.length === 0 && (
+            <div className="empty">No per-rubric delta recorded for this lesson.</div>
+          )}
+          {rubricKeys.map((rubric) => {
+            const v = perRubric[rubric] ?? 0;
+            const color =
+              v > 0 ? 'var(--accent-fg)' : v < 0 ? 'var(--bad-fg)' : 'var(--fg-muted)';
             return (
-              <div className="eval-row" key={i}>
+              <div
+                key={rubric}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 120px',
+                  gap: 12,
+                  padding: '12px 16px',
+                  borderBottom: '1px solid var(--border)',
+                  alignItems: 'center',
+                }}
+              >
                 <div>
-                  <div style={{ fontWeight: 500 }}>{e.name}</div>
-                  <div className="dim" style={{ fontSize: 11.5, marginTop: 2 }}>
-                    n = {e.sample.toLocaleString()}
-                  </div>
-                  <div className="bar" style={{ marginTop: 8 }}>
-                    <span style={{ width: `${pct * 100}%`, background: better ? 'var(--accent)' : 'var(--bad)' }} />
-                  </div>
+                  <div style={{ fontWeight: 500, fontSize: 14 }}>{rubric}</div>
                 </div>
-                <span className="mono dim">{fmtEval(e.before, e)}</span>
-                <span className="mono" style={{ fontWeight: 500 }}>
-                  {fmtEval(e.after, e)}
-                </span>
-                <span
-                  className="mono"
-                  style={{
-                    color: delta == null ? 'var(--fg-muted)' : better ? 'var(--accent-fg)' : 'var(--bad-fg)',
-                    fontWeight: 500,
-                  }}
-                >
-                  {delta == null ? 'new' : `${delta > 0 ? '+' : ''}${delta.toFixed(1)}%`}
-                </span>
+                <div className="mono" style={{ textAlign: 'right', color, fontWeight: 500 }}>
+                  {v >= 0 ? '+' : ''}
+                  {v.toFixed(4)}
+                </div>
               </div>
             );
           })}
@@ -286,46 +328,57 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
       {tab === 'diff' && (
         <div>
           <div className="dim" style={{ fontSize: 12.5, marginBottom: 12 }}>
-            Showing the exact change applied to <span className="mono">{fileLabelFor(l.proposal.type)}</span>
+            Mutations applied to the agent config in this version.
           </div>
-          <Diff before={l.proposal.beforeLines} after={l.proposal.afterLines} fileLabel={fileLabelFor(l.proposal.type)} />
+          {l.mutations.length === 0 ? (
+            <div className="card card-pad">
+              <div className="dim" style={{ fontSize: 13 }}>No mutations recorded.</div>
+            </div>
+          ) : (
+            <div className="card">
+              {l.mutations.map((m, i) => (
+                <div
+                  key={i}
+                  style={{
+                    padding: '12px 16px',
+                    borderBottom: i < l.mutations.length - 1 ? '1px solid var(--border)' : 'none',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 13,
+                  }}
+                >
+                  {m}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {tab === 'decision' && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
           <div className="card card-pad">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>How the system decided</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>How this landed</div>
             <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13.5, lineHeight: 1.7 }}>
               <li>
-                Detected {l.trigger.count || '—'} signals matching pattern{' '}
-                <span className="mono dim">{l.trigger.kind}</span>
+                <span className="dim">Proposed by</span>{' '}
+                <span className="mono">{proposalSourceLabel(l.proposal_source)}</span>
               </li>
               <li>
-                Generated {l.proposal.type === 'eval' ? 'a new eval suite' : '3 candidate proposals'}; picked the one
-                with highest projected eval lift
+                <span className="dim">Started from</span>{' '}
+                <span className="mono">{l.parent_version || '—'}</span>
               </li>
               <li>
-                Ran offline against {l.evals[0]?.sample.toLocaleString() || '—'} samples; saw{' '}
-                {l.evals[0]
-                  ? `${((l.evals[0].after - (l.evals[0].before || 0)) * 100).toFixed(0)} pp improvement`
-                  : 'positive results'}
+                <span className="dim">Decision</span>{' '}
+                <span className="mono">{l.status}</span>
               </li>
               <li>
-                Routed to{' '}
-                <span className="mono">
-                  {l.decision === 'auto_promoted'
-                    ? 'auto-promote'
-                    : l.decision === 'awaiting_review'
-                    ? 'human review'
-                    : 'rollback'}
-                </span>{' '}
-                per policy
+                <span className="dim">Promoted at</span>{' '}
+                <span className="mono">{l.promoted_at || '—'}</span>
               </li>
             </ol>
           </div>
           <div className="card card-pad">
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Rules that fired</div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Lineage</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div
                 style={{
@@ -336,21 +389,17 @@ export const LessonDetail = ({ lessonId, onBack }: { lessonId: string; onBack: (
                   fontFamily: 'var(--font-mono)',
                 }}
               >
-                <div className="dim">
-                  if change_kind in [
-                  {l.kind === 'router' || l.kind === 'prompt' ? 'prompt, router' : 'tool_wrapper, policy'}]
-                </div>
-                <div className="dim">and projected_lift &gt; 3pp</div>
-                <div>
-                  →{' '}
-                  <span style={{ color: 'var(--accent-fg)' }}>
-                    {l.decision === 'auto_promoted' ? 'auto_promote' : 'require_review'}
-                  </span>
-                </div>
+                <div className="dim">version: {l.version || '—'}</div>
+                <div className="dim">parent: {l.parent_version || 'initial'}</div>
+                {l.ledger_entry_id && (
+                  <div className="dim">ledger: {l.ledger_entry_id}</div>
+                )}
               </div>
-              <button className="btn sm ghost" style={{ alignSelf: 'flex-start' }}>
-                <Icon name="settings" size={12} /> Edit policies
-              </button>
+              <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.5 }}>
+                Falsifiable predictions and verification outcomes (AHE pillar 3) attach to the
+                ledger entry — they'll surface here once the proposer pipeline records them on
+                lessons directly.
+              </div>
             </div>
           </div>
         </div>
