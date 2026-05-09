@@ -109,17 +109,23 @@ input, textarea, select { font-family: inherit; }
   display: grid;
   grid-template-columns: 240px 1fr;
   height: 100vh;
+  width: 100vw;
   overflow: hidden;
 }
 .app.collapsed { grid-template-columns: 56px 1fr; }
 
-/* Sidebar */
+/* Sidebar — pinned to its grid cell with explicit floor + ceiling so
+   no overlay (radix Dialog padding shim, browser scrollbar reservation)
+   can squeeze it below 240px. */
 .sidebar {
   background: var(--card);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   min-height: 0;
+  width: 240px;
+  min-width: 240px;
+  flex-shrink: 0;
 }
 .sidebar-head {
   height: 56px;
