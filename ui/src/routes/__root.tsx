@@ -43,16 +43,9 @@ interface NavItem {
 interface TechNavItem {
   to:
     | '/technical/traces'
-    | '/technical/traces/live'
     | '/technical/evals'
     | '/technical/router'
     | '/technical/datasets';
-  label: string;
-  icon: IconName;
-}
-
-interface LabNavItem {
-  to: '/lab/assistant-ui' | '/lab/copilot-kit';
   label: string;
   icon: IconName;
 }
@@ -67,15 +60,9 @@ const NAV: NavItem[] = [
 
 const TECH_NAV: TechNavItem[] = [
   { to: '/technical/traces', label: 'Traces', icon: 'timeline' },
-  { to: '/technical/traces/live', label: 'Traces · Live', icon: 'timeline' },
   { to: '/technical/evals', label: 'Eval suites', icon: 'flask' },
   { to: '/technical/router', label: 'Router config', icon: 'route' },
   { to: '/technical/datasets', label: 'Datasets', icon: 'book' },
-];
-
-const LAB_NAV: LabNavItem[] = [
-  { to: '/lab/assistant-ui', label: 'assistant-ui', icon: 'sparkles' },
-  { to: '/lab/copilot-kit', label: 'CopilotKit', icon: 'bolt' },
 ];
 
 const ACCENT = {
@@ -91,12 +78,9 @@ const ROUTE_LABEL: Record<string, string> = {
   '/talk': 'Talk to agent',
   '/policies': 'Policies',
   '/technical/traces': 'Traces',
-  '/technical/traces/live': 'Traces · Live',
   '/technical/evals': 'Eval suites',
   '/technical/router': 'Router config',
   '/technical/datasets': 'Datasets',
-  '/lab/assistant-ui': 'Lab — assistant-ui',
-  '/lab/copilot-kit': 'Lab — CopilotKit',
 };
 
 export const RootLayout = () => {
@@ -186,21 +170,6 @@ export const RootLayout = () => {
           <div className="sidebar-section tech-only" style={{ marginTop: 8 }}>
             <div className="sidebar-section-label">Technical</div>
             {TECH_NAV.map((n) => (
-              <Link
-                key={n.to}
-                to={n.to}
-                search={preserveSearch}
-                className={`sidebar-item ${matchRoute({ to: n.to }) ? 'active' : ''}`}
-              >
-                <Icon name={n.icon} size={15} />
-                <span>{n.label}</span>
-              </Link>
-            ))}
-          </div>
-
-          <div className="sidebar-section" style={{ marginTop: 8 }}>
-            <div className="sidebar-section-label">Lab</div>
-            {LAB_NAV.map((n) => (
               <Link
                 key={n.to}
                 to={n.to}

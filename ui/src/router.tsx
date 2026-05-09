@@ -9,14 +9,11 @@
  *     ├── /versions               Versions
  *     ├── /talk                   TalkToAgent
  *     ├── /policies               Policies
- *     ├── /technical              Outlet
- *     │   ├── /technical/traces   Traces
- *     │   ├── /technical/evals    EvalSuites
- *     │   ├── /technical/router   RouterConfig
- *     │   └── /technical/datasets Datasets
- *     └── /lab                    Outlet (chat library experiments)
- *         ├── /lab/assistant-ui   ChatAssistantUi
- *         └── /lab/copilot-kit    ChatCopilotKit
+ *     └── /technical              Outlet
+ *         ├── /technical/traces   Traces
+ *         ├── /technical/evals    EvalSuites
+ *         ├── /technical/router   RouterConfig
+ *         └── /technical/datasets Datasets
  *
  * `view` (simple | technical, on root) and `tab` (lesson tab, on /lesson/$id)
  * are URL search params with loose `?:` validators so cross-route navigation
@@ -36,9 +33,6 @@ import { Versions } from './screens/Versions';
 import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
-import { TracesLive } from './screens/TracesLive';
-import { ChatAssistantUi } from './screens/chat-assistant-ui';
-import { ChatCopilotKit } from './screens/chat-copilot-kit';
 
 export type View = 'simple' | 'technical';
 type LessonTab = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
@@ -108,12 +102,6 @@ const tracesRoute = createRoute({
   component: Traces,
 });
 
-const tracesLiveRoute = createRoute({
-  getParentRoute: () => technicalLayoutRoute,
-  path: 'traces/live',
-  component: TracesLive,
-});
-
 const evalsRoute = createRoute({
   getParentRoute: () => technicalLayoutRoute,
   path: 'evals',
@@ -132,24 +120,6 @@ const datasetsRoute = createRoute({
   component: Datasets,
 });
 
-const labLayoutRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/lab',
-  component: Outlet,
-});
-
-const labAssistantUiRoute = createRoute({
-  getParentRoute: () => labLayoutRoute,
-  path: 'assistant-ui',
-  component: ChatAssistantUi,
-});
-
-const labCopilotKitRoute = createRoute({
-  getParentRoute: () => labLayoutRoute,
-  path: 'copilot-kit',
-  component: ChatCopilotKit,
-});
-
 const routeTree = rootRoute.addChildren([
   evolutionRoute,
   lessonRoute,
@@ -159,12 +129,10 @@ const routeTree = rootRoute.addChildren([
   policiesRoute,
   technicalLayoutRoute.addChildren([
     tracesRoute,
-    tracesLiveRoute,
     evalsRoute,
     routerConfigRoute,
     datasetsRoute,
   ]),
-  labLayoutRoute.addChildren([labAssistantUiRoute, labCopilotKitRoute]),
 ]);
 
 export const router = createRouter({ routeTree });
