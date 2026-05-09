@@ -132,13 +132,45 @@ export const RootLayout = () => {
 
   const ctx = useMemo<RootContext>(() => ({ openAgent: () => setAgentOpen(true) }), []);
 
+  // Layout strategy: pull the sidebar out of normal flow with position:fixed
+  // and reserve its 240px gutter on .main with margin-left. Inline styles on
+  // the critical width/position fields so Tailwind utilities or @layer base
+  // resets cannot override them — this isolates the sidebar from any cascade
+  // surprises in the shadcn/Tailwind v4 stack.
+  const SIDEBAR_W = 240;
+  const sidebarStyle: React.CSSProperties = {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    bottom: 0,
+    width: SIDEBAR_W,
+    minWidth: SIDEBAR_W,
+    maxWidth: SIDEBAR_W,
+    flexShrink: 0,
+    background: 'var(--card)',
+    borderRight: '1px solid var(--border)',
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    zIndex: 10,
+  };
+  const mainStyle: React.CSSProperties = {
+    marginLeft: SIDEBAR_W,
+    height: '100vh',
+    overflow: 'auto',
+    display: 'flex',
+    flexDirection: 'column',
+    minHeight: 0,
+  };
+
   return (
     <RootCtx.Provider value={ctx}>
       <div
         className={`app ${view === 'technical' ? 'tech' : ''}`}
         data-screen-label={`Screen ${pathname}`}
+        style={{ minHeight: '100vh' }}
       >
-        <aside className="sidebar">
+        <aside className="sidebar" style={sidebarStyle}>
           <div className="sidebar-head">
             <div className="sidebar-mark" />
             <div className="sidebar-name">
@@ -197,7 +229,7 @@ export const RootLayout = () => {
           </div>
         </aside>
 
-        <main className="main">
+        <main className="main" style={mainStyle}>
           <div className="topbar">
             <div className="topbar-title">
               {crumbs.map((c, i) => (

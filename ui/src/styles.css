@@ -104,35 +104,23 @@ input, textarea, select { font-family: inherit; }
 
 ::selection { background: var(--accent-soft); color: var(--accent-fg); }
 
-/* Layout shell — verbatim port of design's .app/.sidebar/.persona-switch.
-   Notes for the shadcn migration: we translate the design's tokens to
-   shadcn equivalents (--bg-elev → --card, --fg → --foreground, --fg-muted
-   → --muted-foreground, --bg-muted → --muted, brand --accent → --primary)
-   while keeping --accent-soft / --accent-fg / --bg-sunken / --warn-* as
-   custom tokens that already resolve to the same values. */
+/* Layout shell — sidebar is position:fixed in __root.tsx (inline styles
+   for bullet-proof width). .app is now a plain block; the topbar/content
+   sit inside .main which has margin-left:240px to clear the fixed sidebar.
+   We keep .sidebar visual rules below for hover/active/foot/persona switch
+   styling, but width/position is owned by the inline style on <aside>. */
 .app {
-  display: grid;
-  grid-template-columns: 240px 1fr;
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
+  min-height: 100vh;
+  width: 100%;
 }
-.app.collapsed { grid-template-columns: 56px 1fr; }
+.app.collapsed {
+  /* legacy hook — collapsed state is opt-in; not wired today */
+}
 
-/* Sidebar */
+/* Sidebar visual rules. Width/position live on inline style of <aside>. */
 aside.sidebar {
   background: var(--card);
   border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  /* Belt-and-braces: even if a Radix overlay pads <body>, the aside
-     itself stays 240px so the .main column absorbs the squeeze. */
-  width: 240px;
-  min-width: 240px;
-  max-width: 240px;
-  flex-shrink: 0;
-  overflow: hidden;
 }
 .sidebar-head {
   height: 56px;
