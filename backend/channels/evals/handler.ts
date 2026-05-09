@@ -1,12 +1,13 @@
 /**
  * Evals channel — proxy to runtime /evals/*.
  *
- *  GET  /v1/evals/suites                  → list of eval suites
- *  GET  /v1/evals/suites/:name            → suite detail (goldens + rubrics)
- *  POST /v1/evals/suites/:name/run        → run a suite synchronously
- *  POST /v1/evals/run_all                 → run every suite in series
- *  GET  /v1/evals/reports                 → recent runs (filterable)
- *  GET  /v1/evals/reports/:report_id      → single report with cases
+ *  GET  /v1/evals/suites                                    → list of eval suites
+ *  GET  /v1/evals/suites/:name                              → suite detail (goldens + rubrics)
+ *  POST /v1/evals/suites/:name/run                          → run a suite synchronously
+ *  POST /v1/evals/run_all                                   → run every suite in series
+ *  GET  /v1/evals/reports                                   → recent runs (filterable)
+ *  GET  /v1/evals/reports/:report_id                        → single report with cases
+ *  POST /v1/evals/goldens/promote-from-trace/:trace_id      → promote a trace to a golden (P16.1)
  */
 
 import { Hono } from 'hono'
@@ -47,15 +48,30 @@ const proxy = (path: string, handle404 = false, timeoutMs = TIMEOUT_MS) =>
     }
   }
 
-const proxyPost = (path: string, timeoutMs = RUN_TIMEOUT_MS) =>
+const proxyPost = (
+  path: string,
+  opts: { timeoutMs?: number; forwardBody?: boolean } = {},
+) =>
   async (c: import('hono').Context) => {
     const url = `${RUNTIME_URL}${path}`
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const timer = setTimeout(() => controller.abort(), opts.timeoutMs ?? RUN_TIMEOUT_MS)
+
+    let bodyText = ''
+    if (opts.forwardBody) {
+      // Read raw body so empty/invalid JSON still proxies cleanly.
+      try {
+        bodyText = await c.req.text()
+      } catch {
+        bodyText = ''
+      }
+    }
+
     try {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
+        body: opts.forwardBody ? bodyText || '{}' : undefined,
         signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
@@ -89,4 +105,11 @@ evalsRouter.get('/reports', proxy('/evals/reports'))
 evalsRouter.get('/reports/:id', async (c) => {
   const id = c.req.param('id')
   return proxy(`/evals/reports/${encodeURIComponent(id)}`, true)(c)
+})
+evalsRouter.post('/goldens/promote-from-trace/:traceId', async (c) => {
+  const tid = c.req.param('traceId')
+  return proxyPost(`/evals/goldens/promote-from-trace/${encodeURIComponent(tid)}`, {
+    forwardBody: true,
+    timeoutMs: 15_000,
+  })(c)
 })

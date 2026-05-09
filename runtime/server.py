@@ -1261,6 +1261,180 @@ async def get_report(report_id: str) -> ReportDetail:
     )
 
 
+# ---------- failure mining (P16.1) ----------
+#
+# Promote a real production trace to a permanent regression test. The agent
+# self-improves; the test suite should grow with it — every conversation that
+# went sideways becomes a perpetual sentry against regressing into the same
+# failure mode. This is the cheapest step toward AutoHarness-aligned evals.
+#
+# Idempotency: if a golden already exists with metadata.source = "trace:<id>",
+# return it instead of writing a duplicate. Suite append is also idempotent.
+
+
+class PromoteTraceRequest(BaseModel):
+    expected_contains: list[str] = []
+    category: Optional[str] = None
+    difficulty: str = "medium"
+    add_to_suite: Optional[str] = None  # e.g. "smoke_v0"
+
+
+class PromoteTraceResponse(BaseModel):
+    golden_id: str
+    path: str
+    request: str
+    expected: dict[str, Any]
+    metadata: dict[str, Any]
+    suite_appended: Optional[str] = None
+    already_existed: bool = False
+
+
+_GOLDEN_ID_RE = re.compile(r"^golden_(\d+)$")
+
+
+def _next_golden_id() -> str:
+    """Find the largest existing golden number and return next, zero-padded."""
+    golden_dir = _EVALS_DIR / "golden"
+    max_n = 0
+    if golden_dir.exists():
+        for p in golden_dir.glob("golden_*.yaml"):
+            m = _GOLDEN_ID_RE.match(p.stem)
+            if m:
+                max_n = max(max_n, int(m.group(1)))
+    width = max(3, len(str(max_n + 1)))  # keep golden_001 style for small N
+    return f"golden_{(max_n + 1):0{width}d}"
+
+
+def _find_golden_by_source(source: str) -> Optional[Path]:
+    """Idempotency: look for an existing golden whose metadata.source matches."""
+    golden_dir = _EVALS_DIR / "golden"
+    if not golden_dir.exists():
+        return None
+    for p in sorted(golden_dir.glob("golden_*.yaml")):
+        d = _safe_yaml_load(p)
+        if (d.get("metadata") or {}).get("source") == source:
+            return p
+    return None
+
+
+def _append_golden_to_suite(suite_name: str, golden_id: str) -> bool:
+    """Append golden_id to suite's goldens list. No-op if already there.
+    Returns True if appended, False if already present. Raises if suite missing."""
+    import yaml
+
+    suite_path = _EVALS_DIR / "suites" / f"{suite_name}.yaml"
+    if not suite_path.exists():
+        raise FileNotFoundError(f"suite {suite_name!r} not found")
+    with suite_path.open() as f:
+        data = yaml.safe_load(f) or {}
+    goldens = list(data.get("goldens") or [])
+    if golden_id in goldens:
+        return False
+    goldens.append(golden_id)
+    data["goldens"] = goldens
+    with suite_path.open("w") as f:
+        yaml.safe_dump(data, f, sort_keys=False, default_flow_style=False)
+    return True
+
+
+@app.post(
+    "/evals/goldens/promote-from-trace/{trace_id}",
+    response_model=PromoteTraceResponse,
+)
+async def promote_trace_to_golden(
+    trace_id: str,
+    payload: Optional[PromoteTraceRequest] = None,
+) -> PromoteTraceResponse:
+    if not _REPORT_ID_RE.match(trace_id):
+        raise HTTPException(status_code=400, detail=f"invalid trace_id {trace_id!r}")
+
+    trace = traces_store.get_trace(trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail=f"unknown trace {trace_id!r}")
+
+    request_text = (trace.get("request") or "").strip()
+    if not request_text:
+        raise HTTPException(
+            status_code=400, detail="trace has no request text — cannot promote"
+        )
+
+    body = payload or PromoteTraceRequest()
+    source_marker = f"trace:{trace_id}"
+
+    # Idempotency
+    existing = _find_golden_by_source(source_marker)
+    if existing is not None:
+        d = _safe_yaml_load(existing)
+        suite_appended: Optional[str] = None
+        if body.add_to_suite:
+            try:
+                if _append_golden_to_suite(body.add_to_suite, d.get("id", existing.stem)):
+                    suite_appended = body.add_to_suite
+            except FileNotFoundError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from e
+        return PromoteTraceResponse(
+            golden_id=d.get("id", existing.stem),
+            path=str(existing.relative_to(_EVALS_DIR.parent)),
+            request=(d.get("input") or {}).get("request", ""),
+            expected=d.get("expected") or {},
+            metadata=d.get("metadata") or {},
+            suite_appended=suite_appended,
+            already_existed=True,
+        )
+
+    # New golden
+    from datetime import datetime, timezone
+    import yaml
+
+    golden_id = _next_golden_id()
+    verdict = (
+        "fail" if not trace.get("success") or trace.get("error") else "pass"
+    )
+
+    expected: dict[str, Any] = {
+        "contains": list(body.expected_contains),
+        "category": body.category or "from-trace",
+    }
+    metadata: dict[str, Any] = {
+        "source": source_marker,
+        "promoted_at": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "trace_verdict": verdict,
+        "agent_version": trace.get("agent_version"),
+        "difficulty": body.difficulty,
+    }
+    doc: dict[str, Any] = {
+        "id": golden_id,
+        "input": {"request": request_text},
+        "expected": expected,
+        "metadata": metadata,
+    }
+
+    golden_path = _EVALS_DIR / "golden" / f"{golden_id}.yaml"
+    golden_path.parent.mkdir(parents=True, exist_ok=True)
+    with golden_path.open("w") as f:
+        yaml.safe_dump(doc, f, sort_keys=False, default_flow_style=False)
+
+    suite_appended = None
+    if body.add_to_suite:
+        try:
+            if _append_golden_to_suite(body.add_to_suite, golden_id):
+                suite_appended = body.add_to_suite
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+
+    return PromoteTraceResponse(
+        golden_id=golden_id,
+        path=str(golden_path.relative_to(_EVALS_DIR.parent)),
+        request=request_text,
+        expected=expected,
+        metadata=metadata,
+        suite_appended=suite_appended,
+        already_existed=False,
+    )
+
+
 # ---------- agent config (AgentSheet) ----------
 #
 # Wires the four AgentSheet tabs (Brain / Hands / Channels / Keys) to real

@@ -1,31 +1,21 @@
-# evals/suites/smoke_v0.yaml
-# Smoke test for the stub-based agent. Five goldens × four rubrics. Designed
-# to exercise the eval pipeline end-to-end. Quality of stubs is bad on
-# purpose — once P1.9 lands real LLM, the same suite measures real quality.
-
 suite: smoke_v0
-description: "Basic smoke test for the stub agent — domain: e-commerce support"
-
+description: "Basic smoke test for the stub agent \u2014 domain: e-commerce support"
 goldens:
-  - golden_001
-  - golden_002
-  - golden_003
-  - golden_004
-  - golden_005
-
+- golden_001
+- golden_002
+- golden_003
+- golden_004
+- golden_005
+- golden_008
 rubrics:
-  - name: pipeline_succeeded
-    type: pipeline_success
-
-  - name: response_nonempty
-    type: response_nonempty
-
-  - name: keywords_match
-    type: contains_keywords
-
-  - name: under_budget
-    type: latency_under_budget
-    params:
-      max_ms: 2000
-
+- name: pipeline_succeeded
+  type: pipeline_success
+- name: response_nonempty
+  type: response_nonempty
+- name: keywords_match
+  type: contains_keywords
+- name: under_budget
+  type: latency_under_budget
+  params:
+    max_ms: 2000
 aggregation: mean
