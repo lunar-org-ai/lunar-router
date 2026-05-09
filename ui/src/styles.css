@@ -755,6 +755,17 @@ h1.page-title {
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
+/* Status dot inside a Badge — design ships <Tag><span class="dot"/></Tag>
+   for the trace verdict pills. Picks up the variant's text color via
+   currentColor so success/warn/bad are wired automatically. */
+[data-slot="badge"] .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
 /* Eval suites */
 .suite-head {
   padding: 10px 16px;
