@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
-import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Card } from '../components/ui/card';
 import { ApiError, listVersions, rollbackVersion, type VersionInfo } from '../api';
@@ -150,7 +149,9 @@ export const Versions = () => {
                     </span>
                   )}
                   {v.status === 'rolled_back' && (
-                    <Badge variant="bad" className="h-4 w-4 p-0" />
+                    <Tag kind="bad">
+                      <span className="dot" />
+                    </Tag>
                   )}
                 </div>
               </button>
@@ -161,8 +162,16 @@ export const Versions = () => {
         <div className="overflow-auto p-7">
           <div className="mb-2 flex items-center gap-3">
             <span className="mono text-[18px] font-semibold">{active.id}</span>
-            {active.is_live && <Tag kind="success">Live now</Tag>}
-            {active.status === 'rolled_back' && <Tag kind="bad">Rolled back</Tag>}
+            {active.is_live && (
+              <Tag kind="success">
+                <span className="dot" /> Live now
+              </Tag>
+            )}
+            {active.status === 'rolled_back' && (
+              <Tag kind="bad">
+                <span className="dot" /> Rolled back
+              </Tag>
+            )}
             {active.status === 'archived' && <Tag>Archived</Tag>}
             <span className="dim ml-auto text-[13px]">
               Promoted {formatDate(active.promoted_at)}
