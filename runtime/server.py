@@ -41,6 +41,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -79,6 +80,7 @@ class StageOutcome(BaseModel):
     docs_in: int
     docs_out: int
     routing_model: Optional[str] = None
+    routing_decision: Optional[dict] = None  # P15.3.8 — UniRoute decision dict
     error: Optional[str] = None
 
 
@@ -1764,6 +1766,7 @@ async def run(payload: RunRequest) -> RunResponse:
                 docs_in=s.docs_in,
                 docs_out=s.docs_out,
                 routing_model=s.routing_model,
+                routing_decision=s.routing_decision,
                 error=s.error,
             )
             for s in rec.stages
@@ -1845,6 +1848,94 @@ async def get_router_config() -> RouterConfigView:
         raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
 
     return RouterConfigView(**build_view_metadata(payload))
+
+
+# P15.3.8 — manual router_config edit through the AHE pipeline.
+
+
+class RouterConfigUpdate(BaseModel):
+    """Manual operator update body for PUT /router/config."""
+
+    cost_weight: Optional[float] = None
+
+
+class RouterConfigUpdateResponse(BaseModel):
+    version: int
+    lesson_id: str
+    config: RouterConfigView
+
+
+@app.put("/router/config", response_model=RouterConfigUpdateResponse)
+async def put_router_config(req: RouterConfigUpdate) -> RouterConfigUpdateResponse:
+    """Manual router_config edit (e.g., λ override).
+
+    AHE-aligned: routes through ``record_manual_router_change`` so the edit
+    surfaces as ``Lesson(kind="router_config", proposal_source="human")``,
+    bumps the router_config version, and rolls back via the existing
+    ``/versions/{v}/rollback`` machinery — same as any other promotion.
+
+    Cold-start (no current config) → 409. Operators can't manually edit a
+    config that doesn't exist; wait for the harness to fit one.
+    """
+    from harness.executor.promote import record_manual_router_change
+    from router.config_io import build_view_metadata, load_current_config_payload
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+
+    try:
+        current = load_current_config_payload()
+    except RouterConfigNotFoundError:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "cannot edit a config that doesn't exist yet — "
+                "wait for the harness to fit one"
+            ),
+        )
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    if req.cost_weight is None:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    # Preserve centroids by carrying them on the new payload — apply_router_candidate
+    # extracts and writes the sidecar .npz.
+    import numpy as np
+
+    from router.config_io import _centroids_path, _vd
+
+    old_npz = _centroids_path(int(current["version"]), versions_dir=_vd(None))
+    centroids_inline = None
+    if old_npz.exists():
+        centroids_inline = np.load(old_npz)["centroids"].tolist()
+
+    new_payload = dict(current)
+    new_payload["version"] = int(current["version"]) + 1
+    new_payload["cost_weight"] = float(req.cost_weight)
+    if centroids_inline is not None:
+        new_payload["centroids"] = centroids_inline
+    new_payload["created_at"] = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    new_payload["metadata"] = {
+        **(current.get("metadata") or {}),
+        "previous_cost_weight": float(current.get("cost_weight", 0.0)),
+        "manual_edit_phase": "P15.3.8",
+        "stage": "manual_edit",
+    }
+
+    summary = f"λ {current.get('cost_weight', 0.0)} → {req.cost_weight}"
+    voice = f"I tweaked my routing weights manually — λ is now {req.cost_weight}."
+    lesson = record_manual_router_change(
+        new_payload, summary=summary, voice=voice
+    )
+
+    return RouterConfigUpdateResponse(
+        version=int(new_payload["version"]),
+        lesson_id=lesson.id,
+        config=RouterConfigView(**build_view_metadata(new_payload)),
+    )
 
 
 @app.post("/router/decide", response_model=RouterDecideResponse)

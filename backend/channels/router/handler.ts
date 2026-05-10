@@ -39,6 +39,47 @@ routerRouter.get('/config', async (c) => {
   }
 })
 
+routerRouter.put('/config', async (c) => {
+  let body: unknown = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    body = {}
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(RUNTIME_URL + '/router/config', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    // 400 (validation), 409 (cold-start), 500 (router_config_invalid) pass through
+    // so the UI can render reasons directly.
+    if (res.status === 400 || res.status === 409 || res.status === 422 || res.status === 500) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, res.status as 400 | 409 | 422 | 500)
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 routerRouter.post('/decide', async (c) => {
   let body: unknown = {}
   try {

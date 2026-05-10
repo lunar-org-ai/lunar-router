@@ -438,6 +438,73 @@ def record_manual_change(
     return lesson
 
 
+def record_manual_router_change(
+    new_payload: dict,
+    *,
+    summary: str,
+    voice: Optional[str] = None,
+    versions_dir: Optional[Path] = None,
+) -> Lesson:
+    """Manual operator edit of router_config — AHE-aligned variant.
+
+    Mirrors ``record_manual_change`` but specialized for router_config:
+      - **No agent_dir snapshot** (the agent code is unchanged; only
+        versions/router_config_<n>.json changed).
+      - **No agent.yaml version bump** (router_config has its own version
+        baked into the artifact).
+      - Uses ``apply_router_candidate`` for the atomic write + pointer flip.
+
+    P15.3.8's ``PUT /v1/router/config`` calls this so manual λ overrides
+    surface in Evolution as ``Lesson(kind="router_config",
+    proposal_source="human")``, rolling back via the standard
+    ``/v1/versions/{v}/rollback`` machinery.
+    """
+    json_path, _ = apply_router_candidate(new_payload, versions_dir=versions_dir)
+    new_version = int(new_payload["version"])
+    parent_version = max(0, new_version - 1)
+
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+    mutations_desc = [f"versions/router_config_v{new_version}.json"]
+    entry = write_entry(
+        kind="promote",
+        summary=f"manual router_config edit: {summary}",
+        payload={
+            "source": "human",
+            "kind": "router_config",
+            "mutations": mutations_desc,
+            "json_path": str(json_path),
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(new_version),
+        kind="router_config",
+        status="approved",
+        title=summary,
+        summary=(
+            f"Manual operator edit of router_config (v{parent_version} → v{new_version}). "
+            "No eval ran — applied directly to the live surface."
+        ),
+        proposal_source="human",
+        delta={},
+        mutations=mutations_desc,
+        parent_version=str(parent_version),
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice or "I tweaked my router config directly.",
+    )
+    write_lesson(lesson)
+    return lesson
+
+
 def reject_queued(lesson_id: str, *, reason: Optional[str] = None) -> Lesson:
     """Mark a queued review lesson as human_rejected; no live agent change."""
     lesson = read_lesson(lesson_id)
