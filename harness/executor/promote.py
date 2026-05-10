@@ -503,3 +503,180 @@ def requeue(lesson_id: str, *, agent_dir: Path | str = LIVE_AGENT) -> Lesson:
         promoted_at=None,
         ledger_entry_id=entry.entry_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# P15.3.7 — router_config promotion path
+# ---------------------------------------------------------------------------
+#
+# router_config Lessons don't go through the agent_dir snapshot/copy/version
+# bump used above — there's no agent code change to promote, just a JSON
+# artifact + sidecar centroids. apply_router_candidate writes the artifact
+# atomically; promote_router_config wraps that with the same ledger + Lesson
+# emission ``promote()`` does for prompt/RAG/route changes.
+#
+# Cross-source uniformity (AHE alignment): manual operator edits via
+# ``record_manual_change(kind="router_config", apply_edit=...)`` go through
+# ``apply_router_candidate`` too — the only difference is proposal_source.
+
+
+def apply_router_candidate(
+    candidate_payload: dict,
+    *,
+    versions_dir: Optional[Path] = None,
+) -> tuple[Path, Optional[Path]]:
+    """Atomically write versions/router_config_v<n>.json + .npz sidecar.
+
+    The current pointer flips after both files are durable.
+
+    Args:
+        candidate_payload: The proposer's inline payload (from
+            Mutation.value). Must contain 'version', 'k', 'model_psi'.
+            The 'centroids' value, if a list/array, gets pulled out into
+            the sidecar .npz so the JSON stays small.
+        versions_dir: Override the default ``versions/`` directory
+            (tests use this).
+
+    Returns:
+        ``(json_path, centroids_path_or_None)``.
+    """
+    import numpy as np
+
+    from router.config_io import save_config
+
+    centroids = candidate_payload.get("centroids")
+    centroids_arr: Optional[Any] = None
+    if centroids is not None:
+        centroids_arr = np.asarray(centroids, dtype=float)
+        # Drop the inline copy so the JSON stays compact; sidecar is the
+        # source of truth.
+        candidate_payload = {**candidate_payload, "centroids": None}
+
+    json_path = save_config(
+        candidate_payload,
+        centroids=centroids_arr,
+        versions_dir=versions_dir,
+        update_pointer=True,
+    )
+
+    npz_path: Optional[Path] = None
+    if centroids_arr is not None:
+        from router.config_io import _centroids_path, _vd
+
+        npz_path = _centroids_path(
+            int(candidate_payload["version"]), versions_dir=_vd(versions_dir)
+        )
+
+    return json_path, npz_path
+
+
+def promote_router_config(
+    outcome: LoopOutcome,
+    *,
+    versions_dir: Optional[Path] = None,
+) -> tuple[int, str]:
+    """Promote a router_config candidate. Returns ``(new_version, lesson_id)``.
+
+    Mirrors ``promote(outcome)`` but for ``kind="router_config"`` proposals.
+    The candidate payload lives inline on ``outcome.proposal.mutations[0].value``;
+    no agent_dir snapshot is taken (there's no agent code change).
+    """
+    if not outcome.proposal.mutations:
+        raise ValueError("promote_router_config requires a proposal with mutations")
+    payload = outcome.proposal.mutations[0].value
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "promote_router_config expects dict payload on Mutation.value, "
+            f"got {type(payload).__name__}"
+        )
+
+    # 1. Apply the candidate (atomic write + pointer flip).
+    json_path, npz_path = apply_router_candidate(payload, versions_dir=versions_dir)
+    new_version = int(payload["version"])
+
+    promoted_at = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+    # 2. Ledger entry — record the candidate metadata for later inspection.
+    metadata = payload.get("metadata") or {}
+    delta_overall = float(metadata.get("silhouette", 0.0))
+    ledger_payload: dict = {
+        "kind": "router_config",
+        "source": outcome.proposal.source,
+        "json_path": str(json_path),
+        "npz_path": str(npz_path) if npz_path else None,
+        "k": payload.get("k"),
+        "n_models": len(payload.get("model_psi") or {}),
+        "fitted_from": payload.get("fitted_from"),
+        "metadata": metadata,
+        "verdicts": [
+            {"critic": v.critic, "approved": v.approved, "reason": v.reason}
+            for v in outcome.verdicts
+        ],
+    }
+    if outcome.proposal.prediction is not None:
+        ledger_payload["prediction"] = {
+            "rubric": outcome.proposal.prediction.rubric,
+            "expected_delta": outcome.proposal.prediction.expected_delta,
+            "rationale": outcome.proposal.prediction.rationale,
+            "confidence": outcome.proposal.prediction.confidence,
+        }
+
+    entry = write_entry(
+        kind="promote",
+        candidate_id=outcome.candidate_id or "",
+        agent_version_before=None,           # router_config doesn't affect agent.yaml version
+        agent_version_after=None,
+        summary=f"promoted router_config v{new_version} (silhouette={delta_overall:.3f})",
+        payload=ledger_payload,
+    )
+
+    # 3. Lesson — uses the existing build_lesson scaffold so the Evolution
+    # timeline picks it up uniformly.
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    proposal_source = (
+        "claude_code"
+        if outcome.proposal.source == "claude_code"
+        else outcome.proposal.source or "auto"
+    )
+    pred_rationale = (
+        outcome.proposal.prediction.rationale
+        if outcome.proposal.prediction is not None
+        else None
+    )
+    title, voice = _voice_for(
+        kind="router_config",
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        delta_overall=delta_overall,
+        prediction_rationale=pred_rationale,
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(new_version),
+        kind="router_config",
+        status="auto_promoted",
+        title=title,
+        summary=(
+            f"Promoted router_config v{new_version} "
+            f"(K={payload.get('k')}, "
+            f"models={len(payload.get('model_psi') or {})}, "
+            f"silhouette={delta_overall:.3f})."
+        ),
+        proposal_source=proposal_source,
+        delta={"silhouette": delta_overall},
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        parent_version=str((new_version - 1) if new_version > 0 else 0),
+        candidate_id=outcome.candidate_id or "",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice,
+    )
+    write_lesson(lesson)
+
+    return new_version, lesson.id
