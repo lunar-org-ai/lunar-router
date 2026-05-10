@@ -74,4 +74,29 @@ def compile_agent(cfg: AgentConfig, strict: bool = False) -> Pipeline:
                 "cross_cutting.memory not compiled (%s). Pipeline will run without memory.",
                 e,
             )
-    return Pipeline(stages=stages, config=cfg, memory=memory)
+    pipeline = Pipeline(stages=stages, config=cfg, memory=memory)
+
+    # P15.3.10 follow-up: warm the embedder pool when uniroute is used so the
+    # first /run doesn't pay the ~1-3s MiniLM load. Best-effort — if the
+    # router extra isn't installed (no torch / sentence-transformers), the
+    # warmup gracefully no-ops so agent compile still succeeds.
+    if _agent_uses_uniroute(cfg):
+        try:
+            from runtime.embedder_pool import get_pool
+
+            get_pool().warm()
+            logger.info("uniroute variant detected; embedder pool warmed")
+        except Exception as e:
+            logger.warning(
+                "embedder warmup skipped (router extras may be missing): %s", e
+            )
+
+    return pipeline
+
+
+def _agent_uses_uniroute(cfg: AgentConfig) -> bool:
+    """Return True if any pipeline stage is the uniroute routing variant."""
+    for stage in cfg.pipeline:
+        if stage.technique == "routing" and stage.variant == "uniroute":
+            return True
+    return False

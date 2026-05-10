@@ -126,19 +126,66 @@ def maybe_fire(
 def _acquire_lock(path: Path) -> None:
     """Create the lockfile with O_EXCL. Atomic on POSIX.
 
-    Stores the current PID so a stale lock from a crashed runtime can be
-    detected by a sweeper at boot (the sweeper isn't part of P15.3.9 — see
-    PLAN risks).
+    Stores the current PID. Before raising _LockHeldError on collision,
+    we check whether the holder PID is still alive — if not, the lock is
+    stale (left over from a crashed wakeup) and we sweep it, then retry.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as e:
-        raise _LockHeldError(f"lock held: {path}") from e
+    except FileExistsError:
+        # Stale lock detection — was the holder PID killed?
+        if _sweep_stale_lock(path):
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError as e2:
+                raise _LockHeldError(f"lock held (after sweep retry): {path}") from e2
+        else:
+            raise _LockHeldError(f"lock held: {path}") from None
     try:
         os.write(fd, str(os.getpid()).encode())
     finally:
         os.close(fd)
+
+
+def _sweep_stale_lock(path: Path) -> bool:
+    """If the lockfile's PID isn't a live process, delete it and return True."""
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return False
+    try:
+        held_pid = int(raw)
+    except ValueError:
+        # Corrupt lockfile content — treat as stale.
+        try:
+            path.unlink()
+            logger.warning("stale lockfile (corrupt PID) swept: %s", path)
+            return True
+        except OSError:
+            return False
+
+    if _pid_alive(held_pid):
+        return False
+
+    try:
+        path.unlink()
+        logger.warning("stale lockfile from PID %d swept: %s", held_pid, path)
+        return True
+    except OSError:
+        return False
+
+
+def _pid_alive(pid: int) -> bool:
+    """Return True if a process with that PID is alive (POSIX kill -0)."""
+    try:
+        os.kill(pid, 0)
+    except OSError as e:
+        # ESRCH = no such process; EPERM = exists but we lack permission.
+        if getattr(e, "errno", None) == 1:  # EPERM — process exists, owned by another user
+            return True
+        return False
+    return True
 
 
 def _release_lock(path: Path) -> None:

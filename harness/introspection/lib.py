@@ -281,22 +281,292 @@ def propose_router_retrain(rationale: str = "") -> dict[str, Any]:
     if rationale:
         proposal.metadata = {**proposal.metadata, "claude_code_rationale": rationale}
 
-    # 5. The critic + approver + executor wiring is the proposer's
-    # responsibility once the proposal is formed. P15.3.9 returns the
-    # in-progress state so the wakeup runner can observe what happened
-    # without forcing the full critic/eval loop here. The actual
-    # promotion flow is exercised end-to-end by the smoke + by
-    # propose_and_run() helpers added later.
+    # 5. Critic + approver + executor — full AHE pipeline.
+    return _run_router_pipeline(proposal, policy, mode)
+
+
+# ---------- P15.3 follow-ups: end-to-end promotion ----------
+
+
+def _run_router_pipeline(proposal, policy, mode: str) -> dict[str, Any]:
+    """Run critic → approver → executor for a router_config Proposal.
+
+    Returns a typed dict carrying the final action: ``"promoted"`` (auto),
+    ``"queued"`` (status=awaiting_review for human approval), ``"rejected"``
+    (critic blocked or policy=off), or ``"blocked"`` (cache/dataset missing
+    so the critic can't run).
+    """
+    from harness.approver.policy import ApprovalDecision, decide
+    from harness.critics.router_critic import RouterCritic
+    from harness.types import CriticContext, LoopOutcome
+    from harness.executor.promote import promote_router_config
+
+    # 0. Defensive — refuse if policy is off. The MCP entry point already
+    # filters this, but the function-level guard means a direct caller
+    # can't accidentally bypass.
+    if mode == "off":
+        return {
+            "action": "blocked",
+            "reason": "policy: mode is 'off' for router_config",
+            "lesson_id": None,
+        }
+
+    # 1. Build cache + dataset for the critic. Either missing → block, NOT crash.
+    crit_inputs = _critic_inputs_for_proposal(proposal)
+    if crit_inputs.get("blocked"):
+        return {
+            "action": "blocked",
+            "reason": crit_inputs["reason"],
+            "lesson_id": None,
+        }
+
+    # 2. Run critic.
+    critic = RouterCritic(params=crit_inputs)
+    ctx = CriticContext(proposal=proposal, candidate_result=None)
+    try:
+        verdict = critic.verdict(ctx)
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"critic_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    # 3. Critic blocks → write a rejection Lesson regardless of mode.
+    if not verdict.approved:
+        lesson = _write_rejected_router_lesson(proposal, verdict)
+        return {
+            "action": "rejected",
+            "reason": verdict.reason,
+            "lesson_id": lesson.id,
+        }
+
+    # 4. Critic passed — branch on policy mode directly. We don't call the
+    # generic decide() because it expects a candidate_result with an
+    # "overall_score" delta (set by the agent eval suite). router_config
+    # candidates carry their own scoring inside the critic verdict, so we
+    # map mode → action directly. policy=off was already filtered upstream.
+    outcome = LoopOutcome(
+        proposal=proposal,
+        candidate_id=None,
+        verdicts=[verdict],
+        candidate_result=None,
+        final="approved",
+    )
+
+    if mode == "auto":
+        try:
+            new_version, lesson_id = promote_router_config(outcome)
+        except Exception as e:
+            return {
+                "action": "blocked",
+                "reason": f"executor_error: {type(e).__name__}: {e}",
+                "lesson_id": None,
+            }
+        return {
+            "action": "promoted",
+            "lesson_id": lesson_id,
+            "version": new_version,
+            "reason": verdict.reason,
+        }
+
+    # mode == "review" (or anything else not handled above).
+    lesson = _write_queued_router_lesson(proposal, verdict)
     return {
         "action": "queued",
-        "reason": (
-            "proposal generated; promote via the harness loop "
-            "(critic + approver + executor) — full pipeline integration "
-            "lands when the wake-up runner adopts it end-to-end"
+        "lesson_id": lesson.id,
+        "version": (
+            int(proposal.mutations[0].value.get("version"))
+            if proposal.mutations
+            else None
         ),
-        "lesson_id": None,
-        "proposal_summary": proposal.description,
-        "candidate_version": proposal.mutations[0].value.get("version")
-        if proposal.mutations
-        else None,
+        "reason": (
+            "policy=review for router_config — pending human approval. "
+            "Approve via /v1/lessons/{lesson_id}/approve or the Review screen."
+        ),
     }
+
+
+def _critic_inputs_for_proposal(proposal) -> dict[str, Any]:
+    """Resolve the cache + dataset the critic needs.
+
+    Returns ``{cache, dataset, embedder, centroids, eval_lambda_steps}``
+    when ready, or ``{blocked: True, reason: str}`` when something's
+    missing. Operators populate the cache via
+    ``tools/populate_response_cache.py``.
+    """
+    from runtime.embedder_pool import get_pool
+    from router.evaluation.cache import DEFAULT_CACHE_PATH, ResponseCache
+    from router.data.dataset import PromptDataset
+
+    if not DEFAULT_CACHE_PATH.exists():
+        return {
+            "blocked": True,
+            "reason": (
+                "cache_missing: evals/_response_cache/cache.jsonl is empty. "
+                "Run `python -m tools.populate_response_cache` to seed it."
+            ),
+        }
+    cache = ResponseCache(path=DEFAULT_CACHE_PATH)
+    if len(cache) == 0:
+        return {
+            "blocked": True,
+            "reason": "cache_missing: cache file exists but has no entries",
+        }
+
+    samples = _load_goldens_as_samples()
+    if not samples:
+        return {
+            "blocked": True,
+            "reason": "no_goldens: evals/golden/ is empty; cannot score the candidate",
+        }
+    dataset = PromptDataset(samples, name="router_critic_default")
+
+    centroids = None
+    if proposal.mutations:
+        payload = proposal.mutations[0].value
+        if isinstance(payload, dict):
+            centroids = payload.get("centroids")
+
+    return {
+        "cache": cache,
+        "dataset": dataset,
+        "embedder": get_pool().get(),
+        "centroids": centroids,
+        "eval_lambda_steps": 5,
+    }
+
+
+def _load_goldens_as_samples() -> list[Any]:
+    """Read evals/golden/*.yaml and convert to PromptSample list."""
+    from pathlib import Path
+
+    from evals.loader import load_golden
+    from router.data.dataset import PromptSample
+
+    golden_dir = Path("evals") / "golden"
+    if not golden_dir.exists():
+        return []
+
+    samples: list[Any] = []
+    for path in sorted(golden_dir.glob("*.yaml")):
+        gid = path.stem
+        try:
+            g = load_golden(gid)
+        except Exception:
+            continue
+        samples.append(
+            PromptSample(
+                prompt=g.input.request,
+                ground_truth=g.expected.exact or "",
+                category=g.expected.category,
+            )
+        )
+    return samples
+
+
+def _write_rejected_router_lesson(proposal, verdict) -> Any:
+    from datetime import datetime, timezone
+    import secrets
+
+    from ledger.types import Lesson
+    from ledger.writer import write_entry, write_lesson
+
+    candidate_payload = proposal.mutations[0].value if proposal.mutations else {}
+    candidate_version = (
+        int(candidate_payload.get("version", 0))
+        if isinstance(candidate_payload, dict)
+        else 0
+    )
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    summary = f"router_config v{candidate_version} rejected by critic"
+
+    entry = write_entry(
+        kind="rejected",
+        summary=summary,
+        payload={
+            "kind": "router_config",
+            "source": proposal.source,
+            "verdict_reason": verdict.reason,
+            "candidate_version": candidate_version,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version="",
+        kind="router_config",
+        status="human_rejected",
+        title=f"router_config v{candidate_version} rejected",
+        summary=verdict.reason or "Critic blocked the candidate.",
+        proposal_source=proposal.source,
+        delta={},
+        mutations=[m.describe() for m in proposal.mutations],
+        parent_version="",
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice="I tried to refit my routing but the critic said it didn't help.",
+    )
+    write_lesson(lesson)
+    return lesson
+
+
+def _write_queued_router_lesson(proposal, verdict) -> Any:
+    from datetime import datetime, timezone
+    import secrets
+
+    from ledger.types import Lesson
+    from ledger.writer import write_entry, write_lesson
+
+    candidate_payload = proposal.mutations[0].value if proposal.mutations else {}
+    candidate_version = (
+        int(candidate_payload.get("version", 0))
+        if isinstance(candidate_payload, dict)
+        else 0
+    )
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    summary = f"router_config v{candidate_version} awaiting human review"
+
+    entry = write_entry(
+        kind="queued_review",
+        summary=summary,
+        payload={
+            "kind": "router_config",
+            "source": proposal.source,
+            "verdict_reason": verdict.reason,
+            "candidate_version": candidate_version,
+            "candidate_payload": candidate_payload,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version="",
+        kind="router_config",
+        status="awaiting_review",
+        title=f"router_config v{candidate_version} awaiting review",
+        summary=verdict.reason or "Critic passed — awaiting human approval.",
+        proposal_source=proposal.source,
+        delta={},
+        mutations=[m.describe() for m in proposal.mutations],
+        parent_version="",
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice="I refit my routing and it looks good — checking with you before promoting.",
+    )
+    write_lesson(lesson)
+    return lesson
