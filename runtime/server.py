@@ -31,6 +31,8 @@ Endpoints:
   GET  /evals/suites/{name}            — suite detail (goldens + rubrics).
   GET  /evals/reports                  — recent runs (filterable by suite).
   GET  /evals/reports/{report_id}      — single eval report with cases.
+  GET  /router/config                  — current router_config metadata (P15.3); cold-start safe.
+  POST /router/decide                  — score a prompt against the router; no LLM call.
 """
 
 from __future__ import annotations
@@ -1766,6 +1768,136 @@ async def run(payload: RunRequest) -> RunResponse:
             )
             for s in rec.stages
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# P15.3.2 — Router config + decide endpoints
+# ---------------------------------------------------------------------------
+
+
+class RouterConfigView(BaseModel):
+    """Metadata snapshot of the current router_config. Cold-start safe."""
+
+    version: Optional[int]
+    k: int
+    model_count: int
+    cost_weight: float
+    embedder_model: str
+    embedding_dim: int
+    last_fit_at: Optional[str]
+    fitted_from: Optional[dict] = None
+    cold_start: bool
+
+
+class RouterDecideRequest(BaseModel):
+    prompt: str
+    allowed_models: Optional[list[str]] = None
+    cost_weight_override: Optional[float] = None
+
+
+class RouterDecideResponse(BaseModel):
+    selected_model: str
+    expected_error: float
+    cost_adjusted_score: float
+    all_scores: dict[str, float]
+    cluster_id: int
+    cluster_probabilities: list[float]
+    reasoning: Optional[str] = None
+    cold_start: bool = False
+
+
+# Process-singleton embedder — lazy. P15.3.8 will replace this with a proper
+# embedder_pool with warmup; for P15.3.2 a one-liner is enough.
+_router_embedder: Any = None
+
+
+def _get_router_embedder() -> Any:
+    """Lazy PromptEmbedder. First call eats ~1-3s for the MiniLM load."""
+    global _router_embedder
+    if _router_embedder is not None:
+        return _router_embedder
+    from router.core.embeddings import PromptEmbedder, SentenceTransformerProvider
+
+    _router_embedder = PromptEmbedder(SentenceTransformerProvider())
+    return _router_embedder
+
+
+@app.get("/router/config", response_model=RouterConfigView)
+async def get_router_config() -> RouterConfigView:
+    """Return the current router_config metadata.
+
+    Cold-start (no fitted config yet): returns 200 with cold_start=True and
+    empty/default fields. UI uses this to render the empty state.
+    """
+    from router.config_io import (
+        cold_start_metadata,
+        build_view_metadata,
+        load_current_config_payload,
+    )
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+
+    try:
+        payload = load_current_config_payload()
+    except RouterConfigNotFoundError:
+        return RouterConfigView(**cold_start_metadata())
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    return RouterConfigView(**build_view_metadata(payload))
+
+
+@app.post("/router/decide", response_model=RouterDecideResponse)
+async def post_router_decide(req: RouterDecideRequest) -> RouterDecideResponse:
+    """Score a prompt against the current router_config without executing.
+
+    503 router_cold_start when no config exists. Caller should fall back
+    to agent.models.default (or knobs.small) — see P15.3.8 for the engine
+    wiring that does this automatically.
+    """
+    from router.config_io import load_current_config
+    from router.errors import (
+        RouterColdStartError,
+        RouterConfigInvalidError,
+        RouterConfigNotFoundError,
+    )
+    from router.uniroute import UniRouteRouter
+
+    try:
+        assigner, registry, lam = load_current_config()
+    except RouterConfigNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="router_cold_start: no fitted config; wait for the harness to fit one",
+        )
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    embedder = _get_router_embedder()
+    try:
+        router = UniRouteRouter(embedder, assigner, registry, cost_weight=lam)
+    except RouterColdStartError as e:
+        raise HTTPException(status_code=503, detail=f"router_cold_start: {e}")
+
+    try:
+        decision = router.route(
+            req.prompt,
+            available_models=req.allowed_models,
+            cost_weight_override=req.cost_weight_override,
+        )
+    except ValueError as e:
+        # No models available after filtering — bad allowed_models list.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return RouterDecideResponse(
+        selected_model=decision.selected_model,
+        expected_error=decision.expected_error,
+        cost_adjusted_score=decision.cost_adjusted_score,
+        all_scores=decision.all_scores,
+        cluster_id=decision.cluster_id,
+        cluster_probabilities=decision.cluster_probabilities.tolist(),
+        reasoning=decision.reasoning,
+        cold_start=False,
     )
 
 
