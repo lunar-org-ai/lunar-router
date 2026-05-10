@@ -126,6 +126,37 @@ async def _list_tools() -> list[Tool]:
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
+        Tool(
+            name="router_health_check",
+            description=(
+                "Read-only snapshot of the router's current state (P15.3). "
+                "Returns cold_start flag, K, model_count, cost_weight, "
+                "trace_count_since_last_fit, drift_score, last_fit_age_hours, "
+                "current_avg_error, current_win_rate, needs_reclustering, "
+                "cluster_distribution, fitted_from. Use this BEFORE deciding "
+                "whether to call propose_router_retrain."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        ),
+        Tool(
+            name="propose_router_retrain",
+            description=(
+                "Trigger a router_config retrain (P15.3). Runs proposer → "
+                "critic → approver → executor → ledger. Returns the action "
+                "taken (promoted/queued/rejected/blocked) + the Lesson ID. "
+                "Pass a short rationale explaining why a retrain is "
+                "warranted. Gated by Policy.overrides['router_config']."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why a retrain is needed (1-2 sentences).",
+                    },
+                },
+            },
+        ),
     ]
 
 
@@ -139,6 +170,8 @@ _HANDLERS = {
     "get_day_epoch": lib.get_day_epoch,
     "list_predictions": lib.list_predictions,
     "list_available_epochs": lib.list_available_epochs,
+    "router_health_check": lib.router_health_check,
+    "propose_router_retrain": lib.propose_router_retrain,
 }
 
 

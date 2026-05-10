@@ -25,6 +25,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 ENTRIES_DIR = _PROJECT_ROOT / "ledger" / "entries"
 LESSONS_DIR = _PROJECT_ROOT / "ledger" / "lessons"
+DECISIONS_DIR = _PROJECT_ROOT / "ledger" / "decisions"
 
 
 def _now_iso() -> str:
@@ -84,6 +85,36 @@ def write_lesson(lesson: Lesson, lessons_dir: Path | str = LESSONS_DIR) -> Path:
     path = out_dir / f"{lesson.id}.json"
     with path.open("w") as f:
         json.dump(asdict(lesson), f, indent=2, ensure_ascii=False)
+    return path
+
+
+def write_decision(
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    decisions_dir: Path | str = DECISIONS_DIR,
+) -> Path:
+    """Persist a brain decision artifact (P15.3.9).
+
+    Decisions are distinct from entries: they record what the brain
+    CHOSE, not what the system DID. A "skipped" wake-up is a valid
+    decision and worth persisting so Evolution can render
+    "Claude Code declined retrain at T".
+
+    Filename: ``<kind>_<utc_iso_compact>.json`` (e.g.
+    ``router_wakeup_20260510T143022Z.json``). Compact ISO is a sort key.
+    """
+    out_dir = Path(decisions_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = out_dir / f"{kind}_{ts}.json"
+    full = {
+        "kind": kind,
+        "timestamp": ts,
+        "payload": payload,
+    }
+    with path.open("w") as f:
+        json.dump(full, f, indent=2, ensure_ascii=False)
     return path
 
 

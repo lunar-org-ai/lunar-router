@@ -160,4 +160,13 @@ def write_trace(
         # The pub/sub fan-out must never break the write path.
         logger.exception("TraceBus publish failed for %s", env.get("trace_id"))
 
+    # P15.3.9 — bump the wakeup counter; fire-and-forget so /run never blocks.
+    try:
+        from harness.wakeup.scheduler import maybe_fire
+
+        maybe_fire()
+    except Exception:
+        # Wakeup plumbing must never break the write path.
+        logger.exception("wakeup hook failed (non-fatal)")
+
     return env["trace_id"]

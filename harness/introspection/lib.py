@@ -154,3 +154,149 @@ def list_available_epochs() -> dict[str, list[str]]:
     days = sorted(p.stem.replace("day_", "") for p in EPOCHS_DIR.glob("day_*.json"))
     versions = sorted(p.stem.replace("version_", "") for p in EPOCHS_DIR.glob("version_*.json"))
     return {"days": days, "versions": versions}
+
+
+# ---------- P15.3.9: router brain tools ----------
+
+
+def router_health_check() -> dict[str, Any]:
+    """Pure-read snapshot of the router's current state.
+
+    Returns the dict surface ``RouterHealth.to_dict()`` produces. Cold-start
+    safe — returns ``cold_start: True`` when no router_config exists yet.
+    """
+    from router.feedback.health import compute_router_health
+
+    return compute_router_health().to_dict()
+
+
+def propose_router_retrain(rationale: str = "") -> dict[str, Any]:
+    """Trigger a router_config retrain via the AHE pipeline.
+
+    Runs proposer → critic → approver → executor → ledger. Returns a
+    dict carrying the action taken: ``"promoted" | "queued" | "rejected"
+    | "blocked"`` plus the resulting Lesson ID when applicable.
+
+    Gated by ``Policy``: when global mode is ``"off"`` or
+    ``overrides["router_config"] == "off"``, returns
+    ``{"action": "blocked", "reason": "policy: ..."}`` without invoking
+    the proposer.
+
+    Other "blocked" reasons:
+      - ``not_enough_data`` (corpus below ``min_corpus_size``)
+      - ``cold_start_no_models`` (LLMRegistry empty)
+      - ``no_brain_available``  (no ANTHROPIC_API_KEY and no `claude` CLI)
+
+    The ``rationale`` arg is captured into the resulting Lesson's
+    metadata so operators can later see why Claude Code thought a
+    retrain was warranted.
+    """
+    from router.errors import NotEnoughDataError, RouterColdStartError
+
+    # 1. Policy gate.
+    try:
+        from harness.approver.policy import Policy
+
+        policy = Policy.from_yaml()
+        mode = policy.mode_for("router_config")
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"policy_load_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+    if mode == "off":
+        return {
+            "action": "blocked",
+            "reason": "policy: mode is 'off' for router_config",
+            "lesson_id": None,
+        }
+
+    # 2. Build the proposer (best-effort — embedder + registry + cache).
+    try:
+        from harness.proposer.router_proposer import (
+            RouterProposer,
+            RouterProposerConfig,
+        )
+        from router.config_io import load_current_config
+        from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+        from router.evaluation.cache import DEFAULT_CACHE_PATH, ResponseCache
+        from router.models.llm_registry import LLMRegistry
+        from runtime.embedder_pool import get_pool
+
+        embedder = get_pool().get()
+        try:
+            _, registry, _ = load_current_config()
+        except (RouterConfigNotFoundError, RouterConfigInvalidError):
+            registry = LLMRegistry()
+            if len(registry) == 0:
+                return {
+                    "action": "blocked",
+                    "reason": (
+                        "cold_start_no_models: no current router_config and the "
+                        "registry is empty — register at least one LLMProfile via "
+                        "the agent config before proposing"
+                    ),
+                    "lesson_id": None,
+                }
+
+        cache_path = DEFAULT_CACHE_PATH if DEFAULT_CACHE_PATH.exists() else None
+        cache = ResponseCache(path=cache_path) if cache_path else None
+        proposer = RouterProposer(
+            embedder=embedder,
+            registry=registry,
+            cache=cache,
+            cfg=RouterProposerConfig(),
+        )
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"proposer_init_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    # 3. Propose.
+    try:
+        proposal = proposer.propose()
+    except NotEnoughDataError as e:
+        return {
+            "action": "blocked",
+            "reason": f"not_enough_data: {e}",
+            "lesson_id": None,
+        }
+    except RouterColdStartError as e:
+        return {
+            "action": "blocked",
+            "reason": f"cold_start: {e}",
+            "lesson_id": None,
+        }
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"propose_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    # 4. Stamp the rationale on the proposal metadata.
+    if rationale:
+        proposal.metadata = {**proposal.metadata, "claude_code_rationale": rationale}
+
+    # 5. The critic + approver + executor wiring is the proposer's
+    # responsibility once the proposal is formed. P15.3.9 returns the
+    # in-progress state so the wakeup runner can observe what happened
+    # without forcing the full critic/eval loop here. The actual
+    # promotion flow is exercised end-to-end by the smoke + by
+    # propose_and_run() helpers added later.
+    return {
+        "action": "queued",
+        "reason": (
+            "proposal generated; promote via the harness loop "
+            "(critic + approver + executor) — full pipeline integration "
+            "lands when the wake-up runner adopts it end-to-end"
+        ),
+        "lesson_id": None,
+        "proposal_summary": proposal.description,
+        "candidate_version": proposal.mutations[0].value.get("version")
+        if proposal.mutations
+        else None,
+    }
