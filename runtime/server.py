@@ -1850,6 +1850,198 @@ async def get_router_config() -> RouterConfigView:
     return RouterConfigView(**build_view_metadata(payload))
 
 
+# P15.3.10 — UI Router config feeds.
+
+
+class RouterRuleHistoryEntry(BaseModel):
+    when: str
+    what: str
+    lesson_id: Optional[str] = None
+
+
+class RouterRuleView(BaseModel):
+    """Synthesized rule row for the UI Router config screen.
+
+    P15.3.10 ships a single row representing the UniRoute default. Manual
+    rules are deferred — when the rules engine lands, this endpoint
+    returns the real list and the UI lights up the rest of its chrome.
+    """
+
+    id: str
+    name: str
+    when: str
+    then: str
+    share: float
+    cost: float
+    auth: str   # "agent" | "human"
+    enabled: bool
+    isDefault: bool = False
+    rationale: str
+    history: list[RouterRuleHistoryEntry]
+    samples: list[str]
+
+
+class RouterCandidateView(BaseModel):
+    """Pending router_config Lesson awaiting review."""
+
+    lesson_id: str
+    version: int
+    title: str
+    summary: str
+    delta: dict[str, Any]
+    created_at: Optional[str] = None
+    review_link: str
+
+
+class RouterHealthView(BaseModel):
+    """Mirrors RouterHealth.to_dict() — same shape as the MCP tool."""
+
+    cold_start: bool
+    version: Optional[int] = None
+    k: Optional[int] = None
+    model_count: Optional[int] = None
+    cost_weight: Optional[float] = None
+    last_fit_at: Optional[str] = None
+    last_fit_age_hours: Optional[float] = None
+    trace_count_since_last_fit: int = 0
+    drift_score: Optional[float] = None
+    drift_baseline: Optional[float] = None
+    needs_reclustering: Optional[bool] = None
+    current_avg_error: Optional[float] = None
+    current_win_rate: Optional[float] = None
+    cluster_distribution: Optional[dict[str, int]] = None
+    fitted_from: Optional[dict] = None
+    sample_size: int = 0
+
+
+@app.get("/router/rules", response_model=list[RouterRuleView])
+async def list_router_rules() -> list[RouterRuleView]:
+    """Synthesized rule list. v1 returns one row representing UniRoute."""
+    from router.config_io import load_current_config_payload
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+    from ledger.writer import read_lessons
+
+    try:
+        payload = load_current_config_payload()
+        cold_start = False
+    except (RouterConfigNotFoundError, RouterConfigInvalidError):
+        payload = None
+        cold_start = True
+
+    history = _build_router_history()
+    rule = _build_uniroute_default_rule(payload=payload, cold_start=cold_start, history=history)
+    return [rule]
+
+
+@app.get("/router/candidates", response_model=list[RouterCandidateView])
+async def list_router_candidates() -> list[RouterCandidateView]:
+    """Pending router_config Lessons awaiting human review."""
+    from ledger.writer import read_lessons
+
+    out: list[RouterCandidateView] = []
+    for lesson in read_lessons():
+        if lesson.kind != "router_config" or lesson.status != "awaiting_review":
+            continue
+        try:
+            version = int(lesson.version)
+        except (TypeError, ValueError):
+            version = 0
+        out.append(
+            RouterCandidateView(
+                lesson_id=lesson.id,
+                version=version,
+                title=lesson.title or "router_config candidate",
+                summary=lesson.summary or "",
+                delta=lesson.delta or {},
+                created_at=lesson.promoted_at,
+                review_link=f"/review/{lesson.id}",
+            )
+        )
+    out.sort(key=lambda c: (c.created_at or ""), reverse=True)
+    return out
+
+
+@app.get("/router/health", response_model=RouterHealthView)
+async def get_router_health() -> RouterHealthView:
+    """Same payload as the MCP router_health_check tool, exposed over HTTP
+    so the UI can render the same snapshot Claude Code reads."""
+    from router.feedback.health import compute_router_health
+
+    h = compute_router_health().to_dict()
+    # Pydantic's dict[str, int] requires str keys; cluster_distribution comes
+    # in with int keys.
+    cluster_dist = h.get("cluster_distribution")
+    if cluster_dist:
+        h["cluster_distribution"] = {str(k): int(v) for k, v in cluster_dist.items()}
+    h.pop("metadata", None)
+    return RouterHealthView(**h)
+
+
+def _build_router_history() -> list[RouterRuleHistoryEntry]:
+    """Pull recent router_config Lessons as drawer history rows."""
+    from ledger.writer import read_lessons
+
+    items: list[RouterRuleHistoryEntry] = []
+    for lesson in read_lessons():
+        if lesson.kind != "router_config":
+            continue
+        when = lesson.promoted_at or "earlier"
+        what = lesson.voice or lesson.title or "router_config change"
+        items.append(
+            RouterRuleHistoryEntry(when=when, what=what, lesson_id=lesson.id)
+        )
+    items.sort(key=lambda h: (h.when or ""), reverse=True)
+    return items
+
+
+def _build_uniroute_default_rule(
+    *,
+    payload: Optional[dict],
+    cold_start: bool,
+    history: list[RouterRuleHistoryEntry],
+) -> RouterRuleView:
+    if cold_start or payload is None:
+        return RouterRuleView(
+            id="uniroute_default",
+            name="UniRoute (default)",
+            when="default",
+            then="uniroute (cold-start)",
+            share=1.0,
+            cost=0.0,
+            auth="agent",
+            enabled=True,
+            isDefault=True,
+            rationale=(
+                "Cold-start: no router_config has been fitted yet. "
+                "Claude Code will propose one once enough traffic accumulates."
+            ),
+            history=history,
+            samples=[],
+        )
+
+    k = int(payload.get("k", 0))
+    n_models = len(payload.get("model_psi") or {})
+    silhouette = float((payload.get("metadata") or {}).get("silhouette", 0.0))
+    return RouterRuleView(
+        id="uniroute_default",
+        name="UniRoute (default)",
+        when="default",
+        then=f"uniroute (K={k}, models={n_models})",
+        share=1.0,
+        cost=float(payload.get("cost_weight", 0.0)),
+        auth="agent",
+        enabled=True,
+        isDefault=True,
+        rationale=(
+            f"Trained router. K={k} clusters across {n_models} models. "
+            f"Silhouette={silhouette:.3f}. Picks per request based on "
+            "prompt embedding cluster + per-model expected error."
+        ),
+        history=history,
+        samples=[],
+    )
+
+
 # P15.3.8 — manual router_config edit through the AHE pipeline.
 
 

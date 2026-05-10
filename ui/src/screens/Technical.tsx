@@ -4,6 +4,10 @@ import { Tag } from '../components/Tag';
 import {
   ApiError,
   getReport,
+  getRouterCandidates,
+  getRouterConfig,
+  getRouterHealth,
+  getRouterRules,
   getSession,
   getSuite,
   getTrace,
@@ -14,6 +18,9 @@ import {
   runSuite,
   type ReportDetail,
   type ReportSummary,
+  type RouterCandidateView,
+  type RouterConfigView,
+  type RouterHealthView,
   type SessionDetail,
   type SuiteDetail,
   type SuiteSummary,
@@ -909,6 +916,62 @@ const TraceDrawer = ({
                               <span>response_set {String(s.response_set)}</span>
                             )}
                           </div>
+                          {/* P15.3.10 — UniRoute decision (when present). Renders inside
+                              the existing stage card chrome; no new components. */}
+                          {s.routing_decision && (
+                            <div
+                              style={{
+                                marginTop: 10,
+                                padding: '8px 10px',
+                                background: 'var(--bg-muted, var(--muted, transparent))',
+                                borderRadius: 6,
+                                fontSize: 12,
+                                fontFamily: 'var(--font-mono)',
+                                color: 'var(--foreground)',
+                                lineHeight: 1.5,
+                              }}
+                            >
+                              <div style={{ color: 'var(--muted-foreground)', fontFamily: 'inherit', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                                Routing decision
+                              </div>
+                              {(s.routing_decision.cold_start as boolean) ? (
+                                <div>
+                                  fallback ({String(s.routing_decision.fallback_reason ?? '—')})
+                                  <span style={{ color: 'var(--muted-foreground)' }}> → </span>
+                                  {String(s.routing_decision.selected_model ?? '—')}
+                                </div>
+                              ) : (
+                                <>
+                                  <div>
+                                    cluster {String(s.routing_decision.cluster_id ?? '—')}
+                                    <span style={{ color: 'var(--muted-foreground)' }}> · </span>
+                                    err{' '}
+                                    {typeof s.routing_decision.expected_error === 'number'
+                                      ? (s.routing_decision.expected_error as number).toFixed(3)
+                                      : '—'}
+                                    <span style={{ color: 'var(--muted-foreground)' }}> · </span>
+                                    score{' '}
+                                    {typeof s.routing_decision.cost_adjusted_score === 'number'
+                                      ? (s.routing_decision.cost_adjusted_score as number).toFixed(3)
+                                      : '—'}
+                                  </div>
+                                  {s.routing_decision.reasoning && (
+                                    <pre
+                                      style={{
+                                        margin: '6px 0 0',
+                                        whiteSpace: 'pre-wrap',
+                                        fontFamily: 'inherit',
+                                        fontSize: 11.5,
+                                        color: 'var(--muted-foreground)',
+                                      }}
+                                    >
+                                      {String(s.routing_decision.reasoning)}
+                                    </pre>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
                           {failed && (
                             <div
                               style={{
@@ -1881,7 +1944,55 @@ export const RouterConfig = () => {
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [routerConfig, setRouterConfig] = useState<RouterConfigView | null>(null);
+  const [routerHealth, setRouterHealth] = useState<RouterHealthView | null>(null);
+  const [routerCandidates, setRouterCandidates] = useState<RouterCandidateView[]>([]);
   useAutoToast(toast, setToast);
+
+  // P15.3.10 — fetch real router data; fall back to mock chrome on backend error
+  // (preserves the design's panel per the "don't strip UI panels" rule).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [rs, cfg, health, cands] = await Promise.all([
+          getRouterRules().catch(() => null),
+          getRouterConfig().catch(() => null),
+          getRouterHealth().catch(() => null),
+          getRouterCandidates().catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (cfg) setRouterConfig(cfg);
+        if (health) setRouterHealth(health);
+        if (cands) setRouterCandidates(cands);
+        if (rs && rs.length > 0) {
+          // Replace the mock rules with the synthesized list. v1 = single
+          // UniRoute default row; non-default mock rows fall away naturally.
+          setRules(
+            rs.map((r) => ({
+              id: r.id,
+              name: r.name,
+              when: r.when,
+              then: r.then,
+              share: r.share,
+              cost: r.cost,
+              auth: r.auth,
+              enabled: r.enabled,
+              isDefault: r.isDefault ?? false,
+              rationale: r.rationale,
+              history: r.history.map((h) => ({ when: h.when, what: h.what })),
+              samples: r.samples,
+            })),
+          );
+        }
+      } catch (e) {
+        if (!(e instanceof ApiError)) console.warn('router data fetch failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = rules.filter((r) => {
     if (filter === 'agent' && r.auth !== 'agent') return false;
@@ -2093,7 +2204,13 @@ export const RouterConfig = () => {
         )}
       </div>
 
-      <button className="add-btn" style={{ marginTop: 16, maxWidth: 320 }} onClick={() => setCreating(true)}>
+      <button
+        className="add-btn"
+        style={{ marginTop: 16, maxWidth: 320, opacity: 0.6, cursor: 'not-allowed' }}
+        onClick={() => setCreating(true)}
+        disabled
+        title="Coming soon — manual routing rules deferred to a future phase. The default UniRoute rule is in effect."
+      >
         + Add routing rule
       </button>
 

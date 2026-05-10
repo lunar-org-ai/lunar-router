@@ -170,6 +170,7 @@ export interface TraceStageView {
   docs_out: number;
   response_set: boolean | null;
   routing_model: string | null;
+  routing_decision: Record<string, unknown> | null;
   error: string | null;
 }
 
@@ -675,3 +676,83 @@ export async function rollbackVersion(version: string, reason?: string): Promise
   }
   return (await res.json()) as RollbackResult;
 }
+
+
+// --- P15.3 — Router config feeds ---
+
+export interface RouterConfigView {
+  version: number | null;
+  k: number;
+  model_count: number;
+  cost_weight: number;
+  embedder_model: string;
+  embedding_dim: number;
+  last_fit_at: string | null;
+  fitted_from: Record<string, unknown> | null;
+  cold_start: boolean;
+}
+
+export interface RouterRuleHistoryEntry {
+  when: string;
+  what: string;
+  lesson_id?: string | null;
+}
+
+export interface RouterRuleApi {
+  id: string;
+  name: string;
+  when: string;
+  then: string;
+  share: number;
+  cost: number;
+  auth: 'agent' | 'human';
+  enabled: boolean;
+  isDefault?: boolean;
+  rationale: string;
+  history: RouterRuleHistoryEntry[];
+  samples: string[];
+}
+
+export interface RouterCandidateView {
+  lesson_id: string;
+  version: number;
+  title: string;
+  summary: string;
+  delta: Record<string, unknown>;
+  created_at: string | null;
+  review_link: string;
+}
+
+export interface RouterHealthView {
+  cold_start: boolean;
+  version: number | null;
+  k: number | null;
+  model_count: number | null;
+  cost_weight: number | null;
+  last_fit_at: string | null;
+  last_fit_age_hours: number | null;
+  trace_count_since_last_fit: number;
+  drift_score: number | null;
+  drift_baseline: number | null;
+  needs_reclustering: boolean | null;
+  current_avg_error: number | null;
+  current_win_rate: number | null;
+  cluster_distribution: Record<string, number> | null;
+  fitted_from: Record<string, unknown> | null;
+  sample_size: number;
+}
+
+async function _getJson<T>(path: string): Promise<T> {
+  const res = await fetch(path);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
+}
+
+export const getRouterConfig = () => _getJson<RouterConfigView>('/v1/router/config');
+export const getRouterRules = () => _getJson<RouterRuleApi[]>('/v1/router/rules');
+export const getRouterCandidates = () =>
+  _getJson<RouterCandidateView[]>('/v1/router/candidates');
+export const getRouterHealth = () => _getJson<RouterHealthView>('/v1/router/health');
