@@ -21,6 +21,14 @@ dev = ["pytest>=8.0", "ruff>=0.5"]
 # Stays out of the default dependency set so the runtime + harness don't pull
 # in a Restate dep they never import.
 infra = ["restate-sdk>=0.7", "hypercorn>=0.16"]
+# UniRoute router (P15.3): local sentence-transformers embedder + scikit-learn
+# KMeans + numpy. Pulls torch transitively (~700MB CPU wheel) and miniLM
+# weights on first model load. Opt-in so plain backend installs stay slim.
+router = [
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3.0",
+]
 
 [build-system]
 requires = ["hatchling"]
