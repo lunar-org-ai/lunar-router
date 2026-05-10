@@ -55,7 +55,7 @@ class KMeansTrainer:
 
     def train(
         self,
-        prompts: list[str],
+        prompts,
         *,
         fitted_from: dict,
         random_state: int = 42,
@@ -67,7 +67,10 @@ class KMeansTrainer:
         """Fit K-Means on ``prompts`` and return a KMeansTrainResult.
 
         Args:
-            prompts: Flat list of prompt strings.
+            prompts: Either a flat list of prompt strings, or a
+                ``PromptDataset`` (the trainer pulls ``.get_prompts()``
+                under the hood). The PromptDataset overload was added in
+                P15.3.4; before that the trainer was list-only.
             fitted_from: Provenance dict — must say where the corpus came
                 from. The proposer / ledger reads this back when
                 explaining a router_config promotion. Required (no default)
@@ -94,6 +97,13 @@ class KMeansTrainer:
                 "scikit-learn required for K-Means training. "
                 "Install with: uv sync --extra router"
             ) from e
+
+        # P15.3.4 polymorphism: accept PromptDataset by pulling .get_prompts().
+        # Lazy import to avoid a hard router.training -> router.data dep at
+        # module load time.
+        from router.data.dataset import PromptDataset
+        if isinstance(prompts, PromptDataset):
+            prompts = prompts.get_prompts()
 
         eligible, reason = check_first_fit_eligibility(
             corpus_size=len(prompts),
@@ -155,8 +165,8 @@ class KMeansTrainer:
 
     def train_with_validation(
         self,
-        train_prompts: list[str],
-        val_prompts: list[str],
+        train_prompts,
+        val_prompts,
         k_values: list[int],
         *,
         fitted_from: dict,
@@ -170,6 +180,9 @@ class KMeansTrainer:
 
         Returns the KMeansTrainResult of the best K. The chosen K's
         ``self.num_clusters`` is preserved through the result.
+
+        Both ``train_prompts`` and ``val_prompts`` accept either a flat
+        ``list[str]`` or a ``PromptDataset`` (P15.3.4 polymorphism).
         """
         try:
             from sklearn.cluster import KMeans
@@ -179,6 +192,12 @@ class KMeansTrainer:
                 "scikit-learn required for K-Means training. "
                 "Install with: uv sync --extra router"
             ) from e
+
+        from router.data.dataset import PromptDataset
+        if isinstance(train_prompts, PromptDataset):
+            train_prompts = train_prompts.get_prompts()
+        if isinstance(val_prompts, PromptDataset):
+            val_prompts = val_prompts.get_prompts()
 
         eligible, reason = check_first_fit_eligibility(
             corpus_size=len(train_prompts),
