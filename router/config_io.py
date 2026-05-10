@@ -308,7 +308,11 @@ def _atomic_write_npz(target: Path, centroids: np.ndarray, *, versions_dir: Path
     staging.mkdir(parents=True, exist_ok=True)
     tmp = staging / f"{target.name}.tmp"
     try:
-        np.savez(tmp, type="kmeans", centroids=centroids)
+        # np.savez auto-appends '.npz' when given a path/string, but not when
+        # given an open file-object. Use the file-object form so our tmp path
+        # is the actual on-disk filename.
+        with open(tmp, "wb") as f:
+            np.savez(f, type="kmeans", centroids=centroids)
         os.replace(tmp, target)
     except Exception:
         if tmp.exists():

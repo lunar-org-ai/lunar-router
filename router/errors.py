@@ -32,3 +32,16 @@ class RouterConfigNotFoundError(RouterError):
 
 class RouterConfigInvalidError(RouterError):
     """Raised when a router_config_<n>.json fails schema validation."""
+
+
+class NotEnoughDataError(RouterError):
+    """Corpus too small to fit a cluster model. Wait for more traces.
+
+    Raised by router/training/gate.py:check_first_fit_eligibility before any
+    expensive embedding work, and by KMeansTrainer.train() when the caller
+    bypassed the gate.
+    """
+
+
+class KMeansFitError(RouterError):
+    """KMeans failed to converge or produced degenerate clusters."""
