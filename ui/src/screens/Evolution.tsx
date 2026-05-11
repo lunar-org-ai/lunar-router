@@ -94,13 +94,19 @@ export const Evolution = () => {
     const res = m?.resolution_rate;
     const resValue = res != null ? `${(res * 100).toFixed(0)}%` : '—';
 
+    // P16.2 — real cost (char-estimated until P1.9 swaps for SDK usage)
+    // + CSAT (mean of POST /traces/{id}/feedback rows in trailing 7d).
+    const cost = m?.avg_cost_usd;
+    const costValue =
+      cost == null ? '—' : cost >= 0.01 ? `$${cost.toFixed(3)}` : `$${cost.toFixed(5)}`;
+    const csat = m?.csat;
+    const csatValue = csat == null ? '—' : `${csat.toFixed(2)} / 5`;
+
     return [
       { label: 'Trust score', value: trustValue, delta: trustDelta, dir: trustDir },
       { label: 'Resolution rate', value: resValue, delta: '—', dir: 'up' as const },
-      // No real cost / CSAT signal yet (stubs don't track tokens; no customer
-      // feedback loop). These cells stay as illustrative placeholders.
-      { label: 'Avg cost / conv', value: '—', delta: '—', dir: 'up' as const },
-      { label: 'CSAT', value: '—', delta: '—', dir: 'up' as const },
+      { label: 'Avg cost / conv', value: costValue, delta: '—', dir: 'up' as const },
+      { label: 'CSAT', value: csatValue, delta: '—', dir: 'up' as const },
     ];
   }, [metrics]);
 

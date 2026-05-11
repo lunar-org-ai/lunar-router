@@ -101,5 +101,52 @@ const traceLikeProxy = (path: (id: string) => string) =>
 
 tracesRouter.get('/:id', traceLikeProxy((id) => `/traces/${encodeURIComponent(id)}`))
 
+// P16.2 — CSAT signal.
+tracesRouter.get('/:id/feedback',
+  traceLikeProxy((id) => `/traces/${encodeURIComponent(id)}/feedback`))
+
+tracesRouter.post('/:id/feedback', async (c) => {
+  const id = c.req.param('id') ?? ''
+  let body: unknown = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    body = {}
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(
+      `${RUNTIME_URL}/traces/${encodeURIComponent(id)}/feedback`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+    )
+    if (res.status === 400 || res.status === 404 || res.status === 422) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, res.status as 400 | 404 | 422)
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data, res.status as 200 | 201)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 export const sessionsRouter = new Hono()
 sessionsRouter.get('/:id', traceLikeProxy((id) => `/sessions/${encodeURIComponent(id)}`))

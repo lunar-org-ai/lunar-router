@@ -72,6 +72,12 @@ _SCALAR_COLS: dict[str, str] = {
     "error": "VARCHAR",
     "agent_version": "VARCHAR",
     "session_id": "VARCHAR",
+    # P16.2 — cost telemetry. Older traces (pre-P16.2) lack these
+    # fields; the projection fills them with typed NULL so the union
+    # still works.
+    "tokens_in": "BIGINT",
+    "tokens_out": "BIGINT",
+    "cost_usd": "DOUBLE",
 }
 
 
@@ -225,6 +231,10 @@ def _ts(v: Any) -> Optional[str]:
 def _row_to_summary(row: dict) -> dict:
     stages = row.get("stages") or []
     history = row.get("history") or []
+    # P16.2 — cost telemetry. None when older traces lack the field.
+    tokens_in = row.get("tokens_in")
+    tokens_out = row.get("tokens_out")
+    cost_usd = row.get("cost_usd")
     return {
         "trace_id": _s(row.get("trace_id")) or "",
         "timestamp": _ts(row.get("timestamp")) or "",
@@ -238,6 +248,9 @@ def _row_to_summary(row: dict) -> dict:
         "routing_model": _pick_routing_model(stages),
         "session_id": _s(row.get("session_id")),
         "n_turns": len(history) + 1,
+        "tokens_in": int(tokens_in) if tokens_in is not None else None,
+        "tokens_out": int(tokens_out) if tokens_out is not None else None,
+        "cost_usd": float(cost_usd) if cost_usd is not None else None,
     }
 
 
@@ -383,7 +396,8 @@ def get_session_turns(session_id: str) -> list[dict]:
 
 def metrics_traces_window(window_days: int = 7) -> dict:
     """Aggregate today + last `window_days` for /metrics/overview.
-    Returns: today_count, active_5min, resolution_rate, avg_latency_ms."""
+    Returns: today_count, active_5min, resolution_rate, avg_latency_ms,
+    avg_cost_usd (mean per-trace cost in window; None when empty)."""
     with _connect() as con:
         src = _traces_view_sql(con)
         if src is None:
@@ -392,6 +406,7 @@ def metrics_traces_window(window_days: int = 7) -> dict:
                 "active_5min": 0,
                 "resolution_rate": None,
                 "avg_latency_ms": None,
+                "avg_cost_usd": None,
             }
 
         now = datetime.now(timezone.utc)
@@ -428,7 +443,12 @@ def metrics_traces_window(window_days: int = 7) -> dict:
              CASE WHEN COUNT(*) = 0 THEN NULL
                   ELSE AVG(COALESCE(duration_ms, 0))
              END
-           FROM windowed)                                                    AS avg_latency_ms
+           FROM windowed)                                                    AS avg_latency_ms,
+          (SELECT
+             CASE WHEN COUNT(*) = 0 THEN NULL
+                  ELSE AVG(COALESCE(cost_usd, 0.0))
+             END
+           FROM windowed)                                                    AS avg_cost_usd
         """
 
         cur = con.execute(sql, [today, window_start, five_min_ago])
@@ -443,5 +463,8 @@ def metrics_traces_window(window_days: int = 7) -> dict:
         ),
         "avg_latency_ms": (
             float(row["avg_latency_ms"]) if row.get("avg_latency_ms") is not None else None
+        ),
+        "avg_cost_usd": (
+            float(row["avg_cost_usd"]) if row.get("avg_cost_usd") is not None else None
         ),
     }

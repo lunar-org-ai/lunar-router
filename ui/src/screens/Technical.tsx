@@ -19,6 +19,8 @@ import {
   getSuite,
   getTrace,
   listReports,
+  listTraceFeedback,
+  submitTraceFeedback,
   listSuites,
   listTraces,
   runAllSuites,
@@ -577,6 +579,87 @@ export const Traces = () => {
   );
 };
 
+// P16.2 — CSAT signal. Compact rating widget in the Trace drawer foot.
+// Pre-loads existing rating (if any), submits POST /v1/traces/:id/feedback.
+const TraceRating = ({ traceId }: { traceId: string }) => {
+  const [score, setScore] = useState<number | null>(null);
+  const [hover, setHover] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    listTraceFeedback(traceId)
+      .then((rows) => {
+        if (cancelled || rows.length === 0) return;
+        // Most recent rating wins (rows are appended chronologically).
+        setScore(rows[rows.length - 1].score);
+      })
+      .catch(() => {
+        /* silent — no rating yet is the common case */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [traceId]);
+
+  const submit = (s: number) => {
+    setSaving(true);
+    submitTraceFeedback(traceId, s)
+      .then(() => {
+        setScore(s);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 1500);
+      })
+      .catch(() => {
+        /* surface failure inline — keep score state unchanged */
+      })
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div
+      style={{ display: 'flex', alignItems: 'center', gap: 4, marginLeft: 8 }}
+      title="Rate this conversation (CSAT)"
+    >
+      <span className="dim" style={{ fontSize: 11, marginRight: 4 }}>
+        Rate:
+      </span>
+      {[1, 2, 3, 4, 5].map((n) => {
+        const active = hover ? n <= hover : score != null && n <= score;
+        return (
+          <button
+            key={n}
+            type="button"
+            onClick={() => !saving && submit(n)}
+            onMouseEnter={() => setHover(n)}
+            onMouseLeave={() => setHover(0)}
+            disabled={saving}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: '2px 1px',
+              fontSize: 14,
+              cursor: saving ? 'wait' : 'pointer',
+              color: active ? 'var(--fg)' : 'var(--muted-foreground)',
+              opacity: active ? 1 : 0.4,
+              transition: 'opacity 0.1s',
+            }}
+            aria-label={`Rate ${n} star${n > 1 ? 's' : ''}`}
+          >
+            ★
+          </button>
+        );
+      })}
+      {saved && (
+        <span className="dim" style={{ fontSize: 11, marginLeft: 4 }}>
+          ✓
+        </span>
+      )}
+    </div>
+  );
+};
+
 const TraceDrawer = ({
   traceId,
   pinned,
@@ -1071,6 +1154,7 @@ const TraceDrawer = ({
               <button className={`btn sm ${flagged ? '' : 'ghost'}`} onClick={onFlag}>
                 <Icon name="flag" size={12} /> {flagged ? 'Flagged' : 'Flag as failure'}
               </button>
+              <TraceRating traceId={traceId} />
               <button className="btn sm ghost" style={{ marginLeft: 'auto' }} onClick={copyJson}>
                 <Icon name="copy" size={12} /> Copy trace
               </button>
