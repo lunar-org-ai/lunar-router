@@ -101,6 +101,44 @@ datasetRouter.get('/:name', (c) =>
 datasetRouter.get('/:name/health', (c) =>
   getProxy(`/datasets/${encodeURIComponent(c.req.param('name') ?? '')}/health`)(c),
 )
+datasetRouter.get('/:name/export', async (c) => {
+  const name = c.req.param('name') ?? ''
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(
+      RUNTIME_URL + `/datasets/${encodeURIComponent(name)}/export`,
+      { signal: controller.signal },
+    )
+    if (res.status === 404) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, 404)
+    }
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    // Stream the NDJSON payload straight through to the browser.
+    return new Response(res.body, {
+      status: 200,
+      headers: {
+        'content-type': res.headers.get('content-type') ?? 'application/x-ndjson',
+        'content-disposition': res.headers.get('content-disposition')
+          ?? `attachment; filename="${name}.jsonl"`,
+      },
+    })
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
 
 datasetRouter.post('/', bodyProxy('POST', () => '/datasets'))
 datasetRouter.put('/:name', bodyProxy('PUT', (c) =>

@@ -864,6 +864,9 @@ export async function updateDataset(
   return (await res.json()) as DatasetView;
 }
 
+export const exportDatasetUrl = (name: string) =>
+  `/v1/datasets/${encodeURIComponent(name)}/export`;
+
 export async function deleteDataset(name: string): Promise<void> {
   const res = await fetch(`/v1/datasets/${encodeURIComponent(name)}`, {
     method: 'DELETE',

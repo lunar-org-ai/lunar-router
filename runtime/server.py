@@ -2610,6 +2610,51 @@ async def update_dataset_endpoint(name: str, req: DatasetUpdateRequest) -> Datas
     return _registry_to_view(name, entry)
 
 
+@app.get("/datasets/{name}/export")
+async def export_dataset_endpoint(name: str):
+    """Stream the full dataset as NDJSON. Each line is one sample with
+    `prompt`, `ground_truth`, `tag`, `trace_id`, `added_at`, `source`,
+    and `embedding`. The wire shape from /datasets/{name} hides
+    embeddings + truncates prompt to a preview — this endpoint is the
+    full payload, suitable for distillation / offline analysis."""
+    from router.data.dataset_io import load_current
+    from router.data.dataset_registry import _load_registry, _vd
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    try:
+        dataset = load_current(name)
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DatasetInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"dataset_invalid: {e}")
+
+    def _iter_lines():
+        for s in dataset.samples:
+            yield json.dumps({
+                "id": s.id,
+                "prompt": s.prompt,
+                "ground_truth": s.ground_truth,
+                "tag": s.tag,
+                "trace_id": s.trace_id,
+                "added_at": s.added_at,
+                "source": s.source,
+                "embedding": s.embedding,
+            }, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _iter_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}.jsonl"',
+        },
+    )
+
+
 @app.delete("/datasets/{name}", status_code=204)
 async def delete_dataset_endpoint(name: str) -> None:
     """Soft-delete: mark as deleted in the registry; v<n>.json files stay
