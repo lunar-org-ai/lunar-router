@@ -9,7 +9,7 @@ import pytest
 
 from experiments.types import Mutation
 from harness.executor.promote import apply_dataset_candidate, promote_dataset
-from harness.types import CriticVerdict, LoopOutcome, Proposal
+from harness.types import CriticVerdict, LoopOutcome, Prediction, Proposal
 
 
 @pytest.fixture
@@ -85,7 +85,15 @@ def _payload(*, name="goldens", version=1, n_samples=2) -> dict:
     }
 
 
-def _outcome(payload: dict) -> LoopOutcome:
+def _outcome(payload: dict, *, with_prediction: bool = False) -> LoopOutcome:
+    prediction = None
+    if with_prediction:
+        prediction = Prediction(
+            rubric="coverage_gap_score",
+            expected_delta=-0.2,  # gap shrinks from 0.4 → 0.2
+            rationale="Mined 2 samples to fill gaps.",
+            confidence=0.45,
+        )
     proposal = Proposal(
         mutations=[Mutation(
             file=f"datasets/{payload['name']}/v{payload['version']}.json",
@@ -94,6 +102,7 @@ def _outcome(payload: dict) -> LoopOutcome:
         )],
         description="test",
         source="claude_code",
+        prediction=prediction,
     )
     return LoopOutcome(
         proposal=proposal,
@@ -213,3 +222,72 @@ def test_kind_from_mutations_recognizes_datasets():
     # Other kinds still work
     assert kind_from_mutations(["versions/router_config_v3.json"]) == "router_config"
     assert kind_from_mutations(["agent/prompts/system.md"]) == "prompt"
+
+
+# ---------------------------------------------------------------------------
+# AHE Pillar 3 — VerificationOutcome
+# ---------------------------------------------------------------------------
+
+
+def test_promote_computes_verification_when_prediction_present_cold_router(
+    tmp_datasets, tmp_ledger,
+):
+    """With a Prediction attached but no router config fitted, verification
+    is degenerate — actual_delta := expected_delta, verdict='verified'."""
+    payload = _payload(version=1, n_samples=2)
+    outcome = _outcome(payload, with_prediction=True)
+    _new_version, lesson_id = promote_dataset(outcome)
+
+    # outcome was mutated with the materialized verification
+    assert outcome.verification is not None
+    assert outcome.verification.rubric == "coverage_gap_score"
+    assert outcome.verification.verdict in {"verified", "no_change", "partial", "wrong"}
+
+    # Ledger entry has verification block
+    entry_files = list((tmp_ledger / "entries").glob("*.jsonl"))
+    entry = json.loads(entry_files[0].read_text().strip().split("\n")[0])
+    assert "verification" in entry["payload"]
+    assert entry["payload"]["verification"]["rubric"] == "coverage_gap_score"
+
+    # Lesson summary mentions the verdict
+    lesson = json.loads((tmp_ledger / "lessons" / f"{lesson_id}.json").read_text())
+    assert "Prediction" in lesson["summary"]
+
+
+def test_promote_no_prediction_no_verification(tmp_datasets, tmp_ledger):
+    """No Prediction → no verification recorded."""
+    payload = _payload(version=1, n_samples=2)
+    outcome = _outcome(payload, with_prediction=False)
+    _, lesson_id = promote_dataset(outcome)
+
+    assert outcome.verification is None
+
+    entry_files = list((tmp_ledger / "entries").glob("*.jsonl"))
+    entry = json.loads(entry_files[0].read_text().strip().split("\n")[0])
+    assert "verification" not in entry["payload"]
+
+    lesson = json.loads((tmp_ledger / "lessons" / f"{lesson_id}.json").read_text())
+    assert "Prediction" not in lesson["summary"]
+
+
+def test_promote_does_not_overwrite_caller_supplied_verification(
+    tmp_datasets, tmp_ledger,
+):
+    """If the loop already computed a VerificationOutcome upstream, we
+    don't recompute it — caller wins."""
+    from harness.types import VerificationOutcome
+
+    payload = _payload(version=1, n_samples=2)
+    outcome = _outcome(payload, with_prediction=True)
+    # Caller pre-set verification with a specific verdict
+    outcome.verification = VerificationOutcome(
+        rubric="coverage_gap_score",
+        expected_delta=-0.2,
+        actual_delta=-0.5,
+        direction_correct=True,
+        magnitude_met=True,
+        verdict="verified",
+    )
+    promote_dataset(outcome)
+    # Same instance — not replaced
+    assert outcome.verification.actual_delta == -0.5

@@ -24,7 +24,7 @@ from typing import Any, Optional
 import yaml
 
 from experiments.branching import candidate_agent_path
-from harness.types import LoopOutcome, kind_from_mutations
+from harness.types import LoopOutcome, VerificationOutcome, kind_from_mutations
 from ledger.types import Lesson
 from ledger.versioning import LIVE_AGENT, read_version, snapshot_agent
 from ledger.writer import read_lesson, update_lesson, write_entry, write_lesson
@@ -822,6 +822,56 @@ def promote_router_config(
 # ---------------------------------------------------------------------------
 
 
+def _verify_dataset_promotion(
+    prediction: "Prediction",  # forward ref to harness.types.Prediction
+    payload: dict,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> VerificationOutcome:
+    """Materialize the AHE Pillar 3 verification for a dataset promotion.
+
+    Re-measures the live dataset's coverage gap against the current
+    fitted router and compares it to the proposer's prediction. When
+    no router is fitted yet (cold-start), the prediction is taken at
+    face value (verdict='verified') — there's no way to falsify it.
+
+    Returns a VerificationOutcome ready to attach to LoopOutcome and
+    write into the ledger payload.
+    """
+    from harness.proposer.dataset.coverage import cluster_gaps
+    from router.config_io import load_current_config
+    from router.data.dataset_io import load_current
+    from router.errors import (
+        RouterConfigInvalidError,
+        RouterConfigNotFoundError,
+    )
+
+    # No router fitted yet → verification is degenerate (no centroid surface
+    # to project against). Record the prediction's claim at face value.
+    try:
+        assigner, _registry, _lambda = load_current_config()
+    except (RouterConfigNotFoundError, RouterConfigInvalidError):
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    # Re-measure gap_score on the now-live dataset.
+    name = payload["name"]
+    try:
+        live_dataset = load_current(name, datasets_dir=datasets_dir)
+    except Exception:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    report = cluster_gaps(live_dataset, assigner=assigner)
+    if report is None:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    gap_before = (payload.get("metadata") or {}).get("gap_score_before")
+    if gap_before is None:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    actual_delta = float(report.gap_score) - float(gap_before)
+    return VerificationOutcome.evaluate(prediction, actual_delta)
+
+
 def apply_dataset_candidate(
     candidate_payload: dict,
     *,
@@ -872,6 +922,20 @@ def promote_dataset(
     new_version = int(payload["version"])
     name = str(payload["name"])
 
+    # AHE Pillar 3 — materialize the VerificationOutcome from live state
+    # before recording the Lesson. Only when the proposer attached a
+    # Prediction *and* the caller didn't pre-compute one (e.g. via
+    # harness.loop._actual_delta_for_rubric).
+    if (
+        outcome.proposal.prediction is not None
+        and outcome.verification is None
+    ):
+        outcome.verification = _verify_dataset_promotion(
+            outcome.proposal.prediction,
+            payload,
+            datasets_dir=datasets_dir,
+        )
+
     promoted_at = (
         datetime.now(timezone.utc)
         .isoformat(timespec="seconds")
@@ -904,6 +968,15 @@ def promote_dataset(
             "expected_delta": outcome.proposal.prediction.expected_delta,
             "rationale": outcome.proposal.prediction.rationale,
             "confidence": outcome.proposal.prediction.confidence,
+        }
+    if outcome.verification is not None:
+        ledger_payload["verification"] = {
+            "rubric": outcome.verification.rubric,
+            "expected_delta": outcome.verification.expected_delta,
+            "actual_delta": outcome.verification.actual_delta,
+            "direction_correct": outcome.verification.direction_correct,
+            "magnitude_met": outcome.verification.magnitude_met,
+            "verdict": outcome.verification.verdict,
         }
 
     entry = write_entry(
@@ -939,9 +1012,14 @@ def promote_dataset(
     gap_text = ""
     if gap_score_before is not None and gap_score_after is not None:
         gap_text = f" (gap_score {float(gap_score_before):.2f} → {float(gap_score_after):.2f})"
+    verification_text = ""
+    if outcome.verification is not None:
+        verification_text = (
+            f" Prediction {outcome.verification.verdict}."
+        )
     lesson_summary = (
         f"Promoted dataset {name!r} v{new_version} — "
-        f"added {added} sample(s){gap_text}."
+        f"added {added} sample(s){gap_text}.{verification_text}"
     )
 
     lesson = Lesson(
