@@ -21,6 +21,8 @@ def kind_from_mutations(mutations: list[str]) -> str:
     files = {m.split(":")[0] for m in mutations}
     if any("versions/router_config" in f for f in files):
         return "router_config"
+    if any(f.startswith("datasets/") for f in files):
+        return "dataset"
     if any("retrieve" in f for f in files):
         return "rag"
     if any("rerank" in f for f in files):

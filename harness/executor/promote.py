@@ -815,3 +815,155 @@ def promote_router_config(
     write_lesson(lesson)
 
     return new_version, lesson.id
+
+
+# ---------------------------------------------------------------------------
+# P15.4.4 — Dataset candidate promotion
+# ---------------------------------------------------------------------------
+
+
+def apply_dataset_candidate(
+    candidate_payload: dict,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> Path:
+    """Atomically write datasets/<name>/v<n>.json + flip the current pointer.
+
+    Args:
+        candidate_payload: Proposer's inline payload (from Mutation.value).
+            Must contain ``version``, ``name``, ``samples``.
+        datasets_dir: Override the default ``datasets/`` directory.
+
+    Returns:
+        Path to the v<n>.json that was written.
+    """
+    from router.data.dataset_io import save_dataset
+
+    return save_dataset(
+        candidate_payload,
+        datasets_dir=datasets_dir,
+        update_pointer=True,
+    )
+
+
+def promote_dataset(
+    outcome: LoopOutcome,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> tuple[int, str]:
+    """Promote a dataset candidate. Returns ``(new_version, lesson_id)``.
+
+    Mirrors ``promote_router_config`` for ``kind="dataset"`` proposals.
+    The candidate payload lives inline on
+    ``outcome.proposal.mutations[0].value``; no agent_dir snapshot is
+    taken (datasets sit outside the agent's editable surface, same as
+    router_config).
+    """
+    if not outcome.proposal.mutations:
+        raise ValueError("promote_dataset requires a proposal with mutations")
+    payload = outcome.proposal.mutations[0].value
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "promote_dataset expects dict payload on Mutation.value, "
+            f"got {type(payload).__name__}"
+        )
+
+    json_path = apply_dataset_candidate(payload, datasets_dir=datasets_dir)
+    new_version = int(payload["version"])
+    name = str(payload["name"])
+
+    promoted_at = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+    metadata = payload.get("metadata") or {}
+    added = int(metadata.get("added", 0))
+    gap_score_before = metadata.get("gap_score_before")
+    gap_score_after = metadata.get("gap_score_after")
+
+    ledger_payload: dict = {
+        "kind": "dataset",
+        "name": name,
+        "source": outcome.proposal.source,
+        "json_path": str(json_path),
+        "added": added,
+        "total_size": len(payload.get("samples") or []),
+        "gap_score_before": gap_score_before,
+        "gap_score_after": gap_score_after,
+        "metadata": metadata,
+        "verdicts": [
+            {"critic": v.critic, "approved": v.approved, "reason": v.reason}
+            for v in outcome.verdicts
+        ],
+    }
+    if outcome.proposal.prediction is not None:
+        ledger_payload["prediction"] = {
+            "rubric": outcome.proposal.prediction.rubric,
+            "expected_delta": outcome.proposal.prediction.expected_delta,
+            "rationale": outcome.proposal.prediction.rationale,
+            "confidence": outcome.proposal.prediction.confidence,
+        }
+
+    entry = write_entry(
+        kind="promote",
+        candidate_id=outcome.candidate_id or "",
+        agent_version_before=None,
+        agent_version_after=None,
+        summary=f"promoted dataset {name!r} v{new_version} (added={added})",
+        payload=ledger_payload,
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    proposal_source = (
+        "claude_code"
+        if outcome.proposal.source == "claude_code"
+        else outcome.proposal.source or "auto"
+    )
+    pred_rationale = (
+        outcome.proposal.prediction.rationale
+        if outcome.proposal.prediction is not None
+        else None
+    )
+    title, voice = _voice_for(
+        kind="dataset",
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        delta_overall=float(added),
+        prediction_rationale=pred_rationale,
+    )
+
+    gap_text = ""
+    if gap_score_before is not None and gap_score_after is not None:
+        gap_text = f" (gap_score {float(gap_score_before):.2f} → {float(gap_score_after):.2f})"
+    lesson_summary = (
+        f"Promoted dataset {name!r} v{new_version} — "
+        f"added {added} sample(s){gap_text}."
+    )
+
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(new_version),
+        kind="dataset",
+        status="auto_promoted",
+        title=title,
+        summary=lesson_summary,
+        proposal_source=proposal_source,
+        delta={
+            "added": float(added),
+            "gap_score_before": float(gap_score_before) if gap_score_before is not None else 0.0,
+            "gap_score_after": float(gap_score_after) if gap_score_after is not None else 0.0,
+        },
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        parent_version=str((new_version - 1) if new_version > 0 else 0),
+        candidate_id=outcome.candidate_id or "",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice,
+    )
+    write_lesson(lesson)
+
+    return new_version, lesson.id
