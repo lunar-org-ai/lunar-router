@@ -129,3 +129,10 @@ templates:
     _default:
       title: "Refit my routing"
       voice: "I refit my routing — clusters look better and the eval lifted."
+
+  # P15.4 — Datasets. Mutations look like `datasets/<name>/v<n>.json`.
+  # The proposer feeds the mining adapter outputs through this kind.
+  dataset:
+    _default:
+      title: "Curated a dataset"
+      voice: "I added new samples to one of my datasets — coverage looks better."

@@ -13,5 +13,6 @@ run all `post` critics → if any block, reject. Else approve.
 
 from harness.critics.base import Critic, CriticStage, make_critic, register_critic
 from harness.critics import builtins  # noqa: F401  (registers built-ins)
+from harness.critics import dataset_critic  # noqa: F401  (registers dataset_quality_gate)
 
 __all__ = ["Critic", "CriticStage", "make_critic", "register_critic"]

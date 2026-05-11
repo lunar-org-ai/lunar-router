@@ -157,6 +157,58 @@ async def _list_tools() -> list[Tool]:
                 },
             },
         ),
+        Tool(
+            name="dataset_health_check",
+            description=(
+                "Read-only snapshot of one or all datasets (P15.4). Returns "
+                "per-dataset: name, size, source, sourceType, use, owner, "
+                "growing, version, last_curation_at, gap_score, "
+                "cluster_distribution, adapter_available. Pass `name` to "
+                "scope to a single dataset; omit for all. Use BEFORE deciding "
+                "whether to call propose_dataset_curation."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Specific dataset; omit for all.",
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="propose_dataset_curation",
+            description=(
+                "Trigger a dataset curation cycle (P15.4). Runs "
+                "DatasetProposer → DatasetCritic → policy branch → "
+                "promote_dataset. Returns the action (promoted/queued/"
+                "rejected/blocked) + Lesson ID. Optionally override the "
+                "mining adapter with `source`. Pass a rationale. Gated by "
+                "Policy.overrides['dataset']."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Registered dataset name.",
+                    },
+                    "source": {
+                        "type": "string",
+                        "description": (
+                            "Optional adapter override: 'flagged traces', "
+                            "'language router', 'failed lookups'."
+                        ),
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "description": "Why curation is needed (1-2 sentences).",
+                    },
+                },
+                "required": ["name"],
+            },
+        ),
     ]
 
 
@@ -172,6 +224,8 @@ _HANDLERS = {
     "list_available_epochs": lib.list_available_epochs,
     "router_health_check": lib.router_health_check,
     "propose_router_retrain": lib.propose_router_retrain,
+    "dataset_health_check": lib.dataset_health_check,
+    "propose_dataset_curation": lib.propose_dataset_curation,
 }
 
 

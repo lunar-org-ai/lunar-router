@@ -2421,7 +2421,7 @@ async def get_dataset_health_endpoint(name: str) -> DatasetHealth:
                 if not s.embedding:
                     continue
                 vec = np.asarray(s.embedding, dtype=float)
-                cid = int(assigner.assign(vec))
+                cid = int(assigner.assign(vec).cluster_id)
                 key = str(cid)
                 cluster_distribution[key] = cluster_distribution.get(key, 0) + 1
     except Exception:

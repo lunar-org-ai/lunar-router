@@ -24,7 +24,7 @@ from typing import Any, Optional
 import yaml
 
 from experiments.branching import candidate_agent_path
-from harness.types import LoopOutcome, kind_from_mutations
+from harness.types import LoopOutcome, VerificationOutcome, kind_from_mutations
 from ledger.types import Lesson
 from ledger.versioning import LIVE_AGENT, read_version, snapshot_agent
 from ledger.writer import read_lesson, update_lesson, write_entry, write_lesson
@@ -805,6 +805,236 @@ def promote_router_config(
         ),
         proposal_source=proposal_source,
         delta={"silhouette": delta_overall},
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        parent_version=str((new_version - 1) if new_version > 0 else 0),
+        candidate_id=outcome.candidate_id or "",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice,
+    )
+    write_lesson(lesson)
+
+    return new_version, lesson.id
+
+
+# ---------------------------------------------------------------------------
+# P15.4.4 — Dataset candidate promotion
+# ---------------------------------------------------------------------------
+
+
+def _verify_dataset_promotion(
+    prediction: "Prediction",  # forward ref to harness.types.Prediction
+    payload: dict,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> VerificationOutcome:
+    """Materialize the AHE Pillar 3 verification for a dataset promotion.
+
+    Re-measures the live dataset's coverage gap against the current
+    fitted router and compares it to the proposer's prediction. When
+    no router is fitted yet (cold-start), the prediction is taken at
+    face value (verdict='verified') — there's no way to falsify it.
+
+    Returns a VerificationOutcome ready to attach to LoopOutcome and
+    write into the ledger payload.
+    """
+    from harness.proposer.dataset.coverage import cluster_gaps
+    from router.config_io import load_current_config
+    from router.data.dataset_io import load_current
+    from router.errors import (
+        RouterConfigInvalidError,
+        RouterConfigNotFoundError,
+    )
+
+    # No router fitted yet → verification is degenerate (no centroid surface
+    # to project against). Record the prediction's claim at face value.
+    try:
+        assigner, _registry, _lambda = load_current_config()
+    except (RouterConfigNotFoundError, RouterConfigInvalidError):
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    # Re-measure gap_score on the now-live dataset.
+    name = payload["name"]
+    try:
+        live_dataset = load_current(name, datasets_dir=datasets_dir)
+    except Exception:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    report = cluster_gaps(live_dataset, assigner=assigner)
+    if report is None:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    gap_before = (payload.get("metadata") or {}).get("gap_score_before")
+    if gap_before is None:
+        return VerificationOutcome.evaluate(prediction, prediction.expected_delta)
+
+    actual_delta = float(report.gap_score) - float(gap_before)
+    return VerificationOutcome.evaluate(prediction, actual_delta)
+
+
+def apply_dataset_candidate(
+    candidate_payload: dict,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> Path:
+    """Atomically write datasets/<name>/v<n>.json + flip the current pointer.
+
+    Args:
+        candidate_payload: Proposer's inline payload (from Mutation.value).
+            Must contain ``version``, ``name``, ``samples``.
+        datasets_dir: Override the default ``datasets/`` directory.
+
+    Returns:
+        Path to the v<n>.json that was written.
+    """
+    from router.data.dataset_io import save_dataset
+
+    return save_dataset(
+        candidate_payload,
+        datasets_dir=datasets_dir,
+        update_pointer=True,
+    )
+
+
+def promote_dataset(
+    outcome: LoopOutcome,
+    *,
+    datasets_dir: Optional[Path] = None,
+) -> tuple[int, str]:
+    """Promote a dataset candidate. Returns ``(new_version, lesson_id)``.
+
+    Mirrors ``promote_router_config`` for ``kind="dataset"`` proposals.
+    The candidate payload lives inline on
+    ``outcome.proposal.mutations[0].value``; no agent_dir snapshot is
+    taken (datasets sit outside the agent's editable surface, same as
+    router_config).
+    """
+    if not outcome.proposal.mutations:
+        raise ValueError("promote_dataset requires a proposal with mutations")
+    payload = outcome.proposal.mutations[0].value
+    if not isinstance(payload, dict):
+        raise ValueError(
+            "promote_dataset expects dict payload on Mutation.value, "
+            f"got {type(payload).__name__}"
+        )
+
+    json_path = apply_dataset_candidate(payload, datasets_dir=datasets_dir)
+    new_version = int(payload["version"])
+    name = str(payload["name"])
+
+    # AHE Pillar 3 — materialize the VerificationOutcome from live state
+    # before recording the Lesson. Only when the proposer attached a
+    # Prediction *and* the caller didn't pre-compute one (e.g. via
+    # harness.loop._actual_delta_for_rubric).
+    if (
+        outcome.proposal.prediction is not None
+        and outcome.verification is None
+    ):
+        outcome.verification = _verify_dataset_promotion(
+            outcome.proposal.prediction,
+            payload,
+            datasets_dir=datasets_dir,
+        )
+
+    promoted_at = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+    metadata = payload.get("metadata") or {}
+    added = int(metadata.get("added", 0))
+    gap_score_before = metadata.get("gap_score_before")
+    gap_score_after = metadata.get("gap_score_after")
+
+    ledger_payload: dict = {
+        "kind": "dataset",
+        "name": name,
+        "source": outcome.proposal.source,
+        "json_path": str(json_path),
+        "added": added,
+        "total_size": len(payload.get("samples") or []),
+        "gap_score_before": gap_score_before,
+        "gap_score_after": gap_score_after,
+        "metadata": metadata,
+        "verdicts": [
+            {"critic": v.critic, "approved": v.approved, "reason": v.reason}
+            for v in outcome.verdicts
+        ],
+    }
+    if outcome.proposal.prediction is not None:
+        ledger_payload["prediction"] = {
+            "rubric": outcome.proposal.prediction.rubric,
+            "expected_delta": outcome.proposal.prediction.expected_delta,
+            "rationale": outcome.proposal.prediction.rationale,
+            "confidence": outcome.proposal.prediction.confidence,
+        }
+    if outcome.verification is not None:
+        ledger_payload["verification"] = {
+            "rubric": outcome.verification.rubric,
+            "expected_delta": outcome.verification.expected_delta,
+            "actual_delta": outcome.verification.actual_delta,
+            "direction_correct": outcome.verification.direction_correct,
+            "magnitude_met": outcome.verification.magnitude_met,
+            "verdict": outcome.verification.verdict,
+        }
+
+    entry = write_entry(
+        kind="promote",
+        candidate_id=outcome.candidate_id or "",
+        agent_version_before=None,
+        agent_version_after=None,
+        summary=f"promoted dataset {name!r} v{new_version} (added={added})",
+        payload=ledger_payload,
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    proposal_source = (
+        "claude_code"
+        if outcome.proposal.source == "claude_code"
+        else outcome.proposal.source or "auto"
+    )
+    pred_rationale = (
+        outcome.proposal.prediction.rationale
+        if outcome.proposal.prediction is not None
+        else None
+    )
+    title, voice = _voice_for(
+        kind="dataset",
+        mutations=[m.describe() for m in outcome.proposal.mutations],
+        delta_overall=float(added),
+        prediction_rationale=pred_rationale,
+    )
+
+    gap_text = ""
+    if gap_score_before is not None and gap_score_after is not None:
+        gap_text = f" (gap_score {float(gap_score_before):.2f} → {float(gap_score_after):.2f})"
+    verification_text = ""
+    if outcome.verification is not None:
+        verification_text = (
+            f" Prediction {outcome.verification.verdict}."
+        )
+    lesson_summary = (
+        f"Promoted dataset {name!r} v{new_version} — "
+        f"added {added} sample(s){gap_text}.{verification_text}"
+    )
+
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(new_version),
+        kind="dataset",
+        status="auto_promoted",
+        title=title,
+        summary=lesson_summary,
+        proposal_source=proposal_source,
+        delta={
+            "added": float(added),
+            "gap_score_before": float(gap_score_before) if gap_score_before is not None else 0.0,
+            "gap_score_after": float(gap_score_after) if gap_score_after is not None else 0.0,
+        },
         mutations=[m.describe() for m in outcome.proposal.mutations],
         parent_version=str((new_version - 1) if new_version > 0 else 0),
         candidate_id=outcome.candidate_id or "",

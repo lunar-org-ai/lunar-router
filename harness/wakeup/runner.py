@@ -31,9 +31,10 @@ logger = logging.getLogger("harness.wakeup.runner")
 
 @dataclass
 class WakeupOutcome:
-    action: str  # "proposed" | "skipped" | "blocked"
+    action: str               # "proposed" | "skipped" | "blocked"
     rationale: str
     lesson_id: Optional[str] = None
+    target: Optional[str] = None  # "router" | "dataset" | None
     reason: Optional[str] = None
     health_snapshot: dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
@@ -43,6 +44,7 @@ class WakeupOutcome:
             "action": self.action,
             "rationale": self.rationale,
             "lesson_id": self.lesson_id,
+            "target": self.target,
             "reason": self.reason,
             "health_snapshot": self.health_snapshot,
             "timestamp": self.timestamp,
@@ -61,7 +63,12 @@ def run_wakeup(
     from router.feedback.health import compute_router_health
 
     health = compute_router_health(embedder=embedder)
-    health_dict = health.to_dict()
+    router_health = health.to_dict()
+    dataset_health = _safe_dataset_health()
+    health_snapshot = {
+        "router": router_health,
+        "datasets": dataset_health,
+    }
 
     # Detect "no brain" up front so the operator gets a clear artifact
     # rather than a wake-up that silently fails.
@@ -71,7 +78,7 @@ def run_wakeup(
             action="blocked",
             rationale=f"no brain transport: {transport_check}",
             reason="no_brain_available",
-            health_snapshot=health_dict,
+            health_snapshot=health_snapshot,
             timestamp=_now_iso(),
         )
         _persist(outcome)
@@ -79,7 +86,8 @@ def run_wakeup(
 
     prompt = WAKEUP_PROMPT.format(
         n_traces=threshold,
-        health_json=json.dumps(health_dict, indent=2),
+        router_health_json=json.dumps(router_health, indent=2),
+        dataset_health_json=json.dumps(dataset_health, indent=2),
     )
 
     # Invoke Claude Code via the existing introspection entry — it carries
@@ -93,37 +101,48 @@ def run_wakeup(
             action="blocked",
             rationale=f"introspect call failed: {type(e).__name__}: {e}",
             reason="introspect_error",
-            health_snapshot=health_dict,
+            health_snapshot=health_snapshot,
             timestamp=_now_iso(),
         )
         _persist(outcome)
         return outcome
 
-    # Decide what action was taken: any tool call to propose_router_retrain
-    # in the captured tool_calls counts as "proposed".
-    proposed_lesson_id = _extract_proposed_lesson(result)
+    # Decide what action was taken: distinguish router_retrain vs dataset_curation.
+    proposed = _extract_proposed_lesson(result)
     response_text = (
         getattr(result, "response", "") or ""
     ).strip()
 
-    if proposed_lesson_id:
+    if proposed is not None:
+        target, lesson_id = proposed
         outcome = WakeupOutcome(
             action="proposed",
             rationale=response_text,
-            lesson_id=proposed_lesson_id,
-            health_snapshot=health_dict,
+            lesson_id=lesson_id,
+            target=target,
+            health_snapshot=health_snapshot,
             timestamp=_now_iso(),
         )
     else:
         outcome = WakeupOutcome(
             action="skipped",
             rationale=response_text or "(no rationale captured)",
-            health_snapshot=health_dict,
+            health_snapshot=health_snapshot,
             timestamp=_now_iso(),
         )
 
     _persist(outcome)
     return outcome
+
+
+def _safe_dataset_health() -> dict[str, Any]:
+    """Pull dataset health without crashing if the library isn't reachable."""
+    try:
+        from harness.introspection.lib import dataset_health_check
+        return dataset_health_check()
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("dataset_health_check failed: %s", e)
+        return {"datasets": [], "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -148,29 +167,40 @@ def _default_introspect(prompt: str):
     return introspect(prompt)
 
 
-def _extract_proposed_lesson(result: Any) -> Optional[str]:
+_TARGET_BY_TOOL = {
+    "propose_router_retrain": "router",
+    "propose_dataset_curation": "dataset",
+}
+
+
+def _extract_proposed_lesson(result: Any) -> Optional[tuple[str, str]]:
     """Look at the introspect result for evidence that the model called
-    ``propose_router_retrain`` and got back a lesson_id.
+    one of the proposer tools and got back a lesson_id.
+
+    Returns ``(target, lesson_id)`` when found, else ``None``.
 
     Two channels:
-    1. ``result.tool_calls`` — when the introspect path captures them.
-       Look for ``propose_router_retrain`` outputs that contain a
-       ``"lesson_id"`` field.
-    2. ``result.response`` text — fallback regex for ``L-YYYYMMDD-...``
-       which is the lesson_id format used elsewhere in the codebase.
+    1. ``result.tool_calls`` — preferred. Maps the tool name to a target.
+    2. ``result.response`` text — fallback regex for the lesson_id; we
+       can't distinguish target here, so default to ``"router"`` for
+       backwards-compatibility (P15.3.9 only had the router tool).
     """
     tool_calls = getattr(result, "tool_calls", None) or []
     for call in tool_calls:
-        if getattr(call, "tool", None) == "propose_router_retrain":
-            preview = getattr(call, "output_preview", "") or ""
-            m = re.search(r'"lesson_id"\s*:\s*"(L-[\w\-]+)"', preview)
-            if m:
-                return m.group(1)
+        tool = getattr(call, "tool", None)
+        target = _TARGET_BY_TOOL.get(tool)
+        if target is None:
+            continue
+        preview = getattr(call, "output_preview", "") or ""
+        m = re.search(r'"lesson_id"\s*:\s*"(L-[\w\-]+)"', preview)
+        if m:
+            return target, m.group(1)
 
     text = getattr(result, "response", "") or ""
     m = re.search(r"L-\d{8}-\d{6}-[a-f0-9]+", text)
     if m:
-        return m.group(0)
+        # Fallback — target unknown. Default to router for back-compat.
+        return "router", m.group(0)
     return None
 
 
