@@ -6,6 +6,7 @@ import {
   createDataset as apiCreateDataset,
   deleteDataset as apiDeleteDataset,
   exportDatasetUrl,
+  flagTrace,
   getDataset,
   getDatasetHealth,
   getDatasets,
@@ -21,6 +22,7 @@ import {
   listReports,
   listTraceFeedback,
   submitTraceFeedback,
+  unflagTrace,
   listSuites,
   listTraces,
   runAllSuites,
@@ -231,11 +233,20 @@ export const Traces = () => {
   const [error, setError] = useState<string | null>(null);
   const [openId, setOpenId] = useState<string | null>(null);
   const [pinned, setPinned] = useState<Record<string, boolean>>({});
-  // Local-only flag set — persisting flag state to the ledger is deferred
-  // (no flag concept on the backend yet). When you flag a trace from the
-  // drawer, it joins this set; refresh wipes. Sufficient for triage; real
-  // persistence wires later alongside the auto-rollback signals.
-  const [flagged, setFlagged] = useState<Record<string, boolean>>({});
+  // P16.3 — flag state is now server-persisted via
+  // POST/DELETE /v1/traces/:id/flag. We keep `flagOverride` as a local
+  // optimistic-update overlay so clicks feel instant; it merges over the
+  // server-stamped `flagged` field on each TraceSummary.
+  const [flagOverride, setFlagOverride] = useState<Record<string, boolean>>({});
+
+  const isFlagged = useCallback(
+    (t: TraceSummary): boolean => {
+      const o = flagOverride[t.trace_id];
+      if (o !== undefined) return o;
+      return !!t.flagged;
+    },
+    [flagOverride],
+  );
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
 
@@ -297,18 +308,39 @@ export const Traces = () => {
   };
 
   const flagAsFail = (id: string) => {
-    setFlagged((f) => {
-      const next = { ...f, [id]: !f[id] };
-      setToast(
-        next[id]
-          ? `Flagged ${id.slice(0, 8)}… (local only until persistence lands)`
-          : `Unflagged ${id.slice(0, 8)}…`,
-      );
-      return next;
-    });
+    // Resolve current state from page + override
+    const t = page?.items.find((it) => it.trace_id === id);
+    const currentlyFlagged = isFlagged(
+      t || ({ trace_id: id, flagged: false } as TraceSummary),
+    );
+    const targetState = !currentlyFlagged;
+    // Optimistic toggle
+    setFlagOverride((prev) => ({ ...prev, [id]: targetState }));
+    const op = targetState ? flagTrace(id) : unflagTrace(id);
+    op
+      .then(() => {
+        setToast(targetState ? 'Flagged as failure.' : 'Unflagged.');
+      })
+      .catch((e: unknown) => {
+        // Revert
+        setFlagOverride((prev) => {
+          const next = { ...prev };
+          if (t) {
+            next[id] = !!t.flagged; // restore server-stamped value
+          } else {
+            delete next[id];
+          }
+          return next;
+        });
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't flag: ${msg.slice(0, 120)}`);
+      });
   };
 
-  const flaggedCount = Object.values(flagged).filter(Boolean).length;
+  const flaggedCount = useMemo(() => {
+    if (!page) return 0;
+    return page.items.filter((t) => isFlagged(t)).length;
+  }, [page, isFlagged]);
 
   const counts = useMemo(() => {
     if (!page) return { all: 0, pass: 0, flag: flaggedCount, fail: 0 };
@@ -326,8 +358,8 @@ export const Traces = () => {
   const visibleItems = useMemo(() => {
     if (!page) return [];
     if (filter !== 'flag') return page.items;
-    return page.items.filter((t) => flagged[t.trace_id]);
-  }, [page, filter, flagged]);
+    return page.items.filter((t) => isFlagged(t));
+  }, [page, filter, isFlagged]);
 
   const showing = page?.items.length ?? 0;
   const total = page?.total_filtered ?? 0;
@@ -513,7 +545,7 @@ export const Traces = () => {
                     <div className="id-row">
                       <span className="id">{t.trace_id.slice(0, 8)}…</span>
                       {pinned[t.trace_id] && <Icon name="pin" size={11} />}
-                      {flagged[t.trace_id] && <Icon name="flag" size={11} />}
+                      {isFlagged(t) && <Icon name="flag" size={11} />}
                     </div>
                     <div className="dim" style={{ fontSize: 11, marginTop: 2 }}>
                       {fmtRelative(t.timestamp)} · webhook
@@ -522,7 +554,7 @@ export const Traces = () => {
                   <div className="cell-excerpt">
                     <Tag
                       kind={
-                        flagged[t.trace_id] ? 'warn' : v === 'pass' ? 'success' : 'bad'
+                        isFlagged(t) ? 'warn' : v === 'pass' ? 'success' : 'bad'
                       }
                     >
                       <span className="dot" />
@@ -532,7 +564,13 @@ export const Traces = () => {
                   <span className="mono dim cell-model">
                     {t.routing_model || '—'}
                   </span>
-                  <span className="mono dim cell-cost">—</span>
+                  <span className="mono dim cell-cost">
+                    {t.cost_usd != null
+                      ? t.cost_usd >= 0.01
+                        ? `$${t.cost_usd.toFixed(3)}`
+                        : `$${t.cost_usd.toFixed(5)}`
+                      : '—'}
+                  </span>
                   <Icon name="chevron" size={12} />
                 </div>
               );
@@ -567,7 +605,10 @@ export const Traces = () => {
         <TraceDrawer
           traceId={openId}
           pinned={!!pinned[openId]}
-          flagged={!!flagged[openId]}
+          flagged={isFlagged(
+            page?.items.find((t) => t.trace_id === openId)
+              || ({ trace_id: openId, flagged: false } as TraceSummary),
+          )}
           onClose={() => setOpenId(null)}
           onTogglePin={() => togglePin(openId)}
           onFlag={() => flagAsFail(openId)}

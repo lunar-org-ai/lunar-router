@@ -143,7 +143,12 @@ def test_propose_manual_dataset_raises_no_adapter(tmp_datasets):
         proposer.propose("manual-ds")
 
 
-def test_propose_feedback_signals_raises_no_adapter(tmp_datasets):
+def test_propose_feedback_signals_empty_feedback_raises_nothing_to_add(
+    tmp_datasets, tmp_path: Path, monkeypatch,
+):
+    """P16.3 wires the feedback_signals adapter. With no feedback rows
+    in the side-table, the proposer raises NothingToAddError (not
+    NoAdapterError as in the P15.4.3 stub era)."""
     payload = {
         "version": 1, "name": "fb", "desc": "", "source": "feedback signals",
         "sourceType": "auto", "use": ["Eval"], "owner": "agent",
@@ -151,9 +156,14 @@ def test_propose_feedback_signals_raises_no_adapter(tmp_datasets):
         "samples": [], "history": [], "metadata": {},
     }
     save_dataset(payload, datasets_dir=tmp_datasets)
+    # Point the adapter at an empty feedback root.
+    monkeypatch.setattr(
+        "runtime.store.feedback._FEEDBACK_ROOT",
+        tmp_path / "feedback_nope",
+    )
 
     proposer = DatasetProposer(embedder=_MockEmbedder())
-    with pytest.raises(NoAdapterError):
+    with pytest.raises(NothingToAddError):
         proposer.propose("fb")
 
 

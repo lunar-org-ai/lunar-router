@@ -192,6 +192,12 @@ export interface TraceSummary {
   routing_model: string | null;
   session_id: string | null;
   n_turns: number;
+  // P16.2 — cost telemetry. Optional because pre-P16.2 traces lack these.
+  tokens_in?: number | null;
+  tokens_out?: number | null;
+  cost_usd?: number | null;
+  // P16.3 — flag state (server-stamped from traces/flagged/<date>.jsonl).
+  flagged?: boolean;
 }
 
 export interface TracesPage {
@@ -306,6 +312,56 @@ export async function listTraceFeedback(trace_id: string): Promise<TraceFeedback
     throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
   }
   return (await res.json()) as TraceFeedbackEntry[];
+}
+
+// P16.3 — flag persistence + auto-flag.
+export interface TraceFlagEntry {
+  trace_id: string;
+  reason: string | null;
+  source: 'manual' | 'csat_low' | 'latency_outlier' | 'error' | 'unflag';
+  at: string;
+}
+
+export interface TraceFlagResponse {
+  trace_id: string;
+  flagged: boolean;
+  last_row: TraceFlagEntry;
+}
+
+export async function flagTrace(
+  trace_id: string,
+  reason?: string,
+): Promise<TraceFlagResponse> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(trace_id)}/flag`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ reason: reason || null }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceFlagResponse;
+}
+
+export async function unflagTrace(trace_id: string): Promise<TraceFlagResponse> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(trace_id)}/flag`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceFlagResponse;
+}
+
+export async function listTraceFlag(trace_id: string): Promise<TraceFlagEntry[]> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(trace_id)}/flag`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceFlagEntry[];
 }
 
 export interface LiveTraceEvent {

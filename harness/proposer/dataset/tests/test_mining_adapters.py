@@ -309,14 +309,19 @@ def test_flagged_traces_merges_both_sources(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# feedback_signals (stub)
+# feedback_signals (P16.3 — wired against traces/feedback/ side-table)
 # ---------------------------------------------------------------------------
 
 
-def test_feedback_signals_raises_notimplemented():
-    with pytest.raises(NotImplementedError):
-        # generator: must materialize to trigger
-        list(feedback_signals.iter_candidates(embedder=_MockEmbedder()))
+def test_feedback_signals_empty_feedback_returns_empty(tmp_path: Path):
+    """No feedback rows on disk → empty stream, no error (P16.3 wires what
+    P15.4.3 stubbed)."""
+    samples = list(feedback_signals.iter_candidates(
+        embedder=_MockEmbedder(),
+        feedback_root=tmp_path / "nope",
+        get_trace=lambda tid: None,
+    ))
+    assert samples == []
 
 
 # ---------------------------------------------------------------------------

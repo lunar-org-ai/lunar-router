@@ -124,9 +124,11 @@ def csat_for_window(
 
 
 def _now_iso() -> str:
+    # Microsecond precision so back-to-back submissions (corrections,
+    # tests) tie-break cleanly when the aggregator picks "latest".
     return (
         datetime.now(timezone.utc)
-        .isoformat(timespec="milliseconds")
+        .isoformat(timespec="microseconds")
         .replace("+00:00", "Z")
     )
 
