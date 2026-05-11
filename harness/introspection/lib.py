@@ -570,3 +570,404 @@ def _write_queued_router_lesson(proposal, verdict) -> Any:
     )
     write_lesson(lesson)
     return lesson
+
+
+# ---------- P15.4.5: dataset brain tools ----------
+
+
+def dataset_health_check(name: Optional[str] = None) -> dict[str, Any]:
+    """Snapshot of one or all datasets.
+
+    Args:
+        name: when set, return health for that dataset only. Otherwise
+              return health for every dataset in the registry.
+
+    Per-dataset shape::
+
+        {
+            "name": str,
+            "size": int,
+            "source": str,
+            "sourceType": "auto" | "manual",
+            "use": list[str],
+            "owner": "agent" | "human",
+            "growing": bool,
+            "version": int,
+            "last_curation_at": Optional[str],   # ISO
+            "gap_score": Optional[float],        # null when router cold-start
+            "cluster_distribution": Optional[dict[str, int]],
+            "adapter_available": bool,
+        }
+
+    Cold-start safe — returns ``{"datasets": []}`` when no datasets
+    are registered yet.
+    """
+    from harness.proposer.dataset.coverage import cluster_gaps
+    from harness.proposer.dataset.mining import get_adapter
+    from router.config_io import load_current_config
+    from router.data.dataset_io import load_current
+    from router.data.dataset_registry import get_dataset_meta, list_datasets
+    from router.errors import (
+        DatasetInvalidError,
+        DatasetNotFoundError,
+        RouterConfigInvalidError,
+        RouterConfigNotFoundError,
+    )
+
+    try:
+        assigner, _registry, _lambda = load_current_config()
+    except (RouterConfigNotFoundError, RouterConfigInvalidError):
+        assigner = None
+
+    def _snapshot(meta) -> dict[str, Any]:
+        try:
+            dataset = load_current(meta.name)
+        except (DatasetNotFoundError, DatasetInvalidError):
+            return {
+                "name": meta.name,
+                "size": 0,
+                "source": meta.source,
+                "sourceType": meta.sourceType,
+                "use": list(meta.use),
+                "owner": meta.owner,
+                "growing": bool(meta.growing),
+                "version": None,
+                "last_curation_at": None,
+                "gap_score": None,
+                "cluster_distribution": None,
+                "adapter_available": get_adapter(meta.source) is not None,
+                "error": "dataset_load_failed",
+            }
+
+        report = cluster_gaps(dataset, assigner=assigner) if assigner else None
+        return {
+            "name": dataset.metadata.name,
+            "size": dataset.size(),
+            "source": dataset.metadata.source,
+            "sourceType": dataset.metadata.sourceType,
+            "use": list(dataset.metadata.use),
+            "owner": dataset.metadata.owner,
+            "growing": bool(dataset.metadata.growing),
+            "version": dataset.version,
+            "last_curation_at": _latest_history_when(dataset),
+            "gap_score": (report.gap_score if report else None),
+            "cluster_distribution": (
+                {str(k): v for k, v in report.cluster_distribution.items()}
+                if report else None
+            ),
+            "adapter_available": get_adapter(dataset.metadata.source) is not None,
+        }
+
+    if name is not None:
+        meta = get_dataset_meta(name)
+        if meta is None:
+            return {"error": "dataset_not_found", "name": name}
+        return _snapshot(meta)
+
+    return {"datasets": [_snapshot(m) for m in list_datasets()]}
+
+
+def _latest_history_when(dataset) -> Optional[str]:
+    """Pull the most recent history entry's `when` field; None when empty."""
+    if not dataset.history:
+        return None
+    last = dataset.history[-1]
+    when = last.get("when") if isinstance(last, dict) else None
+    return when if isinstance(when, str) else None
+
+
+def propose_dataset_curation(
+    name: str,
+    source: Optional[str] = None,
+    rationale: str = "",
+) -> dict[str, Any]:
+    """Trigger a dataset curation cycle via the AHE pipeline.
+
+    Runs DatasetProposer → DatasetCritic → policy branch → promote_dataset.
+    Returns a dict with the same shape ``propose_router_retrain`` uses:
+    ``{action, reason, lesson_id, version?}``.
+
+    Gated by Policy: global ``mode == "off"`` or ``overrides["dataset"] ==
+    "off"`` returns ``{"action": "blocked", "reason": "policy: ..."}``.
+
+    Args:
+        name: registered dataset name.
+        source: optional override for the mining adapter (e.g. trigger
+                'failed lookups' adapter on a manual dataset).
+        rationale: free-form text the brain attaches to the candidate.
+    """
+    from harness.proposer.dataset_proposer import (
+        DatasetProposer,
+        NoAdapterError,
+        NothingToAddError,
+    )
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+
+    # 1. Policy gate
+    try:
+        from harness.approver.policy import Policy
+        policy = Policy.from_yaml()
+        mode = policy.mode_for("dataset")
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"policy_load_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+    if mode == "off":
+        return {
+            "action": "blocked",
+            "reason": "policy: mode is 'off' for dataset",
+            "lesson_id": None,
+        }
+
+    # 2. Build the proposer
+    try:
+        from runtime.embedder_pool import get_pool
+        from router.config_io import load_current_config
+        from router.errors import (
+            RouterConfigInvalidError,
+            RouterConfigNotFoundError,
+        )
+
+        embedder = get_pool().get()
+        try:
+            assigner, _, _ = load_current_config()
+        except (RouterConfigNotFoundError, RouterConfigInvalidError):
+            assigner = None
+        proposer = DatasetProposer(embedder=embedder, assigner=assigner)
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"proposer_init_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    # 3. Propose
+    try:
+        proposal = proposer.propose(name, source_override=source)
+    except DatasetNotFoundError:
+        return {
+            "action": "blocked",
+            "reason": f"dataset_not_found: {name!r}",
+            "lesson_id": None,
+        }
+    except DatasetInvalidError as e:
+        return {
+            "action": "blocked",
+            "reason": f"dataset_invalid: {e}",
+            "lesson_id": None,
+        }
+    except NoAdapterError as e:
+        return {
+            "action": "blocked",
+            "reason": f"no_adapter: {e}",
+            "lesson_id": None,
+        }
+    except NothingToAddError as e:
+        return {
+            "action": "blocked",
+            "reason": f"nothing_to_add: {e}",
+            "lesson_id": None,
+        }
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"propose_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    # 4. Stamp rationale on metadata
+    proposal_meta = {**proposal.metadata}
+    if rationale:
+        proposal_meta["claude_code_rationale"] = rationale
+    proposal.metadata = proposal_meta
+
+    # 5. Critic + policy branch + executor
+    return _run_dataset_pipeline(proposal, mode)
+
+
+def _run_dataset_pipeline(proposal, mode: str) -> dict[str, Any]:
+    """Run DatasetCritic → branch on policy → promote_dataset.
+
+    Mirrors ``_run_router_pipeline`` shape so the wakeup runner can
+    treat both targets uniformly.
+    """
+    from harness.critics.dataset_critic import DatasetCritic
+    from harness.executor.promote import promote_dataset
+    from harness.types import CriticContext, LoopOutcome
+
+    if mode == "off":
+        return {
+            "action": "blocked",
+            "reason": "policy: mode is 'off' for dataset",
+            "lesson_id": None,
+        }
+
+    critic = DatasetCritic()
+    ctx = CriticContext(proposal=proposal, candidate_result=None)
+    try:
+        verdict = critic.verdict(ctx)
+    except Exception as e:
+        return {
+            "action": "blocked",
+            "reason": f"critic_error: {type(e).__name__}: {e}",
+            "lesson_id": None,
+        }
+
+    if not verdict.approved:
+        lesson = _write_rejected_dataset_lesson(proposal, verdict)
+        return {
+            "action": "rejected",
+            "reason": verdict.reason,
+            "lesson_id": lesson.id,
+        }
+
+    outcome = LoopOutcome(
+        proposal=proposal,
+        candidate_id=None,
+        verdicts=[verdict],
+        candidate_result=None,
+        final="approved",
+    )
+
+    if mode == "auto":
+        try:
+            new_version, lesson_id = promote_dataset(outcome)
+        except Exception as e:
+            return {
+                "action": "blocked",
+                "reason": f"executor_error: {type(e).__name__}: {e}",
+                "lesson_id": None,
+            }
+        return {
+            "action": "promoted",
+            "lesson_id": lesson_id,
+            "version": new_version,
+            "reason": verdict.reason,
+        }
+
+    # mode == "review"
+    lesson = _write_queued_dataset_lesson(proposal, verdict)
+    payload = proposal.mutations[0].value if proposal.mutations else {}
+    return {
+        "action": "queued",
+        "lesson_id": lesson.id,
+        "version": (
+            int(payload.get("version"))
+            if isinstance(payload, dict) else None
+        ),
+        "reason": (
+            "policy=review for dataset — pending human approval. "
+            "Approve via /v1/lessons/{lesson_id}/approve or the Review screen."
+        ),
+    }
+
+
+def _write_rejected_dataset_lesson(proposal, verdict) -> Any:
+    from datetime import datetime, timezone
+    import secrets
+
+    from ledger.types import Lesson
+    from ledger.writer import write_entry, write_lesson
+
+    payload = proposal.mutations[0].value if proposal.mutations else {}
+    name = payload.get("name") if isinstance(payload, dict) else None
+    version = (
+        int(payload.get("version", 0))
+        if isinstance(payload, dict) else 0
+    )
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    summary = f"dataset {name!r} v{version} rejected by critic"
+
+    entry = write_entry(
+        kind="rejected",
+        summary=summary,
+        payload={
+            "kind": "dataset",
+            "name": name,
+            "source": proposal.source,
+            "verdict_reason": verdict.reason,
+            "candidate_version": version,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version="",
+        kind="dataset",
+        status="human_rejected",
+        title=f"dataset {name!r} v{version} rejected",
+        summary=verdict.reason or "Critic blocked the candidate.",
+        proposal_source=proposal.source,
+        delta={},
+        mutations=[m.describe() for m in proposal.mutations],
+        parent_version="",
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice="I tried to curate a dataset but the critic said it didn't help.",
+    )
+    write_lesson(lesson)
+    return lesson
+
+
+def _write_queued_dataset_lesson(proposal, verdict) -> Any:
+    from datetime import datetime, timezone
+    import secrets
+
+    from ledger.types import Lesson
+    from ledger.writer import write_entry, write_lesson
+
+    payload = proposal.mutations[0].value if proposal.mutations else {}
+    name = payload.get("name") if isinstance(payload, dict) else None
+    version = (
+        int(payload.get("version", 0))
+        if isinstance(payload, dict) else 0
+    )
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    summary = f"dataset {name!r} v{version} awaiting human review"
+
+    entry = write_entry(
+        kind="queued_review",
+        summary=summary,
+        payload={
+            "kind": "dataset",
+            "name": name,
+            "source": proposal.source,
+            "verdict_reason": verdict.reason,
+            "candidate_version": version,
+            "candidate_payload": payload if isinstance(payload, dict) else None,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(version),
+        kind="dataset",
+        status="awaiting_review",
+        title=f"dataset {name!r} v{version} awaiting review",
+        summary=verdict.reason or "Critic passed — awaiting human approval.",
+        proposal_source=proposal.source,
+        delta={},
+        mutations=[m.describe() for m in proposal.mutations],
+        parent_version="",
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice="I curated samples for a dataset — checking with you before saving.",
+    )
+    write_lesson(lesson)
+    return lesson

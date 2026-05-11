@@ -181,6 +181,59 @@ TOOLS: list[dict[str, Any]] = [
             "required": [],
         },
     },
+    {
+        "name": "dataset_health_check",
+        "description": (
+            "Read-only snapshot of one or all datasets (P15.4). Returns per-dataset: "
+            "name, size, source, sourceType, use, owner, growing, version, "
+            "last_curation_at, gap_score, cluster_distribution, adapter_available. "
+            "Pass `name` to scope to a single dataset; omit for all. Use this "
+            "before deciding whether to call propose_dataset_curation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Specific dataset name. Omit to list all datasets.",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "propose_dataset_curation",
+        "description": (
+            "Trigger a dataset curation cycle (P15.4). Runs DatasetProposer → "
+            "DatasetCritic → policy branch → promote_dataset. Returns the "
+            "resulting Lesson ID (when promoted/queued) or a blocked-reason. "
+            "Caller should pass a short rationale explaining why curation is "
+            "warranted. Optionally override the mining adapter with `source`. "
+            "Gated by Policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Registered dataset name.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": (
+                        "Optional adapter override: 'flagged traces', "
+                        "'language router', 'failed lookups'. Defaults to "
+                        "the dataset's own source."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "Why you think curation is needed (1-2 sentences).",
+                },
+            },
+            "required": ["name"],
+        },
+    },
 ]
 
 
@@ -193,6 +246,8 @@ HANDLERS = {
     "list_available_epochs": lib.list_available_epochs,
     "router_health_check": lib.router_health_check,
     "propose_router_retrain": lib.propose_router_retrain,
+    "dataset_health_check": lib.dataset_health_check,
+    "propose_dataset_curation": lib.propose_dataset_curation,
 }
 
 
