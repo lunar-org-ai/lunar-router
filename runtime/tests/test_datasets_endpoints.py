@@ -324,6 +324,40 @@ def test_put_no_fields_returns_400(client, tmp_datasets):
 
 
 # ---------------------------------------------------------------------------
+# GET /datasets/{name}/export
+# ---------------------------------------------------------------------------
+
+
+def test_export_streams_ndjson(client, tmp_datasets):
+    """Export returns one NDJSON line per sample with full payload (no truncation)."""
+    _seed_goldens(tmp_datasets, n_samples=3)
+    res = client.get("/datasets/goldens/export")
+    assert res.status_code == 200
+    assert "ndjson" in res.headers["content-type"]
+    assert "goldens.jsonl" in res.headers["content-disposition"]
+    lines = [l for l in res.text.strip().split("\n") if l]
+    assert len(lines) == 3
+    first = json.loads(lines[0])
+    # Full payload — no preview truncation, embeddings included
+    assert first["prompt"] == "prompt 0"
+    assert "embedding" in first
+    assert isinstance(first["embedding"], list)
+    assert first["embedding"][0] == pytest.approx(0.0)
+
+
+def test_export_404_on_unknown(client, tmp_datasets):
+    res = client.get("/datasets/ghost/export")
+    assert res.status_code == 404
+
+
+def test_export_404_on_soft_deleted(client, tmp_datasets):
+    _seed_goldens(tmp_datasets)
+    client.delete("/datasets/goldens")
+    res = client.get("/datasets/goldens/export")
+    assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # DELETE /datasets/{name}
 # ---------------------------------------------------------------------------
 

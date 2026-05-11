@@ -5,8 +5,11 @@ import {
   ApiError,
   createDataset as apiCreateDataset,
   deleteDataset as apiDeleteDataset,
+  exportDatasetUrl,
   getDataset,
+  getDatasetHealth,
   getDatasets,
+  updateDataset as apiUpdateDataset,
   getReport,
   getRouterCandidates,
   getRouterConfig,
@@ -21,6 +24,8 @@ import {
   runAllSuites,
   runSuite,
   type DatasetDetail,
+  type DatasetHealth,
+  type DatasetUpdateRequest,
   type DatasetView,
   type ReportDetail,
   type ReportSummary,
@@ -2528,7 +2533,9 @@ export const Datasets = () => {
   const [filter, setFilter] = useState<'all' | 'eval' | 'distill' | 'agent' | 'you'>('all');
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [health, setHealth] = useState<Record<string, DatasetHealth>>({});
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
 
@@ -2549,28 +2556,37 @@ export const Datasets = () => {
     };
   }, []);
 
-  // When a card opens, hydrate samples + history from the detail endpoint.
+  const hydrateOpen = useCallback(
+    (name: string) => {
+      getDataset(name)
+        .then((detail) => {
+          setDatasets((ds) =>
+            ds.map((d) =>
+              d.id === name
+                ? _toUiDataset(detail, _toUiSamples(detail), detail.history)
+                : d,
+            ),
+          );
+        })
+        .catch(() => {
+          // keep current samples in place
+        });
+      getDatasetHealth(name)
+        .then((h) => {
+          setHealth((prev) => ({ ...prev, [name]: h }));
+        })
+        .catch(() => {
+          // health is best-effort; silent fail keeps the UI usable
+        });
+    },
+    [],
+  );
+
+  // When a card opens, hydrate samples + history + health.
   useEffect(() => {
     if (!openId) return;
-    let cancelled = false;
-    getDataset(openId)
-      .then((detail) => {
-        if (cancelled) return;
-        setDatasets((ds) =>
-          ds.map((d) =>
-            d.id === openId
-              ? { ..._toUiDataset(detail, _toUiSamples(detail), detail.history), }
-              : d,
-          ),
-        );
-      })
-      .catch(() => {
-        // leave existing (mock) samples in place
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [openId]);
+    hydrateOpen(openId);
+  }, [openId, hydrateOpen]);
 
   const filtered = datasets.filter((d) => {
     if (filter === 'eval' && !d.use.includes('Eval')) return false;
@@ -2616,6 +2632,50 @@ export const Datasets = () => {
       .catch((e: unknown) => {
         const msg = e instanceof ApiError ? e.message : String(e);
         setToast(`Couldn't delete "${d.name}": ${msg.slice(0, 120)}`);
+      });
+  };
+
+  const handleEdit = (id: string, body: DatasetUpdateRequest) => {
+    apiUpdateDataset(id, body)
+      .then((updated) => {
+        setDatasets((ds) =>
+          ds.map((d) =>
+            d.id === id
+              ? _toUiDataset(updated, d.samples, d.history)
+              : d,
+          ),
+        );
+        setEditingId(null);
+        setToast(`Saved changes to "${updated.name}".`);
+        hydrateOpen(id);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't save: ${msg.slice(0, 120)}`);
+      });
+  };
+
+  const exportDataset = (id: string) => {
+    const url = exportDatasetUrl(id);
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `${id}.jsonl`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+        setToast(`Exported "${id}.jsonl".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setToast(`Couldn't export: ${msg.slice(0, 120)}`);
       });
   };
 
@@ -2718,12 +2778,26 @@ export const Datasets = () => {
       {open && (
         <DatasetDrawer
           dataset={open}
+          health={health[open.id]}
           onClose={() => setOpenId(null)}
           onDelete={() => deleteDataset(open.id)}
+          onEdit={() => setEditingId(open.id)}
+          onRefresh={() => {
+            hydrateOpen(open.id);
+            setToast('Refreshing samples…');
+          }}
+          onExport={() => exportDataset(open.id)}
           onToast={setToast}
         />
       )}
       {creating && <NewDatasetModal onCreate={handleCreate} onClose={() => setCreating(false)} />}
+      {editingId && datasets.find((d) => d.id === editingId) && (
+        <EditDatasetModal
+          dataset={datasets.find((d) => d.id === editingId)!}
+          onSave={(body) => handleEdit(editingId, body)}
+          onClose={() => setEditingId(null)}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -2731,17 +2805,26 @@ export const Datasets = () => {
 
 const DatasetDrawer = ({
   dataset,
+  health,
   onClose,
   onDelete,
+  onEdit,
+  onRefresh,
+  onExport,
   onToast,
 }: {
   dataset: Dataset;
+  health?: DatasetHealth;
   onClose: () => void;
   onDelete: () => void;
+  onEdit: () => void;
+  onRefresh: () => void;
+  onExport: () => void;
   onToast: (s: string) => void;
 }) => {
   const [tab, setTab] = useState<'samples' | 'source' | 'history'>('samples');
   useEscape(onClose);
+  void onToast;
 
   return (
     <>
@@ -2814,6 +2897,24 @@ const DatasetDrawer = ({
               <div className="meta-row"><div className="dim">Source query</div><div className="mono">{dataset.source}</div></div>
               <div className="meta-row"><div className="dim">Status</div><div>{dataset.growing ? 'Growing — adds new matches as they appear' : 'Static — manually curated'}</div></div>
               <div className="meta-row"><div className="dim">Cadence</div><div>{dataset.sourceType === 'auto' ? 'Hourly' : 'On demand'}</div></div>
+              {health && Object.keys(health.cluster_distribution).length > 0 && (
+                <div className="meta-row">
+                  <div className="dim">Cluster coverage</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {Object.entries(health.cluster_distribution)
+                      .sort(([a], [b]) => Number(a) - Number(b))
+                      .map(([cid, count]) => (
+                        <Tag key={cid}>c{cid}: {count}</Tag>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {health && health.coverage_gap_score !== null && (
+                <div className="meta-row">
+                  <div className="dim">Coverage gap</div>
+                  <div className="mono">{(health.coverage_gap_score * 100).toFixed(0)}%</div>
+                </div>
+              )}
             </div>
           )}
           {tab === 'history' && (
@@ -2839,10 +2940,11 @@ const DatasetDrawer = ({
         </div>
 
         <div className="sheet-foot">
-          <button className="btn sm" onClick={() => onToast('Export started — check your downloads.')}>
+          <button className="btn sm" onClick={onExport}>
             <Icon name="arrowDown" size={11} /> Export JSONL
           </button>
-          <button className="btn sm ghost" onClick={() => onToast('Refreshing samples…')}>Refresh</button>
+          <button className="btn sm ghost" onClick={onRefresh}>Refresh</button>
+          <button className="btn sm ghost" onClick={onEdit}>Edit</button>
           <button
             className="btn sm ghost"
             style={{ marginLeft: 'auto', color: 'var(--bad-fg)' }}
@@ -2851,6 +2953,118 @@ const DatasetDrawer = ({
             Delete
           </button>
         </div>
+      </div>
+    </>
+  );
+};
+
+const EditDatasetModal = ({
+  dataset,
+  onSave,
+  onClose,
+}: {
+  dataset: Dataset;
+  onSave: (body: DatasetUpdateRequest) => void;
+  onClose: () => void;
+}) => {
+  const [desc, setDesc] = useState(dataset.desc);
+  const [use, setUse] = useState<{ Eval: boolean; Distill: boolean }>({
+    Eval: dataset.use.includes('Eval'),
+    Distill: dataset.use.includes('Distill'),
+  });
+  const [growing, setGrowing] = useState(dataset.growing);
+  useEscape(onClose);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const usedFor = (Object.keys(use) as (keyof typeof use)[]).filter((k) => use[k]);
+    if (usedFor.length === 0) return;
+    const body: DatasetUpdateRequest = {};
+    if (desc !== dataset.desc) body.desc = desc;
+    if (JSON.stringify(usedFor) !== JSON.stringify(dataset.use)) body.use = usedFor;
+    if (growing !== dataset.growing) body.growing = growing;
+    onSave(body);
+  };
+
+  const hasChanges =
+    desc !== dataset.desc ||
+    JSON.stringify((Object.keys(use) as (keyof typeof use)[]).filter((k) => use[k])) !==
+      JSON.stringify(dataset.use) ||
+    growing !== dataset.growing;
+
+  return (
+    <>
+      <div className="sheet-backdrop" onClick={onClose} />
+      <div className="modal" style={{ width: 520 }}>
+        <form onSubmit={submit}>
+          <div className="modal-head">
+            <h2>Edit dataset</h2>
+            <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+          </div>
+          <div className="modal-body">
+            <div className="field">
+              <label>Name</label>
+              <input value={dataset.name} disabled />
+            </div>
+            <div className="field">
+              <label>Description</label>
+              <textarea
+                autoFocus
+                value={desc}
+                onChange={(e) => setDesc(e.target.value)}
+                rows={2}
+              />
+            </div>
+            <div className="field">
+              <label>Used for</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className={`pill ${use.Eval ? 'on' : ''}`}
+                  onClick={() => setUse((u) => ({ ...u, Eval: !u.Eval }))}
+                >
+                  Eval
+                </button>
+                <button
+                  type="button"
+                  className={`pill ${use.Distill ? 'on' : ''}`}
+                  onClick={() => setUse((u) => ({ ...u, Distill: !u.Distill }))}
+                >
+                  Distill
+                </button>
+              </div>
+            </div>
+            <div className="field">
+              <label>Status</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className={`pill ${growing ? 'on' : ''}`}
+                  onClick={() => setGrowing(true)}
+                >
+                  Growing
+                </button>
+                <button
+                  type="button"
+                  className={`pill ${!growing ? 'on' : ''}`}
+                  onClick={() => setGrowing(false)}
+                >
+                  Static
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn sm ghost" onClick={onClose}>Cancel</button>
+            <button
+              type="submit"
+              className="btn sm"
+              disabled={!hasChanges || (!use.Eval && !use.Distill)}
+            >
+              Save changes
+            </button>
+          </div>
+        </form>
       </div>
     </>
   );
