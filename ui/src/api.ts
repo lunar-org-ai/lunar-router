@@ -270,6 +270,44 @@ export async function getTrace(id: string): Promise<TraceDetail> {
   return (await res.json()) as TraceDetail;
 }
 
+// P16.2 — CSAT signal.
+export interface TraceFeedbackEntry {
+  trace_id: string;
+  score: number;
+  comment: string | null;
+  at: string;
+}
+
+export interface TraceFeedbackResponse extends TraceFeedbackEntry {
+  n_total: number;
+}
+
+export async function submitTraceFeedback(
+  trace_id: string,
+  score: number,
+  comment?: string,
+): Promise<TraceFeedbackResponse> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(trace_id)}/feedback`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score, comment: comment || null }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceFeedbackResponse;
+}
+
+export async function listTraceFeedback(trace_id: string): Promise<TraceFeedbackEntry[]> {
+  const res = await fetch(`/v1/traces/${encodeURIComponent(trace_id)}/feedback`);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as TraceFeedbackEntry[];
+}
+
 export interface LiveTraceEvent {
   trace_id: string;
   timestamp: string;

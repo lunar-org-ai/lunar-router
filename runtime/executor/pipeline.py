@@ -39,6 +39,12 @@ class ExecutionRecord:
     Persists `history` so the UI can render the full conversation thread
     instead of just the single turn — every prior turn the caller passed
     in via /run becomes part of the trace's transcript.
+
+    `tokens_in` / `tokens_out` / `cost_usd` are populated by
+    ``runtime.cost.estimate_cost`` against the selected `routing_model`.
+    With stubs these are char-based estimates; with real LLM (P1.9)
+    they become the SDK's actual usage numbers — same fields, no
+    schema migration.
     """
 
     request: str
@@ -51,6 +57,9 @@ class ExecutionRecord:
     metadata: dict[str, Any] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     session_id: Optional[str] = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    cost_usd: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -110,6 +119,19 @@ class PipelineExecutor:
                 break
 
         total_ms = round((time.perf_counter() - total_start) * 1000, 3)
+
+        # Cost estimation — uses the routing_model from the route stage when
+        # set, falls back to default. Char-based until P1.9 swaps for real
+        # usage numbers from the Anthropic SDK.
+        from runtime.cost import estimate_cost
+        chosen_model = next(
+            (r.routing_model for r in records if r.routing_model is not None),
+            None,
+        )
+        tokens_in, tokens_out, cost_usd = estimate_cost(
+            request, ctx.response, model=chosen_model
+        )
+
         record = ExecutionRecord(
             request=request,
             response=ctx.response,
@@ -120,5 +142,8 @@ class PipelineExecutor:
             agent_version=self.pipeline.config.version,
             history=history_serialized,
             session_id=session_id,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
         )
         return ctx, record

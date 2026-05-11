@@ -596,6 +596,13 @@ async def metrics_overview() -> MetricsOverview:
     lessons = read_lessons()
     pending = sum(1 for l in lessons if l.status in ("pending", "awaiting_review"))
 
+    # P16.2 — real cost & CSAT signals.
+    # avg_cost_usd: char-based estimate via runtime.cost (auto-swap to
+    #   real Anthropic SDK usage when P1.9 lands; same fields).
+    # csat: aggregate of POST /traces/{id}/feedback rows.
+    from runtime.store import feedback as feedback_store
+    csat_value = feedback_store.csat_for_window(window_days=7)
+
     return MetricsOverview(
         today_count=trace_metrics["today_count"],
         active_5min=trace_metrics["active_5min"],
@@ -605,8 +612,8 @@ async def metrics_overview() -> MetricsOverview:
         trust_history_30d=history,
         resolution_rate=trace_metrics["resolution_rate"],
         avg_latency_ms=trace_metrics["avg_latency_ms"],
-        avg_cost_usd=None,
-        csat=None,
+        avg_cost_usd=trace_metrics.get("avg_cost_usd"),
+        csat=csat_value,
         computed_at=now.isoformat(),
     )
 
@@ -745,6 +752,10 @@ class TraceSummary(BaseModel):
     routing_model: Optional[str] = None  # picked off the route stage
     session_id: Optional[str] = None
     n_turns: int = 1  # history length + this turn
+    # P16.2 — cost telemetry. Optional because pre-P16.2 traces lack these.
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    cost_usd: Optional[float] = None
 
 
 class TracesPage(BaseModel):
@@ -865,6 +876,77 @@ async def get_trace(trace_id: str) -> TraceDetail:
         metadata=detail.get("metadata") or {},
         history=history,
     )
+
+
+# ---------- trace feedback (P16.2 — CSAT signal) ----------
+
+
+class TraceFeedbackRequest(BaseModel):
+    score: int  # 1..5
+    comment: Optional[str] = None
+
+
+class TraceFeedbackEntry(BaseModel):
+    trace_id: str
+    score: int
+    comment: Optional[str] = None
+    at: str
+
+
+class TraceFeedbackResponse(BaseModel):
+    trace_id: str
+    score: int
+    comment: Optional[str] = None
+    at: str
+    n_total: int  # total feedback rows for this trace after writing
+
+
+@app.post(
+    "/traces/{trace_id}/feedback",
+    response_model=TraceFeedbackResponse,
+    status_code=201,
+)
+async def post_trace_feedback(
+    trace_id: str,
+    req: TraceFeedbackRequest,
+) -> TraceFeedbackResponse:
+    """Append a CSAT row for `trace_id`. 1-5 score; comment optional.
+
+    Backed by `traces/feedback/<date>.jsonl` (P16.2). Aggregated by
+    `runtime.store.feedback.csat_for_window` and exposed via
+    `/metrics/overview.csat`. Side-table by design — trace JSONL files
+    aren't rewritten.
+
+    404 when the trace doesn't exist (so the UI can't silently spam
+    feedback rows for ghost IDs).
+    """
+    from runtime.store import feedback as feedback_store
+
+    trace = traces_store.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+    try:
+        row = feedback_store.write_feedback(
+            trace_id, score=req.score, comment=req.comment
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    n_total = len(feedback_store.list_feedback_for_trace(trace_id))
+    return TraceFeedbackResponse(**row, n_total=n_total)
+
+
+@app.get(
+    "/traces/{trace_id}/feedback",
+    response_model=list[TraceFeedbackEntry],
+)
+async def list_trace_feedback(trace_id: str) -> list[TraceFeedbackEntry]:
+    """All feedback rows for one trace (most recent last)."""
+    from runtime.store import feedback as feedback_store
+
+    rows = feedback_store.list_feedback_for_trace(trace_id)
+    return [TraceFeedbackEntry(**r) for r in rows]
 
 
 # ---------- sessions (multi-turn conversations grouped by session_id) ----------
