@@ -756,6 +756,10 @@ class TraceSummary(BaseModel):
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
     cost_usd: Optional[float] = None
+    # P16.3 — flag state. Resolved against traces/flagged/<date>.jsonl
+    # side-table at response time. False when no flag row exists (or
+    # the latest row is an unflag).
+    flagged: bool = False
 
 
 class TracesPage(BaseModel):
@@ -815,11 +819,21 @@ async def list_traces(
         offset=offset,
     )
 
+    # P16.3 — stamp flag state. One side-table read per list request;
+    # cheap compared to refetching per-row.
+    from runtime.store import flags as flags_store
+    flagged_set = flags_store.flagged_trace_ids()
+    rows: list[TraceSummary] = []
+    for i in items:
+        i = dict(i)
+        i["flagged"] = i["trace_id"] in flagged_set
+        rows.append(TraceSummary(**i))
+
     return TracesPage(
         date=chosen_date,
         available_dates=available,
         total_filtered=total,
-        items=[TraceSummary(**i) for i in items],
+        items=rows,
         has_more=offset + limit < total,
     )
 
@@ -870,12 +884,108 @@ async def get_trace(trace_id: str) -> TraceDetail:
     stages = [TraceStageView(**s) for s in detail.get("stages", [])]
     history = [HistoryTurn(**h) for h in detail.get("history", [])]
     summary = {k: v for k, v in detail.items() if k not in ("stages", "history", "metadata")}
+    # P16.3 — stamp flag state.
+    from runtime.store import flags as flags_store
+    summary["flagged"] = flags_store.is_flagged(trace_id)
     return TraceDetail(
         **summary,
         stages=stages,
         metadata=detail.get("metadata") or {},
         history=history,
     )
+
+
+# ---------- trace flag (P16.3 — operator + auto-flag) ----------
+
+
+class TraceFlagRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class TraceFlagEntry(BaseModel):
+    trace_id: str
+    reason: Optional[str] = None
+    source: str  # "manual" | "csat_low" | "latency_outlier" | "error" | "unflag"
+    at: str
+
+
+class TraceFlagResponse(BaseModel):
+    trace_id: str
+    flagged: bool
+    last_row: TraceFlagEntry
+
+
+@app.post(
+    "/traces/{trace_id}/flag",
+    response_model=TraceFlagResponse,
+    status_code=201,
+)
+async def post_trace_flag(
+    trace_id: str,
+    req: TraceFlagRequest,
+) -> TraceFlagResponse:
+    """Mark a trace as flagged (manual operator action).
+
+    Side-table at `traces/flagged/<date>.jsonl`. Multiple flag rows per
+    trace are kept; the latest row wins for "is flagged?" queries.
+    404 when the trace doesn't exist.
+    """
+    from runtime.store import flags as flags_store
+
+    trace = traces_store.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+    row = flags_store.write_flag(
+        trace_id, reason=req.reason, source="manual"
+    )
+    return TraceFlagResponse(
+        trace_id=trace_id,
+        flagged=True,
+        last_row=TraceFlagEntry(**row),
+    )
+
+
+@app.delete(
+    "/traces/{trace_id}/flag",
+    response_model=TraceFlagResponse,
+    status_code=200,
+)
+async def delete_trace_flag(trace_id: str) -> TraceFlagResponse:
+    """Clear the flag on a trace. Appends an `unflag` row (history preserved).
+
+    Idempotent — unflagging an unflagged trace just appends another
+    unflag row.
+    """
+    from runtime.store import flags as flags_store
+
+    trace = traces_store.get_trace(trace_id)
+    if not trace:
+        raise HTTPException(status_code=404, detail=f"trace {trace_id!r} not found")
+
+    row = flags_store.write_flag(trace_id, source="unflag")
+    return TraceFlagResponse(
+        trace_id=trace_id,
+        flagged=False,
+        last_row=TraceFlagEntry(**row),
+    )
+
+
+@app.get(
+    "/traces/{trace_id}/flag",
+    response_model=list[TraceFlagEntry],
+)
+async def list_trace_flag(trace_id: str) -> list[TraceFlagEntry]:
+    """All flag rows for one trace (chronological).
+
+    Operators see this in the Trace drawer's "Flag history" panel.
+    The aggregate "is flagged?" is also surfaced as the boolean
+    `flagged` field on every TraceSummary so the list-view filter pill
+    works without per-row round-trips.
+    """
+    from runtime.store import flags as flags_store
+    rows = flags_store.list_flag_rows_for_trace(trace_id)
+    return [TraceFlagEntry(**r) for r in rows]
 
 
 # ---------- trace feedback (P16.2 — CSAT signal) ----------
@@ -933,8 +1043,29 @@ async def post_trace_feedback(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # P16.3 — auto-flag rule. Low CSAT (≤ 2) is a strong signal that the
+    # trace deserves human review. We write an auto-flag row so the
+    # "Flagged" filter pill catches it and the feedback_signals mining
+    # adapter can pick it up later.
+    if req.score <= _AUTO_FLAG_CSAT_THRESHOLD:
+        from runtime.store import flags as flags_store
+        # Idempotent: only auto-flag if the trace isn't already flagged.
+        # Avoids writing a duplicate auto-flag row when the operator
+        # corrects an earlier rating.
+        if not flags_store.is_flagged(trace_id):
+            flags_store.write_flag(
+                trace_id,
+                reason=f"CSAT score {req.score}/5 (auto-flag)",
+                source="csat_low",
+            )
+
     n_total = len(feedback_store.list_feedback_for_trace(trace_id))
     return TraceFeedbackResponse(**row, n_total=n_total)
+
+
+# P16.3 — auto-flag rule threshold. Scores at or below this fire an
+# automatic flag with source="csat_low".
+_AUTO_FLAG_CSAT_THRESHOLD = 2
 
 
 @app.get(

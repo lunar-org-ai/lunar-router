@@ -105,6 +105,85 @@ tracesRouter.get('/:id', traceLikeProxy((id) => `/traces/${encodeURIComponent(id
 tracesRouter.get('/:id/feedback',
   traceLikeProxy((id) => `/traces/${encodeURIComponent(id)}/feedback`))
 
+// P16.3 — flag side-table (persistent operator marks + auto-flag rule).
+tracesRouter.get('/:id/flag',
+  traceLikeProxy((id) => `/traces/${encodeURIComponent(id)}/flag`))
+
+tracesRouter.post('/:id/flag', async (c) => {
+  const id = c.req.param('id') ?? ''
+  let body: unknown = {}
+  try {
+    body = await c.req.json()
+  } catch {
+    body = {}
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(
+      `${RUNTIME_URL}/traces/${encodeURIComponent(id)}/flag`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      },
+    )
+    if (res.status === 400 || res.status === 404 || res.status === 422) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, res.status as 400 | 404 | 422)
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data, res.status as 200 | 201)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
+tracesRouter.delete('/:id/flag', async (c) => {
+  const id = c.req.param('id') ?? ''
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  try {
+    const res = await fetch(
+      `${RUNTIME_URL}/traces/${encodeURIComponent(id)}/flag`,
+      { method: 'DELETE', signal: controller.signal },
+    )
+    if (res.status === 404) {
+      const data = await res.json().catch(() => ({}))
+      return c.json(data, 404)
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      return c.json(
+        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
+        502,
+      )
+    }
+    const data = await res.json()
+    return c.json(data)
+  } catch (e) {
+    return c.json(
+      { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
+      502,
+    )
+  } finally {
+    clearTimeout(timer)
+  }
+})
+
 tracesRouter.post('/:id/feedback', async (c) => {
   const id = c.req.param('id') ?? ''
   let body: unknown = {}
