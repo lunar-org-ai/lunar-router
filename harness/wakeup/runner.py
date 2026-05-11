@@ -31,13 +31,14 @@ logger = logging.getLogger("harness.wakeup.runner")
 
 @dataclass
 class WakeupOutcome:
-    action: str               # "proposed" | "skipped" | "blocked"
+    action: str               # "proposed" | "skipped" | "blocked" | "rolled_back"
     rationale: str
     lesson_id: Optional[str] = None
-    target: Optional[str] = None  # "router" | "dataset" | None
+    target: Optional[str] = None  # "router" | "dataset" | "auto_rollback" | None
     reason: Optional[str] = None
     health_snapshot: dict[str, Any] = field(default_factory=dict)
     timestamp: str = ""
+    rollback_metadata: Optional[dict[str, Any]] = None  # P16.4 — populated when action="rolled_back"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +49,7 @@ class WakeupOutcome:
             "reason": self.reason,
             "health_snapshot": self.health_snapshot,
             "timestamp": self.timestamp,
+            "rollback_metadata": self.rollback_metadata,
         }
 
 
@@ -69,6 +71,14 @@ def run_wakeup(
         "router": router_health,
         "datasets": dataset_health,
     }
+
+    # P16.4 — Auto-rollback watcher. Runs BEFORE the brain transport
+    # check because rollback is a safety mechanism that doesn't need
+    # an LLM: a deterministic ledger + metric query is enough.
+    rollback_outcome = _maybe_auto_rollback(health_snapshot)
+    if rollback_outcome is not None:
+        _persist(rollback_outcome)
+        return rollback_outcome
 
     # Detect "no brain" up front so the operator gets a clear artifact
     # rather than a wake-up that silently fails.
@@ -133,6 +143,124 @@ def run_wakeup(
 
     _persist(outcome)
     return outcome
+
+
+def _maybe_auto_rollback(health_snapshot: dict[str, Any]) -> Optional[WakeupOutcome]:
+    """P16.4 — run the auto-rollback watcher; execute rollback if triggered.
+
+    Returns a populated WakeupOutcome when a rollback fires (caller
+    persists + returns it). Returns None when nothing to do — the
+    wake-up continues with the normal proposer flow.
+
+    Errors are logged + swallowed: a watcher crash must NEVER block
+    the brain from running. Safety must be additive, not subtractive.
+    """
+    try:
+        from harness.approver.policy import Policy
+        from harness.watchers.auto_rollback import check_auto_rollback
+
+        policy = Policy.from_yaml()
+        decision = check_auto_rollback(policy=policy)
+    except Exception as e:
+        logger.warning("auto-rollback check failed: %s", e)
+        return None
+
+    if decision is None:
+        return None
+
+    # We have a rollback decision. Execute + notify.
+    try:
+        from harness.rollback.rollback import rollback_to
+        from runtime.store.notifications import notify_channels
+
+        actual_version = rollback_to(
+            decision.target_version,
+            reason=f"auto-rollback: {decision.reason}",
+        )
+
+        # Write a Lesson so Evolution surfaces this alongside promotions.
+        lesson = _write_auto_rollback_lesson(decision, actual_version)
+
+        # Notify each configured channel (persisted as audit; real
+        # delivery is out of scope).
+        if policy.auto_rollback.notify_channels:
+            notify_channels(
+                list(policy.auto_rollback.notify_channels),
+                subject=f"Auto-rollback: {decision.suspect_version} → {actual_version}",
+                body=decision.reason,
+                kind="auto_rollback",
+                lesson_id=lesson.id,
+            )
+
+        return WakeupOutcome(
+            action="rolled_back",
+            rationale=decision.reason,
+            lesson_id=lesson.id,
+            target="auto_rollback",
+            health_snapshot=health_snapshot,
+            timestamp=_now_iso(),
+            rollback_metadata={
+                "from_version": decision.suspect_version,
+                "to_version": actual_version,
+                "promote_entry_id": decision.promote_entry_id,
+                "csat_before": decision.before.csat,
+                "csat_after": decision.after.csat,
+                "resolution_before": decision.before.resolution_rate,
+                "resolution_after": decision.after.resolution_rate,
+            },
+        )
+    except Exception as e:
+        logger.exception("auto-rollback execution failed: %s", e)
+        return WakeupOutcome(
+            action="blocked",
+            rationale=f"auto-rollback execution failed: {type(e).__name__}: {e}",
+            reason="auto_rollback_failed",
+            health_snapshot=health_snapshot,
+            timestamp=_now_iso(),
+        )
+
+
+def _write_auto_rollback_lesson(decision, actual_version: str):
+    """Surface the auto-rollback in Evolution with kind='rollback'."""
+    from datetime import datetime, timezone
+    import secrets
+
+    from ledger.types import Lesson
+    from ledger.writer import write_lesson
+
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=actual_version,
+        kind="rollback",
+        status="rolled_back",
+        title=f"Auto-rollback {decision.suspect_version} → {actual_version}",
+        summary=decision.reason,
+        proposal_source="auto",
+        delta={
+            "csat_before": float(decision.before.csat or 0.0),
+            "csat_after": float(decision.after.csat or 0.0),
+            "resolution_before": float(decision.before.resolution_rate or 0.0),
+            "resolution_after": float(decision.after.resolution_rate or 0.0),
+        },
+        mutations=[f"rollback:{decision.suspect_version} -> {actual_version}"],
+        parent_version=decision.suspect_version,
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id="",  # rollback_to() wrote its own entry already
+        voice=(
+            f"I rolled back to {actual_version} on my own — production "
+            f"metrics regressed after the last promotion."
+        ),
+    )
+    write_lesson(lesson)
+    return lesson
 
 
 def _safe_dataset_health() -> dict[str, Any]:
