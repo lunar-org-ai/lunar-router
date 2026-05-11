@@ -505,6 +505,74 @@ def record_manual_router_change(
     return lesson
 
 
+def record_manual_dataset_change(
+    *,
+    name: str,
+    new_version: int,
+    summary: str,
+    apply_edit: Any,
+    voice: Optional[str] = None,
+) -> Lesson:
+    """Manual operator edit of a dataset — AHE-aligned variant for P15.4.
+
+    Mirrors ``record_manual_router_change`` but specialized for datasets:
+      - **No agent_dir snapshot** (datasets live outside the agent's
+        editable surface; only ``datasets/<name>/v<n>.json`` changes).
+      - **No agent.yaml version bump** (datasets have their own version
+        chain baked into the artifact).
+      - Caller passes ``apply_edit`` which performs the actual
+        ``save_dataset(payload)`` write — same shape as
+        ``record_manual_change``.
+
+    P15.4.2's POST/PUT ``/v1/datasets`` calls this so manual create/edit
+    surfaces in Evolution as ``Lesson(kind="dataset",
+    proposal_source="human")``.
+    """
+    apply_edit()
+    parent_version = max(0, new_version - 1)
+
+    promoted_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+
+    mutations_desc = [f"datasets/{name}/v{new_version}.json"]
+    entry = write_entry(
+        kind="promote",
+        summary=f"manual dataset edit: {summary}",
+        payload={
+            "source": "human",
+            "kind": "dataset",
+            "name": name,
+            "mutations": mutations_desc,
+        },
+    )
+
+    lesson_id = (
+        f"L-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+    )
+    lesson = Lesson(
+        id=lesson_id,
+        version=str(new_version),
+        kind="dataset",
+        status="approved",
+        title=summary,
+        summary=(
+            f"Manual operator edit of dataset {name!r} (v{parent_version} → v{new_version}). "
+            "No eval ran — applied directly to the live surface."
+        ),
+        proposal_source="human",
+        delta={},
+        mutations=mutations_desc,
+        parent_version=str(parent_version),
+        candidate_id="",
+        promoted_at=promoted_at,
+        ledger_entry_id=entry.entry_id,
+        voice=voice or f"I edited the '{name}' dataset directly.",
+    )
+    write_lesson(lesson)
+    return lesson
+
+
 def reject_queued(lesson_id: str, *, reason: Optional[str] = None) -> Lesson:
     """Mark a queued review lesson as human_rejected; no live agent change."""
     lesson = read_lesson(lesson_id)

@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { apiKeyAuth } from '../auth/api_key'
 import { agentRouter } from '../channels/agent/handler'
+import { datasetRouter } from '../channels/dataset/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
 import { lessonsRouter } from '../channels/lessons/handler'
@@ -40,6 +41,7 @@ app.route('/v1/traces', tracesRouter)
 app.route('/v1/sessions', sessionsRouter)
 app.route('/v1/evals', evalsRouter)
 app.route('/v1/router', routerRouter)
+app.route('/v1/datasets', datasetRouter)
 
 // Convention: 8001 = python runtime, 8002 = ts backend.
 const port = Number(process.env.PORT ?? 8002)

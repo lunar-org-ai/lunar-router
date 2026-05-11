@@ -756,3 +756,120 @@ export const getRouterRules = () => _getJson<RouterRuleApi[]>('/v1/router/rules'
 export const getRouterCandidates = () =>
   _getJson<RouterCandidateView[]>('/v1/router/candidates');
 export const getRouterHealth = () => _getJson<RouterHealthView>('/v1/router/health');
+
+// ===========================================================================
+// P15.4.2 — Datasets
+// ===========================================================================
+
+export interface DatasetView {
+  id: string;
+  name: string;
+  desc: string;
+  size: number;
+  source: string;
+  sourceType: 'auto' | 'manual';
+  fresh: string;
+  use: string[];
+  owner: 'agent' | 'human';
+  growing: boolean;
+}
+
+export interface DatasetSampleView {
+  id: string;
+  preview: string;
+  tag: string | null;
+}
+
+export interface DatasetHistoryEntry {
+  when: string;
+  what: string;
+}
+
+export interface DatasetDetail extends DatasetView {
+  samples: DatasetSampleView[];
+  history: DatasetHistoryEntry[];
+}
+
+export interface DatasetHealth {
+  name: string;
+  size: number;
+  cluster_distribution: Record<string, number>;
+  coverage_gap_score: number | null;
+  last_curation_at: string | null;
+}
+
+export interface DatasetCreateRequest {
+  name: string;
+  desc?: string;
+  source?: string;
+  sourceType?: 'auto' | 'manual';
+  use?: string[];
+  owner?: 'agent' | 'human';
+  growing?: boolean;
+}
+
+export interface DatasetUpdateRequest {
+  desc?: string;
+  use?: string[];
+  growing?: boolean;
+}
+
+export interface DatasetListFilters {
+  use?: string;
+  owner?: 'agent' | 'human';
+  sourceType?: 'auto' | 'manual';
+}
+
+export async function getDatasets(filters: DatasetListFilters = {}): Promise<DatasetView[]> {
+  const params = new URLSearchParams();
+  if (filters.use) params.set('use', filters.use);
+  if (filters.owner) params.set('owner', filters.owner);
+  if (filters.sourceType) params.set('sourceType', filters.sourceType);
+  const qs = params.toString();
+  return _getJson<DatasetView[]>(qs ? `/v1/datasets?${qs}` : '/v1/datasets');
+}
+
+export const getDataset = (name: string) =>
+  _getJson<DatasetDetail>(`/v1/datasets/${encodeURIComponent(name)}`);
+
+export const getDatasetHealth = (name: string) =>
+  _getJson<DatasetHealth>(`/v1/datasets/${encodeURIComponent(name)}/health`);
+
+export async function createDataset(body: DatasetCreateRequest): Promise<DatasetView> {
+  const res = await fetch('/v1/datasets', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as DatasetView;
+}
+
+export async function updateDataset(
+  name: string,
+  body: DatasetUpdateRequest,
+): Promise<DatasetView> {
+  const res = await fetch(`/v1/datasets/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as DatasetView;
+}
+
+export async function deleteDataset(name: string): Promise<void> {
+  const res = await fetch(`/v1/datasets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}

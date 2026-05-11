@@ -3,6 +3,10 @@ import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  createDataset as apiCreateDataset,
+  deleteDataset as apiDeleteDataset,
+  getDataset,
+  getDatasets,
   getReport,
   getRouterCandidates,
   getRouterConfig,
@@ -16,6 +20,8 @@ import {
   listTraces,
   runAllSuites,
   runSuite,
+  type DatasetDetail,
+  type DatasetView,
   type ReportDetail,
   type ReportSummary,
   type RouterCandidateView,
@@ -2497,6 +2503,26 @@ const DATASETS_INITIAL: Dataset[] = [
   },
 ];
 
+// P15.4.2 — project backend types into the existing UI Dataset shape so JSX
+// stays verbatim. Mock falls back on error to preserve the chrome.
+const _toUiDataset = (v: DatasetView, samples: DatasetSample[] = [], history: { when: string; what: string }[] = []): Dataset => ({
+  id: v.id,
+  name: v.name,
+  desc: v.desc,
+  size: v.size,
+  source: v.source,
+  sourceType: v.sourceType,
+  fresh: v.fresh,
+  use: v.use,
+  owner: v.owner,
+  growing: v.growing,
+  samples,
+  history,
+});
+
+const _toUiSamples = (detail: DatasetDetail): DatasetSample[] =>
+  detail.samples.map((s) => ({ id: s.id, preview: s.preview, tag: s.tag ?? '' }));
+
 export const Datasets = () => {
   const [datasets, setDatasets] = useState<Dataset[]>(DATASETS_INITIAL);
   const [filter, setFilter] = useState<'all' | 'eval' | 'distill' | 'agent' | 'you'>('all');
@@ -2505,6 +2531,46 @@ export const Datasets = () => {
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
+
+  // Initial fetch — replace mock with real data; keep mock on any error so the
+  // UI never goes blank (preserve-panel rule from feedback_ui_panels).
+  useEffect(() => {
+    let cancelled = false;
+    getDatasets()
+      .then((rows) => {
+        if (cancelled) return;
+        setDatasets(rows.map((v) => _toUiDataset(v)));
+      })
+      .catch(() => {
+        // keep DATASETS_INITIAL mock
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // When a card opens, hydrate samples + history from the detail endpoint.
+  useEffect(() => {
+    if (!openId) return;
+    let cancelled = false;
+    getDataset(openId)
+      .then((detail) => {
+        if (cancelled) return;
+        setDatasets((ds) =>
+          ds.map((d) =>
+            d.id === openId
+              ? { ..._toUiDataset(detail, _toUiSamples(detail), detail.history), }
+              : d,
+          ),
+        );
+      })
+      .catch(() => {
+        // leave existing (mock) samples in place
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [openId]);
 
   const filtered = datasets.filter((d) => {
     if (filter === 'eval' && !d.use.includes('Eval')) return false;
@@ -2518,31 +2584,39 @@ export const Datasets = () => {
   const open = datasets.find((d) => d.id === openId);
 
   const handleCreate = (data: { name: string; desc: string; source: string; sourceType: 'auto' | 'manual'; use: string[] }) => {
-    const newSet: Dataset = {
-      id: `ds_${Date.now()}`,
+    apiCreateDataset({
       name: data.name,
       desc: data.desc || 'Custom dataset.',
-      size: 0,
       source: data.source,
       sourceType: data.sourceType,
-      fresh: 'just now',
       use: data.use,
       owner: 'human',
       growing: data.sourceType === 'auto',
-      samples: [],
-      history: [{ when: 'just now', what: 'You created this dataset.' }],
-    };
-    setDatasets((ds) => [newSet, ...ds]);
-    setCreating(false);
-    setToast(`Created "${data.name}".`);
+    })
+      .then((created) => {
+        setDatasets((ds) => [_toUiDataset(created), ...ds]);
+        setCreating(false);
+        setToast(`Created "${data.name}".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't create "${data.name}": ${msg.slice(0, 120)}`);
+      });
   };
 
   const deleteDataset = (id: string) => {
     const d = datasets.find((dd) => dd.id === id);
     if (!d) return;
-    setDatasets((ds) => ds.filter((dd) => dd.id !== id));
-    setOpenId(null);
-    setToast(`Deleted "${d.name}".`);
+    apiDeleteDataset(id)
+      .then(() => {
+        setDatasets((ds) => ds.filter((dd) => dd.id !== id));
+        setOpenId(null);
+        setToast(`Deleted "${d.name}".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't delete "${d.name}": ${msg.slice(0, 120)}`);
+      });
   };
 
   const counts = {
