@@ -209,3 +209,66 @@ class PromptDataset:
 
     def __repr__(self) -> str:
         return f"PromptDataset(name='{self.name}', num_samples={len(self)})"
+
+
+# ---------------------------------------------------------------------------
+# P15.4 — Dataset backend types
+# ---------------------------------------------------------------------------
+# Storage-shape datasets used by the P15.4 backend. Richer than PromptSample
+# (carry embedding, tag, trace_id, source provenance). Down-convert to
+# PromptDataset/PromptSample for the trainer + evaluator.
+
+
+@dataclass
+class DatasetSample:
+    """Storage-shape sample for the P15.4 dataset backend."""
+    id: str
+    prompt: str
+    ground_truth: str
+    tag: Optional[str]
+    trace_id: Optional[str]
+    added_at: str
+    source: str
+    embedding: list[float]
+
+    def to_prompt_sample(self) -> PromptSample:
+        return PromptSample(
+            prompt=self.prompt,
+            ground_truth=self.ground_truth,
+            category=self.tag,
+            metadata={"trace_id": self.trace_id, "source": self.source},
+        )
+
+
+@dataclass
+class DatasetMetadata:
+    """Top-level metadata for a versioned dataset."""
+    name: str
+    desc: str
+    source: str
+    sourceType: str
+    use: list[str]
+    owner: str
+    growing: bool
+    embedder_model: str
+    embedding_dim: int
+
+
+@dataclass
+class Dataset:
+    """In-memory representation of a versioned dataset."""
+    metadata: DatasetMetadata
+    version: int
+    samples: list[DatasetSample]
+    history: list[dict]
+    created_at: str
+    extra: dict = field(default_factory=dict)
+
+    def to_prompt_dataset(self) -> PromptDataset:
+        return PromptDataset(
+            [s.to_prompt_sample() for s in self.samples],
+            name=self.metadata.name,
+        )
+
+    def size(self) -> int:
+        return len(self.samples)

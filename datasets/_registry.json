@@ -1,0 +1,18 @@
+{
+  "datasets": {
+    "goldens": {
+      "current_version": 1,
+      "use": [
+        "Eval"
+      ],
+      "owner": "human",
+      "sourceType": "manual",
+      "growing": false,
+      "size": 8,
+      "desc": "Eval suite goldens. Migrated from evals/golden/*.yaml.",
+      "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+      "embedding_dim": 384,
+      "updated_at": "2026-05-11T00:39:49Z"
+    }
+  }
+}

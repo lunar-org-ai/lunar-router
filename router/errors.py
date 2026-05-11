@@ -45,3 +45,11 @@ class NotEnoughDataError(RouterError):
 
 class KMeansFitError(RouterError):
     """KMeans failed to converge or produced degenerate clusters."""
+
+
+class DatasetNotFoundError(RouterError):
+    """No dataset with that name (or no current pointer)."""
+
+
+class DatasetInvalidError(RouterError):
+    """A dataset_<n>.json fails schema validation."""
