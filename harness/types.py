@@ -11,8 +11,16 @@ from experiments.types import Mutation
 def kind_from_mutations(mutations: list[str]) -> str:
     """Map a candidate's mutations to one of the change kinds the policy
     overrides table can target. Used by both the executor (lesson labeling)
-    and the approver (per-kind policy overrides)."""
+    and the approver (per-kind policy overrides).
+
+    P15.3.7: the ``versions/router_config`` check comes BEFORE the legacy
+    ``route`` check — otherwise the substring ``route`` inside
+    ``router_config`` would match the legacy bucket. The legacy
+    ``"router"`` kind still applies to ``pipeline/route.yaml`` knob edits.
+    """
     files = {m.split(":")[0] for m in mutations}
+    if any("versions/router_config" in f for f in files):
+        return "router_config"
     if any("retrieve" in f for f in files):
         return "rag"
     if any("rerank" in f for f in files):

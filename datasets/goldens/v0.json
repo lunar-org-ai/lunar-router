@@ -1,0 +1,21 @@
+{
+  "version": 0,
+  "name": "goldens",
+  "desc": "Schema documentation placeholder. v1 is the first real artifact.",
+  "source": "manual",
+  "sourceType": "manual",
+  "use": [
+    "Eval"
+  ],
+  "owner": "human",
+  "growing": false,
+  "created_at": "1970-01-01T00:00:00Z",
+  "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "samples": [],
+  "history": [],
+  "metadata": {
+    "phase": "P15.4.1",
+    "note": "Schema placeholder. v1 holds the migrated goldens."
+  }
+}

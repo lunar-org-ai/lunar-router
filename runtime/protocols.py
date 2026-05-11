@@ -33,11 +33,19 @@ class Message:
 
 @dataclass
 class RoutingDecision:
-    """Set by the route stage; consumed by generate."""
+    """Set by the route stage; consumed by generate.
+
+    P15.3.8 added the optional ``decision`` field — UniRouteVariant
+    populates it with the full UniRoute decision dict (cluster_id,
+    all_scores, cluster_probabilities, reasoning, fallback_reason, ...).
+    Other variants (small_first, etc.) leave it None. The pipeline
+    propagates whatever's there to StageRecord.routing_decision.
+    """
 
     model: str
     reason: str = ""
     confidence: float = 1.0
+    decision: Optional[dict[str, Any]] = None
 
 
 @dataclass

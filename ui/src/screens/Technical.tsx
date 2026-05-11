@@ -3,7 +3,18 @@ import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  createDataset as apiCreateDataset,
+  deleteDataset as apiDeleteDataset,
+  exportDatasetUrl,
+  getDataset,
+  getDatasetHealth,
+  getDatasets,
+  updateDataset as apiUpdateDataset,
   getReport,
+  getRouterCandidates,
+  getRouterConfig,
+  getRouterHealth,
+  getRouterRules,
   getSession,
   getSuite,
   getTrace,
@@ -12,8 +23,15 @@ import {
   listTraces,
   runAllSuites,
   runSuite,
+  type DatasetDetail,
+  type DatasetHealth,
+  type DatasetUpdateRequest,
+  type DatasetView,
   type ReportDetail,
   type ReportSummary,
+  type RouterCandidateView,
+  type RouterConfigView,
+  type RouterHealthView,
   type SessionDetail,
   type SuiteDetail,
   type SuiteSummary,
@@ -909,6 +927,62 @@ const TraceDrawer = ({
                               <span>response_set {String(s.response_set)}</span>
                             )}
                           </div>
+                          {/* P15.3.10 — UniRoute decision (when present). Renders inside
+                              the existing stage card chrome; no new components. */}
+                          {s.routing_decision && (
+                            <div
+                              style={{
+                                marginTop: 10,
+                                padding: '8px 10px',
+                                background: 'var(--bg-muted, var(--muted, transparent))',
+                                borderRadius: 6,
+                                fontSize: 12,
+                                fontFamily: 'var(--font-mono)',
+                                color: 'var(--foreground)',
+                                lineHeight: 1.5,
+                              }}
+                            >
+                              <div style={{ color: 'var(--muted-foreground)', fontFamily: 'inherit', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 4 }}>
+                                Routing decision
+                              </div>
+                              {(s.routing_decision.cold_start as boolean) ? (
+                                <div>
+                                  fallback ({String(s.routing_decision.fallback_reason ?? '—')})
+                                  <span style={{ color: 'var(--muted-foreground)' }}> → </span>
+                                  {String(s.routing_decision.selected_model ?? '—')}
+                                </div>
+                              ) : (
+                                <>
+                                  <div>
+                                    cluster {String(s.routing_decision.cluster_id ?? '—')}
+                                    <span style={{ color: 'var(--muted-foreground)' }}> · </span>
+                                    err{' '}
+                                    {typeof s.routing_decision.expected_error === 'number'
+                                      ? (s.routing_decision.expected_error as number).toFixed(3)
+                                      : '—'}
+                                    <span style={{ color: 'var(--muted-foreground)' }}> · </span>
+                                    score{' '}
+                                    {typeof s.routing_decision.cost_adjusted_score === 'number'
+                                      ? (s.routing_decision.cost_adjusted_score as number).toFixed(3)
+                                      : '—'}
+                                  </div>
+                                  {s.routing_decision.reasoning && (
+                                    <pre
+                                      style={{
+                                        margin: '6px 0 0',
+                                        whiteSpace: 'pre-wrap',
+                                        fontFamily: 'inherit',
+                                        fontSize: 11.5,
+                                        color: 'var(--muted-foreground)',
+                                      }}
+                                    >
+                                      {String(s.routing_decision.reasoning)}
+                                    </pre>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          )}
                           {failed && (
                             <div
                               style={{
@@ -1881,7 +1955,55 @@ export const RouterConfig = () => {
   const [openId, setOpenId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [routerConfig, setRouterConfig] = useState<RouterConfigView | null>(null);
+  const [routerHealth, setRouterHealth] = useState<RouterHealthView | null>(null);
+  const [routerCandidates, setRouterCandidates] = useState<RouterCandidateView[]>([]);
   useAutoToast(toast, setToast);
+
+  // P15.3.10 — fetch real router data; fall back to mock chrome on backend error
+  // (preserves the design's panel per the "don't strip UI panels" rule).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [rs, cfg, health, cands] = await Promise.all([
+          getRouterRules().catch(() => null),
+          getRouterConfig().catch(() => null),
+          getRouterHealth().catch(() => null),
+          getRouterCandidates().catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (cfg) setRouterConfig(cfg);
+        if (health) setRouterHealth(health);
+        if (cands) setRouterCandidates(cands);
+        if (rs && rs.length > 0) {
+          // Replace the mock rules with the synthesized list. v1 = single
+          // UniRoute default row; non-default mock rows fall away naturally.
+          setRules(
+            rs.map((r) => ({
+              id: r.id,
+              name: r.name,
+              when: r.when,
+              then: r.then,
+              share: r.share,
+              cost: r.cost,
+              auth: r.auth,
+              enabled: r.enabled,
+              isDefault: r.isDefault ?? false,
+              rationale: r.rationale,
+              history: r.history.map((h) => ({ when: h.when, what: h.what })),
+              samples: r.samples,
+            })),
+          );
+        }
+      } catch (e) {
+        if (!(e instanceof ApiError)) console.warn('router data fetch failed', e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filtered = rules.filter((r) => {
     if (filter === 'agent' && r.auth !== 'agent') return false;
@@ -2093,7 +2215,13 @@ export const RouterConfig = () => {
         )}
       </div>
 
-      <button className="add-btn" style={{ marginTop: 16, maxWidth: 320 }} onClick={() => setCreating(true)}>
+      <button
+        className="add-btn"
+        style={{ marginTop: 16, maxWidth: 320, opacity: 0.6, cursor: 'not-allowed' }}
+        onClick={() => setCreating(true)}
+        disabled
+        title="Coming soon — manual routing rules deferred to a future phase. The default UniRoute rule is in effect."
+      >
         + Add routing rule
       </button>
 
@@ -2380,14 +2508,85 @@ const DATASETS_INITIAL: Dataset[] = [
   },
 ];
 
+// P15.4.2 — project backend types into the existing UI Dataset shape so JSX
+// stays verbatim. Mock falls back on error to preserve the chrome.
+const _toUiDataset = (v: DatasetView, samples: DatasetSample[] = [], history: { when: string; what: string }[] = []): Dataset => ({
+  id: v.id,
+  name: v.name,
+  desc: v.desc,
+  size: v.size,
+  source: v.source,
+  sourceType: v.sourceType,
+  fresh: v.fresh,
+  use: v.use,
+  owner: v.owner,
+  growing: v.growing,
+  samples,
+  history,
+});
+
+const _toUiSamples = (detail: DatasetDetail): DatasetSample[] =>
+  detail.samples.map((s) => ({ id: s.id, preview: s.preview, tag: s.tag ?? '' }));
+
 export const Datasets = () => {
   const [datasets, setDatasets] = useState<Dataset[]>(DATASETS_INITIAL);
   const [filter, setFilter] = useState<'all' | 'eval' | 'distill' | 'agent' | 'you'>('all');
   const [search, setSearch] = useState('');
   const [openId, setOpenId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [health, setHealth] = useState<Record<string, DatasetHealth>>({});
   const [toast, setToast] = useState<string | null>(null);
   useAutoToast(toast, setToast);
+
+  // Initial fetch — replace mock with real data; keep mock on any error so the
+  // UI never goes blank (preserve-panel rule from feedback_ui_panels).
+  useEffect(() => {
+    let cancelled = false;
+    getDatasets()
+      .then((rows) => {
+        if (cancelled) return;
+        setDatasets(rows.map((v) => _toUiDataset(v)));
+      })
+      .catch(() => {
+        // keep DATASETS_INITIAL mock
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const hydrateOpen = useCallback(
+    (name: string) => {
+      getDataset(name)
+        .then((detail) => {
+          setDatasets((ds) =>
+            ds.map((d) =>
+              d.id === name
+                ? _toUiDataset(detail, _toUiSamples(detail), detail.history)
+                : d,
+            ),
+          );
+        })
+        .catch(() => {
+          // keep current samples in place
+        });
+      getDatasetHealth(name)
+        .then((h) => {
+          setHealth((prev) => ({ ...prev, [name]: h }));
+        })
+        .catch(() => {
+          // health is best-effort; silent fail keeps the UI usable
+        });
+    },
+    [],
+  );
+
+  // When a card opens, hydrate samples + history + health.
+  useEffect(() => {
+    if (!openId) return;
+    hydrateOpen(openId);
+  }, [openId, hydrateOpen]);
 
   const filtered = datasets.filter((d) => {
     if (filter === 'eval' && !d.use.includes('Eval')) return false;
@@ -2401,31 +2600,83 @@ export const Datasets = () => {
   const open = datasets.find((d) => d.id === openId);
 
   const handleCreate = (data: { name: string; desc: string; source: string; sourceType: 'auto' | 'manual'; use: string[] }) => {
-    const newSet: Dataset = {
-      id: `ds_${Date.now()}`,
+    apiCreateDataset({
       name: data.name,
       desc: data.desc || 'Custom dataset.',
-      size: 0,
       source: data.source,
       sourceType: data.sourceType,
-      fresh: 'just now',
       use: data.use,
       owner: 'human',
       growing: data.sourceType === 'auto',
-      samples: [],
-      history: [{ when: 'just now', what: 'You created this dataset.' }],
-    };
-    setDatasets((ds) => [newSet, ...ds]);
-    setCreating(false);
-    setToast(`Created "${data.name}".`);
+    })
+      .then((created) => {
+        setDatasets((ds) => [_toUiDataset(created), ...ds]);
+        setCreating(false);
+        setToast(`Created "${data.name}".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't create "${data.name}": ${msg.slice(0, 120)}`);
+      });
   };
 
   const deleteDataset = (id: string) => {
     const d = datasets.find((dd) => dd.id === id);
     if (!d) return;
-    setDatasets((ds) => ds.filter((dd) => dd.id !== id));
-    setOpenId(null);
-    setToast(`Deleted "${d.name}".`);
+    apiDeleteDataset(id)
+      .then(() => {
+        setDatasets((ds) => ds.filter((dd) => dd.id !== id));
+        setOpenId(null);
+        setToast(`Deleted "${d.name}".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't delete "${d.name}": ${msg.slice(0, 120)}`);
+      });
+  };
+
+  const handleEdit = (id: string, body: DatasetUpdateRequest) => {
+    apiUpdateDataset(id, body)
+      .then((updated) => {
+        setDatasets((ds) =>
+          ds.map((d) =>
+            d.id === id
+              ? _toUiDataset(updated, d.samples, d.history)
+              : d,
+          ),
+        );
+        setEditingId(null);
+        setToast(`Saved changes to "${updated.name}".`);
+        hydrateOpen(id);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof ApiError ? e.message : String(e);
+        setToast(`Couldn't save: ${msg.slice(0, 120)}`);
+      });
+  };
+
+  const exportDataset = (id: string) => {
+    const url = exportDatasetUrl(id);
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.blob();
+      })
+      .then((blob) => {
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `${id}.jsonl`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+        setToast(`Exported "${id}.jsonl".`);
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setToast(`Couldn't export: ${msg.slice(0, 120)}`);
+      });
   };
 
   const counts = {
@@ -2527,12 +2778,26 @@ export const Datasets = () => {
       {open && (
         <DatasetDrawer
           dataset={open}
+          health={health[open.id]}
           onClose={() => setOpenId(null)}
           onDelete={() => deleteDataset(open.id)}
+          onEdit={() => setEditingId(open.id)}
+          onRefresh={() => {
+            hydrateOpen(open.id);
+            setToast('Refreshing samples…');
+          }}
+          onExport={() => exportDataset(open.id)}
           onToast={setToast}
         />
       )}
       {creating && <NewDatasetModal onCreate={handleCreate} onClose={() => setCreating(false)} />}
+      {editingId && datasets.find((d) => d.id === editingId) && (
+        <EditDatasetModal
+          dataset={datasets.find((d) => d.id === editingId)!}
+          onSave={(body) => handleEdit(editingId, body)}
+          onClose={() => setEditingId(null)}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
@@ -2540,17 +2805,26 @@ export const Datasets = () => {
 
 const DatasetDrawer = ({
   dataset,
+  health,
   onClose,
   onDelete,
+  onEdit,
+  onRefresh,
+  onExport,
   onToast,
 }: {
   dataset: Dataset;
+  health?: DatasetHealth;
   onClose: () => void;
   onDelete: () => void;
+  onEdit: () => void;
+  onRefresh: () => void;
+  onExport: () => void;
   onToast: (s: string) => void;
 }) => {
   const [tab, setTab] = useState<'samples' | 'source' | 'history'>('samples');
   useEscape(onClose);
+  void onToast;
 
   return (
     <>
@@ -2623,6 +2897,24 @@ const DatasetDrawer = ({
               <div className="meta-row"><div className="dim">Source query</div><div className="mono">{dataset.source}</div></div>
               <div className="meta-row"><div className="dim">Status</div><div>{dataset.growing ? 'Growing — adds new matches as they appear' : 'Static — manually curated'}</div></div>
               <div className="meta-row"><div className="dim">Cadence</div><div>{dataset.sourceType === 'auto' ? 'Hourly' : 'On demand'}</div></div>
+              {health && Object.keys(health.cluster_distribution).length > 0 && (
+                <div className="meta-row">
+                  <div className="dim">Cluster coverage</div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                    {Object.entries(health.cluster_distribution)
+                      .sort(([a], [b]) => Number(a) - Number(b))
+                      .map(([cid, count]) => (
+                        <Tag key={cid}>c{cid}: {count}</Tag>
+                      ))}
+                  </div>
+                </div>
+              )}
+              {health && health.coverage_gap_score !== null && (
+                <div className="meta-row">
+                  <div className="dim">Coverage gap</div>
+                  <div className="mono">{(health.coverage_gap_score * 100).toFixed(0)}%</div>
+                </div>
+              )}
             </div>
           )}
           {tab === 'history' && (
@@ -2648,10 +2940,11 @@ const DatasetDrawer = ({
         </div>
 
         <div className="sheet-foot">
-          <button className="btn sm" onClick={() => onToast('Export started — check your downloads.')}>
+          <button className="btn sm" onClick={onExport}>
             <Icon name="arrowDown" size={11} /> Export JSONL
           </button>
-          <button className="btn sm ghost" onClick={() => onToast('Refreshing samples…')}>Refresh</button>
+          <button className="btn sm ghost" onClick={onRefresh}>Refresh</button>
+          <button className="btn sm ghost" onClick={onEdit}>Edit</button>
           <button
             className="btn sm ghost"
             style={{ marginLeft: 'auto', color: 'var(--bad-fg)' }}
@@ -2660,6 +2953,118 @@ const DatasetDrawer = ({
             Delete
           </button>
         </div>
+      </div>
+    </>
+  );
+};
+
+const EditDatasetModal = ({
+  dataset,
+  onSave,
+  onClose,
+}: {
+  dataset: Dataset;
+  onSave: (body: DatasetUpdateRequest) => void;
+  onClose: () => void;
+}) => {
+  const [desc, setDesc] = useState(dataset.desc);
+  const [use, setUse] = useState<{ Eval: boolean; Distill: boolean }>({
+    Eval: dataset.use.includes('Eval'),
+    Distill: dataset.use.includes('Distill'),
+  });
+  const [growing, setGrowing] = useState(dataset.growing);
+  useEscape(onClose);
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    const usedFor = (Object.keys(use) as (keyof typeof use)[]).filter((k) => use[k]);
+    if (usedFor.length === 0) return;
+    const body: DatasetUpdateRequest = {};
+    if (desc !== dataset.desc) body.desc = desc;
+    if (JSON.stringify(usedFor) !== JSON.stringify(dataset.use)) body.use = usedFor;
+    if (growing !== dataset.growing) body.growing = growing;
+    onSave(body);
+  };
+
+  const hasChanges =
+    desc !== dataset.desc ||
+    JSON.stringify((Object.keys(use) as (keyof typeof use)[]).filter((k) => use[k])) !==
+      JSON.stringify(dataset.use) ||
+    growing !== dataset.growing;
+
+  return (
+    <>
+      <div className="sheet-backdrop" onClick={onClose} />
+      <div className="modal" style={{ width: 520 }}>
+        <form onSubmit={submit}>
+          <div className="modal-head">
+            <h2>Edit dataset</h2>
+            <button type="button" className="icon-btn" onClick={onClose} aria-label="Close">×</button>
+          </div>
+          <div className="modal-body">
+            <div className="field">
+              <label>Name</label>
+              <input value={dataset.name} disabled />
+            </div>
+            <div className="field">
+              <label>Description</label>
+              <textarea
+                autoFocus
+                value={desc}
+                onChange={(e) => setDesc(e.target.value)}
+                rows={2}
+              />
+            </div>
+            <div className="field">
+              <label>Used for</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className={`pill ${use.Eval ? 'on' : ''}`}
+                  onClick={() => setUse((u) => ({ ...u, Eval: !u.Eval }))}
+                >
+                  Eval
+                </button>
+                <button
+                  type="button"
+                  className={`pill ${use.Distill ? 'on' : ''}`}
+                  onClick={() => setUse((u) => ({ ...u, Distill: !u.Distill }))}
+                >
+                  Distill
+                </button>
+              </div>
+            </div>
+            <div className="field">
+              <label>Status</label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  type="button"
+                  className={`pill ${growing ? 'on' : ''}`}
+                  onClick={() => setGrowing(true)}
+                >
+                  Growing
+                </button>
+                <button
+                  type="button"
+                  className={`pill ${!growing ? 'on' : ''}`}
+                  onClick={() => setGrowing(false)}
+                >
+                  Static
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="modal-foot">
+            <button type="button" className="btn sm ghost" onClick={onClose}>Cancel</button>
+            <button
+              type="submit"
+              className="btn sm"
+              disabled={!hasChanges || (!use.Eval && !use.Distill)}
+            >
+              Save changes
+            </button>
+          </div>
+        </form>
       </div>
     </>
   );

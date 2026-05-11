@@ -28,6 +28,7 @@ class StageRecord:
     docs_out: int = 0
     response_set: bool = False
     routing_model: Optional[str] = None
+    routing_decision: Optional[dict[str, Any]] = None
     error: Optional[str] = None
 
 
@@ -99,6 +100,9 @@ class PipelineExecutor:
                     docs_out=len(ctx.documents),
                     response_set=ctx.response is not None,
                     routing_model=ctx.routing.model if ctx.routing else None,
+                    routing_decision=(
+                        ctx.routing.decision if ctx.routing is not None else None
+                    ),
                     error=err,
                 )
             )

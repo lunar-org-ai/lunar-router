@@ -145,6 +145,42 @@ TOOLS: list[dict[str, Any]] = [
         "description": "Discover which days/versions have distilled epochs available.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "router_health_check",
+        "description": (
+            "Read-only snapshot of the router's current state (P15.3). Returns: "
+            "cold_start flag, version, K, model_count, cost_weight, "
+            "trace_count_since_last_fit, drift_score, last_fit_age_hours, "
+            "current_avg_error, current_win_rate, needs_reclustering, "
+            "cluster_distribution, fitted_from. "
+            "Use this before deciding whether to call propose_router_retrain."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "propose_router_retrain",
+        "description": (
+            "Trigger a router_config retrain (P15.3). Runs proposer → critic → "
+            "approver → executor → ledger. Returns the resulting Lesson ID (when "
+            "promoted/queued) or a blocked-reason. Caller should pass a short "
+            "rationale explaining why a retrain is warranted; this is captured "
+            "into the proposal metadata for operator review. Gated by Policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rationale": {
+                    "type": "string",
+                    "description": "Why you think a retrain is needed (1-2 sentences).",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -155,6 +191,8 @@ HANDLERS = {
     "get_day_epoch": lib.get_day_epoch,
     "list_predictions": lib.list_predictions,
     "list_available_epochs": lib.list_available_epochs,
+    "router_health_check": lib.router_health_check,
+    "propose_router_retrain": lib.propose_router_retrain,
 }
 
 

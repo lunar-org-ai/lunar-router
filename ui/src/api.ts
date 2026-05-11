@@ -170,6 +170,7 @@ export interface TraceStageView {
   docs_out: number;
   response_set: boolean | null;
   routing_model: string | null;
+  routing_decision: Record<string, unknown> | null;
   error: string | null;
 }
 
@@ -674,4 +675,204 @@ export async function rollbackVersion(version: string, reason?: string): Promise
     throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
   }
   return (await res.json()) as RollbackResult;
+}
+
+
+// --- P15.3 — Router config feeds ---
+
+export interface RouterConfigView {
+  version: number | null;
+  k: number;
+  model_count: number;
+  cost_weight: number;
+  embedder_model: string;
+  embedding_dim: number;
+  last_fit_at: string | null;
+  fitted_from: Record<string, unknown> | null;
+  cold_start: boolean;
+}
+
+export interface RouterRuleHistoryEntry {
+  when: string;
+  what: string;
+  lesson_id?: string | null;
+}
+
+export interface RouterRuleApi {
+  id: string;
+  name: string;
+  when: string;
+  then: string;
+  share: number;
+  cost: number;
+  auth: 'agent' | 'human';
+  enabled: boolean;
+  isDefault?: boolean;
+  rationale: string;
+  history: RouterRuleHistoryEntry[];
+  samples: string[];
+}
+
+export interface RouterCandidateView {
+  lesson_id: string;
+  version: number;
+  title: string;
+  summary: string;
+  delta: Record<string, unknown>;
+  created_at: string | null;
+  review_link: string;
+}
+
+export interface RouterHealthView {
+  cold_start: boolean;
+  version: number | null;
+  k: number | null;
+  model_count: number | null;
+  cost_weight: number | null;
+  last_fit_at: string | null;
+  last_fit_age_hours: number | null;
+  trace_count_since_last_fit: number;
+  drift_score: number | null;
+  drift_baseline: number | null;
+  needs_reclustering: boolean | null;
+  current_avg_error: number | null;
+  current_win_rate: number | null;
+  cluster_distribution: Record<string, number> | null;
+  fitted_from: Record<string, unknown> | null;
+  sample_size: number;
+}
+
+async function _getJson<T>(path: string): Promise<T> {
+  const res = await fetch(path);
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return (await res.json()) as T;
+}
+
+export const getRouterConfig = () => _getJson<RouterConfigView>('/v1/router/config');
+export const getRouterRules = () => _getJson<RouterRuleApi[]>('/v1/router/rules');
+export const getRouterCandidates = () =>
+  _getJson<RouterCandidateView[]>('/v1/router/candidates');
+export const getRouterHealth = () => _getJson<RouterHealthView>('/v1/router/health');
+
+// ===========================================================================
+// P15.4.2 — Datasets
+// ===========================================================================
+
+export interface DatasetView {
+  id: string;
+  name: string;
+  desc: string;
+  size: number;
+  source: string;
+  sourceType: 'auto' | 'manual';
+  fresh: string;
+  use: string[];
+  owner: 'agent' | 'human';
+  growing: boolean;
+}
+
+export interface DatasetSampleView {
+  id: string;
+  preview: string;
+  tag: string | null;
+}
+
+export interface DatasetHistoryEntry {
+  when: string;
+  what: string;
+}
+
+export interface DatasetDetail extends DatasetView {
+  samples: DatasetSampleView[];
+  history: DatasetHistoryEntry[];
+}
+
+export interface DatasetHealth {
+  name: string;
+  size: number;
+  cluster_distribution: Record<string, number>;
+  coverage_gap_score: number | null;
+  last_curation_at: string | null;
+}
+
+export interface DatasetCreateRequest {
+  name: string;
+  desc?: string;
+  source?: string;
+  sourceType?: 'auto' | 'manual';
+  use?: string[];
+  owner?: 'agent' | 'human';
+  growing?: boolean;
+}
+
+export interface DatasetUpdateRequest {
+  desc?: string;
+  use?: string[];
+  growing?: boolean;
+}
+
+export interface DatasetListFilters {
+  use?: string;
+  owner?: 'agent' | 'human';
+  sourceType?: 'auto' | 'manual';
+}
+
+export async function getDatasets(filters: DatasetListFilters = {}): Promise<DatasetView[]> {
+  const params = new URLSearchParams();
+  if (filters.use) params.set('use', filters.use);
+  if (filters.owner) params.set('owner', filters.owner);
+  if (filters.sourceType) params.set('sourceType', filters.sourceType);
+  const qs = params.toString();
+  return _getJson<DatasetView[]>(qs ? `/v1/datasets?${qs}` : '/v1/datasets');
+}
+
+export const getDataset = (name: string) =>
+  _getJson<DatasetDetail>(`/v1/datasets/${encodeURIComponent(name)}`);
+
+export const getDatasetHealth = (name: string) =>
+  _getJson<DatasetHealth>(`/v1/datasets/${encodeURIComponent(name)}/health`);
+
+export async function createDataset(body: DatasetCreateRequest): Promise<DatasetView> {
+  const res = await fetch('/v1/datasets', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as DatasetView;
+}
+
+export async function updateDataset(
+  name: string,
+  body: DatasetUpdateRequest,
+): Promise<DatasetView> {
+  const res = await fetch(`/v1/datasets/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as DatasetView;
+}
+
+export const exportDatasetUrl = (name: string) =>
+  `/v1/datasets/${encodeURIComponent(name)}/export`;
+
+export async function deleteDataset(name: string): Promise<void> {
+  const res = await fetch(`/v1/datasets/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
 }

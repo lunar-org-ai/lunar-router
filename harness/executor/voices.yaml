@@ -120,3 +120,12 @@ templates:
     _default:
       title: "Tuned memory"
       voice: "I tuned how I handle conversation memory."
+
+  # P15.3 — UniRoute router config (clusters + Ψ table). Mutations on this
+  # surface come from harness/proposer/router_proposer.py and edits via
+  # PUT /v1/router/config. The "knob" is the file path itself, so we mostly
+  # rely on the _default fallback.
+  router_config:
+    _default:
+      title: "Refit my routing"
+      voice: "I refit my routing — clusters look better and the eval lifted."

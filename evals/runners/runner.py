@@ -15,7 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
-from evals.loader import load_goldens, load_suite
+from evals.loader import load_suite, resolve_goldens
 from evals.rubrics import EvalContext, make_rubric
 from evals.types import EvalCase, Report, RubricResult
 from runtime.compiler.builder import compile_agent
@@ -36,7 +36,7 @@ def run_suite(
 ) -> Report:
     """Load suite + agent, run all goldens, score, optionally write the report."""
     suite = load_suite(suite_path)
-    goldens = load_goldens(suite.goldens)
+    goldens = resolve_goldens(suite)
     rubrics = [make_rubric(spec) for spec in suite.rubrics]
 
     cfg = load_agent(agent_path)

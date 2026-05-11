@@ -31,6 +31,8 @@ Endpoints:
   GET  /evals/suites/{name}            — suite detail (goldens + rubrics).
   GET  /evals/reports                  — recent runs (filterable by suite).
   GET  /evals/reports/{report_id}      — single eval report with cases.
+  GET  /router/config                  — current router_config metadata (P15.3); cold-start safe.
+  POST /router/decide                  — score a prompt against the router; no LLM call.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -77,6 +80,7 @@ class StageOutcome(BaseModel):
     docs_in: int
     docs_out: int
     routing_model: Optional[str] = None
+    routing_decision: Optional[dict] = None  # P15.3.8 — UniRoute decision dict
     error: Optional[str] = None
 
 
@@ -1762,11 +1766,912 @@ async def run(payload: RunRequest) -> RunResponse:
                 docs_in=s.docs_in,
                 docs_out=s.docs_out,
                 routing_model=s.routing_model,
+                routing_decision=s.routing_decision,
                 error=s.error,
             )
             for s in rec.stages
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# P15.3.2 — Router config + decide endpoints
+# ---------------------------------------------------------------------------
+
+
+class RouterConfigView(BaseModel):
+    """Metadata snapshot of the current router_config. Cold-start safe."""
+
+    version: Optional[int]
+    k: int
+    model_count: int
+    cost_weight: float
+    embedder_model: str
+    embedding_dim: int
+    last_fit_at: Optional[str]
+    fitted_from: Optional[dict] = None
+    cold_start: bool
+
+
+class RouterDecideRequest(BaseModel):
+    prompt: str
+    allowed_models: Optional[list[str]] = None
+    cost_weight_override: Optional[float] = None
+
+
+class RouterDecideResponse(BaseModel):
+    selected_model: str
+    expected_error: float
+    cost_adjusted_score: float
+    all_scores: dict[str, float]
+    cluster_id: int
+    cluster_probabilities: list[float]
+    reasoning: Optional[str] = None
+    cold_start: bool = False
+
+
+# Process-singleton embedder — lazy. P15.3.8 will replace this with a proper
+# embedder_pool with warmup; for P15.3.2 a one-liner is enough.
+_router_embedder: Any = None
+
+
+def _get_router_embedder() -> Any:
+    """Lazy PromptEmbedder. First call eats ~1-3s for the MiniLM load."""
+    global _router_embedder
+    if _router_embedder is not None:
+        return _router_embedder
+    from router.core.embeddings import PromptEmbedder, SentenceTransformerProvider
+
+    _router_embedder = PromptEmbedder(SentenceTransformerProvider())
+    return _router_embedder
+
+
+@app.get("/router/config", response_model=RouterConfigView)
+async def get_router_config() -> RouterConfigView:
+    """Return the current router_config metadata.
+
+    Cold-start (no fitted config yet): returns 200 with cold_start=True and
+    empty/default fields. UI uses this to render the empty state.
+    """
+    from router.config_io import (
+        cold_start_metadata,
+        build_view_metadata,
+        load_current_config_payload,
+    )
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+
+    try:
+        payload = load_current_config_payload()
+    except RouterConfigNotFoundError:
+        return RouterConfigView(**cold_start_metadata())
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    return RouterConfigView(**build_view_metadata(payload))
+
+
+# P15.3.10 — UI Router config feeds.
+
+
+class RouterRuleHistoryEntry(BaseModel):
+    when: str
+    what: str
+    lesson_id: Optional[str] = None
+
+
+class RouterRuleView(BaseModel):
+    """Synthesized rule row for the UI Router config screen.
+
+    P15.3.10 ships a single row representing the UniRoute default. Manual
+    rules are deferred — when the rules engine lands, this endpoint
+    returns the real list and the UI lights up the rest of its chrome.
+    """
+
+    id: str
+    name: str
+    when: str
+    then: str
+    share: float
+    cost: float
+    auth: str   # "agent" | "human"
+    enabled: bool
+    isDefault: bool = False
+    rationale: str
+    history: list[RouterRuleHistoryEntry]
+    samples: list[str]
+
+
+class RouterCandidateView(BaseModel):
+    """Pending router_config Lesson awaiting review."""
+
+    lesson_id: str
+    version: int
+    title: str
+    summary: str
+    delta: dict[str, Any]
+    created_at: Optional[str] = None
+    review_link: str
+
+
+class RouterHealthView(BaseModel):
+    """Mirrors RouterHealth.to_dict() — same shape as the MCP tool."""
+
+    cold_start: bool
+    version: Optional[int] = None
+    k: Optional[int] = None
+    model_count: Optional[int] = None
+    cost_weight: Optional[float] = None
+    last_fit_at: Optional[str] = None
+    last_fit_age_hours: Optional[float] = None
+    trace_count_since_last_fit: int = 0
+    drift_score: Optional[float] = None
+    drift_baseline: Optional[float] = None
+    needs_reclustering: Optional[bool] = None
+    current_avg_error: Optional[float] = None
+    current_win_rate: Optional[float] = None
+    cluster_distribution: Optional[dict[str, int]] = None
+    fitted_from: Optional[dict] = None
+    sample_size: int = 0
+
+
+@app.get("/router/rules", response_model=list[RouterRuleView])
+async def list_router_rules() -> list[RouterRuleView]:
+    """Synthesized rule list. v1 returns one row representing UniRoute."""
+    from router.config_io import load_current_config_payload
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+    from ledger.writer import read_lessons
+
+    try:
+        payload = load_current_config_payload()
+        cold_start = False
+    except (RouterConfigNotFoundError, RouterConfigInvalidError):
+        payload = None
+        cold_start = True
+
+    history = _build_router_history()
+    rule = _build_uniroute_default_rule(payload=payload, cold_start=cold_start, history=history)
+    return [rule]
+
+
+@app.get("/router/candidates", response_model=list[RouterCandidateView])
+async def list_router_candidates() -> list[RouterCandidateView]:
+    """Pending router_config Lessons awaiting human review."""
+    from ledger.writer import read_lessons
+
+    out: list[RouterCandidateView] = []
+    for lesson in read_lessons():
+        if lesson.kind != "router_config" or lesson.status != "awaiting_review":
+            continue
+        try:
+            version = int(lesson.version)
+        except (TypeError, ValueError):
+            version = 0
+        out.append(
+            RouterCandidateView(
+                lesson_id=lesson.id,
+                version=version,
+                title=lesson.title or "router_config candidate",
+                summary=lesson.summary or "",
+                delta=lesson.delta or {},
+                created_at=lesson.promoted_at,
+                review_link=f"/review/{lesson.id}",
+            )
+        )
+    out.sort(key=lambda c: (c.created_at or ""), reverse=True)
+    return out
+
+
+@app.get("/router/health", response_model=RouterHealthView)
+async def get_router_health() -> RouterHealthView:
+    """Same payload as the MCP router_health_check tool, exposed over HTTP
+    so the UI can render the same snapshot Claude Code reads."""
+    from router.feedback.health import compute_router_health
+
+    h = compute_router_health().to_dict()
+    # Pydantic's dict[str, int] requires str keys; cluster_distribution comes
+    # in with int keys.
+    cluster_dist = h.get("cluster_distribution")
+    if cluster_dist:
+        h["cluster_distribution"] = {str(k): int(v) for k, v in cluster_dist.items()}
+    h.pop("metadata", None)
+    return RouterHealthView(**h)
+
+
+def _build_router_history() -> list[RouterRuleHistoryEntry]:
+    """Pull recent router_config Lessons as drawer history rows."""
+    from ledger.writer import read_lessons
+
+    items: list[RouterRuleHistoryEntry] = []
+    for lesson in read_lessons():
+        if lesson.kind != "router_config":
+            continue
+        when = lesson.promoted_at or "earlier"
+        what = lesson.voice or lesson.title or "router_config change"
+        items.append(
+            RouterRuleHistoryEntry(when=when, what=what, lesson_id=lesson.id)
+        )
+    items.sort(key=lambda h: (h.when or ""), reverse=True)
+    return items
+
+
+def _build_uniroute_default_rule(
+    *,
+    payload: Optional[dict],
+    cold_start: bool,
+    history: list[RouterRuleHistoryEntry],
+) -> RouterRuleView:
+    if cold_start or payload is None:
+        return RouterRuleView(
+            id="uniroute_default",
+            name="UniRoute (default)",
+            when="default",
+            then="uniroute (cold-start)",
+            share=1.0,
+            cost=0.0,
+            auth="agent",
+            enabled=True,
+            isDefault=True,
+            rationale=(
+                "Cold-start: no router_config has been fitted yet. "
+                "Claude Code will propose one once enough traffic accumulates."
+            ),
+            history=history,
+            samples=[],
+        )
+
+    k = int(payload.get("k", 0))
+    n_models = len(payload.get("model_psi") or {})
+    silhouette = float((payload.get("metadata") or {}).get("silhouette", 0.0))
+    return RouterRuleView(
+        id="uniroute_default",
+        name="UniRoute (default)",
+        when="default",
+        then=f"uniroute (K={k}, models={n_models})",
+        share=1.0,
+        cost=float(payload.get("cost_weight", 0.0)),
+        auth="agent",
+        enabled=True,
+        isDefault=True,
+        rationale=(
+            f"Trained router. K={k} clusters across {n_models} models. "
+            f"Silhouette={silhouette:.3f}. Picks per request based on "
+            "prompt embedding cluster + per-model expected error."
+        ),
+        history=history,
+        samples=[],
+    )
+
+
+# P15.3.8 — manual router_config edit through the AHE pipeline.
+
+
+class RouterConfigUpdate(BaseModel):
+    """Manual operator update body for PUT /router/config."""
+
+    cost_weight: Optional[float] = None
+
+
+class RouterConfigUpdateResponse(BaseModel):
+    version: int
+    lesson_id: str
+    config: RouterConfigView
+
+
+@app.put("/router/config", response_model=RouterConfigUpdateResponse)
+async def put_router_config(req: RouterConfigUpdate) -> RouterConfigUpdateResponse:
+    """Manual router_config edit (e.g., λ override).
+
+    AHE-aligned: routes through ``record_manual_router_change`` so the edit
+    surfaces as ``Lesson(kind="router_config", proposal_source="human")``,
+    bumps the router_config version, and rolls back via the existing
+    ``/versions/{v}/rollback`` machinery — same as any other promotion.
+
+    Cold-start (no current config) → 409. Operators can't manually edit a
+    config that doesn't exist; wait for the harness to fit one.
+    """
+    from harness.executor.promote import record_manual_router_change
+    from router.config_io import build_view_metadata, load_current_config_payload
+    from router.errors import RouterConfigInvalidError, RouterConfigNotFoundError
+
+    try:
+        current = load_current_config_payload()
+    except RouterConfigNotFoundError:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "cannot edit a config that doesn't exist yet — "
+                "wait for the harness to fit one"
+            ),
+        )
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    if req.cost_weight is None:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    # Preserve centroids by carrying them on the new payload — apply_router_candidate
+    # extracts and writes the sidecar .npz.
+    import numpy as np
+
+    from router.config_io import _centroids_path, _vd
+
+    old_npz = _centroids_path(int(current["version"]), versions_dir=_vd(None))
+    centroids_inline = None
+    if old_npz.exists():
+        centroids_inline = np.load(old_npz)["centroids"].tolist()
+
+    new_payload = dict(current)
+    new_payload["version"] = int(current["version"]) + 1
+    new_payload["cost_weight"] = float(req.cost_weight)
+    if centroids_inline is not None:
+        new_payload["centroids"] = centroids_inline
+    new_payload["created_at"] = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    new_payload["metadata"] = {
+        **(current.get("metadata") or {}),
+        "previous_cost_weight": float(current.get("cost_weight", 0.0)),
+        "manual_edit_phase": "P15.3.8",
+        "stage": "manual_edit",
+    }
+
+    summary = f"λ {current.get('cost_weight', 0.0)} → {req.cost_weight}"
+    voice = f"I tweaked my routing weights manually — λ is now {req.cost_weight}."
+    lesson = record_manual_router_change(
+        new_payload, summary=summary, voice=voice
+    )
+
+    return RouterConfigUpdateResponse(
+        version=int(new_payload["version"]),
+        lesson_id=lesson.id,
+        config=RouterConfigView(**build_view_metadata(new_payload)),
+    )
+
+
+@app.post("/router/decide", response_model=RouterDecideResponse)
+async def post_router_decide(req: RouterDecideRequest) -> RouterDecideResponse:
+    """Score a prompt against the current router_config without executing.
+
+    503 router_cold_start when no config exists. Caller should fall back
+    to agent.models.default (or knobs.small) — see P15.3.8 for the engine
+    wiring that does this automatically.
+    """
+    from router.config_io import load_current_config
+    from router.errors import (
+        RouterColdStartError,
+        RouterConfigInvalidError,
+        RouterConfigNotFoundError,
+    )
+    from router.uniroute import UniRouteRouter
+
+    try:
+        assigner, registry, lam = load_current_config()
+    except RouterConfigNotFoundError:
+        raise HTTPException(
+            status_code=503,
+            detail="router_cold_start: no fitted config; wait for the harness to fit one",
+        )
+    except RouterConfigInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"router_config_invalid: {e}")
+
+    embedder = _get_router_embedder()
+    try:
+        router = UniRouteRouter(embedder, assigner, registry, cost_weight=lam)
+    except RouterColdStartError as e:
+        raise HTTPException(status_code=503, detail=f"router_cold_start: {e}")
+
+    try:
+        decision = router.route(
+            req.prompt,
+            available_models=req.allowed_models,
+            cost_weight_override=req.cost_weight_override,
+        )
+    except ValueError as e:
+        # No models available after filtering — bad allowed_models list.
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return RouterDecideResponse(
+        selected_model=decision.selected_model,
+        expected_error=decision.expected_error,
+        cost_adjusted_score=decision.cost_adjusted_score,
+        all_scores=decision.all_scores,
+        cluster_id=decision.cluster_id,
+        cluster_probabilities=decision.cluster_probabilities.tolist(),
+        reasoning=decision.reasoning,
+        cold_start=False,
+    )
+
+
+# ---------------------------------------------------------------------------
+# P15.4.2 — Datasets endpoints
+# ---------------------------------------------------------------------------
+
+
+class DatasetView(BaseModel):
+    """Grid-row shape for the UI Datasets screen. Mirrors `interface Dataset`
+    in ui/src/screens/Technical.tsx."""
+
+    id: str
+    name: str
+    desc: str
+    size: int
+    source: str
+    sourceType: str
+    fresh: str
+    use: list[str]
+    owner: str
+    growing: bool
+
+
+class DatasetSampleView(BaseModel):
+    id: str
+    preview: str
+    tag: Optional[str] = None
+
+
+class DatasetHistoryEntry(BaseModel):
+    when: str
+    what: str
+
+
+class DatasetDetail(DatasetView):
+    samples: list[DatasetSampleView]
+    history: list[DatasetHistoryEntry]
+
+
+class DatasetHealth(BaseModel):
+    name: str
+    size: int
+    cluster_distribution: dict[str, int]
+    coverage_gap_score: Optional[float] = None
+    last_curation_at: Optional[str] = None
+
+
+class DatasetCreateRequest(BaseModel):
+    name: str
+    desc: str = ""
+    source: str = "manual"
+    sourceType: str = "manual"
+    use: list[str] = ["Eval"]
+    owner: str = "human"
+    growing: bool = False
+
+
+class DatasetUpdateRequest(BaseModel):
+    desc: Optional[str] = None
+    use: Optional[list[str]] = None
+    growing: Optional[bool] = None
+
+
+_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_PREVIEW_MAX = 200
+
+
+def _relative_time(iso: Optional[str]) -> str:
+    """Render an ISO timestamp as a UI-friendly relative time ("3d", "6h", "just now").
+
+    Returns "—" when iso is empty/None, or when iso is the 1970-01-01 epoch
+    sentinel used by the migration script for byte-identical reruns. Best-effort
+    parser; falls back to the raw string when parsing fails.
+    """
+    if not iso:
+        return "—"
+    try:
+        ts = iso.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+    except (ValueError, TypeError):
+        return iso
+    if dt.year < 2000:
+        return "—"
+    now = datetime.now(timezone.utc)
+    delta = now - dt
+    secs = delta.total_seconds()
+    if secs < 60:
+        return "just now"
+    minutes = int(secs // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = int(secs // 3600)
+    if hours < 24:
+        return f"{hours}h"
+    days = int(secs // 86400)
+    if days < 30:
+        return f"{days}d"
+    months = int(days // 30)
+    if months < 12:
+        return f"{months}mo"
+    years = int(days // 365)
+    return f"{years}y"
+
+
+def _registry_entry_fresh(entry: dict) -> str:
+    return _relative_time(entry.get("updated_at"))
+
+
+def _registry_to_view(name: str, entry: dict) -> DatasetView:
+    """Project a `_registry.json` entry into the UI's DatasetView shape."""
+    return DatasetView(
+        id=name,
+        name=name,
+        desc=entry.get("desc", ""),
+        size=int(entry.get("size", 0)),
+        source=entry.get("source", entry.get("sourceType", "manual")),
+        sourceType=entry.get("sourceType", "manual"),
+        fresh=_registry_entry_fresh(entry),
+        use=list(entry.get("use", ["Eval"])),
+        owner=entry.get("owner", "human"),
+        growing=bool(entry.get("growing", False)),
+    )
+
+
+def _dataset_to_detail(dataset, entry: dict) -> DatasetDetail:
+    """Build the drawer payload (DatasetView + samples + history)."""
+    view = _registry_to_view(dataset.metadata.name, entry)
+    samples = [
+        DatasetSampleView(
+            id=s.id,
+            preview=s.prompt if len(s.prompt) <= _PREVIEW_MAX else s.prompt[: _PREVIEW_MAX - 1] + "…",
+            tag=s.tag,
+        )
+        for s in dataset.samples[:50]
+    ]
+    history = [
+        DatasetHistoryEntry(
+            when=_relative_time(h.get("when")),
+            what=str(h.get("what", "")),
+        )
+        for h in dataset.history
+    ]
+    return DatasetDetail(
+        **view.model_dump(),
+        samples=samples,
+        history=history,
+    )
+
+
+@app.get("/datasets", response_model=list[DatasetView])
+async def list_datasets_endpoint(
+    use: Optional[str] = None,
+    owner: Optional[str] = None,
+    sourceType: Optional[str] = None,
+) -> list[DatasetView]:
+    """List all (non-soft-deleted) datasets in the registry.
+
+    Cold-start (no migration run yet): returns []. Filters are AND-combined
+    when present.
+    """
+    from router.data.dataset_registry import _load_registry, _vd
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    out: list[DatasetView] = []
+    for ds_name, entry in (registry.get("datasets") or {}).items():
+        if entry.get("deleted"):
+            continue
+        if use is not None and use not in (entry.get("use") or []):
+            continue
+        if owner is not None and entry.get("owner") != owner:
+            continue
+        if sourceType is not None and entry.get("sourceType") != sourceType:
+            continue
+        out.append(_registry_to_view(ds_name, entry))
+    out.sort(key=lambda d: d.name)
+    return out
+
+
+@app.get("/datasets/{name}", response_model=DatasetDetail)
+async def get_dataset_endpoint(name: str) -> DatasetDetail:
+    """Full dataset payload + samples + history. 404 when unknown."""
+    from router.data.dataset_io import load_current
+    from router.data.dataset_registry import _load_registry, _vd
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    try:
+        dataset = load_current(name)
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DatasetInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"dataset_invalid: {e}")
+
+    return _dataset_to_detail(dataset, entry)
+
+
+@app.get("/datasets/{name}/health", response_model=DatasetHealth)
+async def get_dataset_health_endpoint(name: str) -> DatasetHealth:
+    """Coverage report for the dataset. cluster_distribution is empty when
+    router_config is cold-start (no centroids to assign against yet)."""
+    from router.data.dataset_io import load_current
+    from router.data.dataset_registry import _load_registry, _vd
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+    import numpy as np
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    try:
+        dataset = load_current(name)
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DatasetInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"dataset_invalid: {e}")
+
+    cluster_distribution: dict[str, int] = {}
+    try:
+        from router.config_io import load_current_config
+        from router.errors import (
+            RouterConfigInvalidError,
+            RouterConfigNotFoundError,
+        )
+
+        try:
+            assigner, _registry, _lam = load_current_config()
+        except (RouterConfigNotFoundError, RouterConfigInvalidError):
+            assigner = None
+
+        if assigner is not None and dataset.samples:
+            for s in dataset.samples:
+                if not s.embedding:
+                    continue
+                vec = np.asarray(s.embedding, dtype=float)
+                cid = int(assigner.assign(vec))
+                key = str(cid)
+                cluster_distribution[key] = cluster_distribution.get(key, 0) + 1
+    except Exception:
+        # Coverage is best-effort; never 5xx because of cluster math.
+        cluster_distribution = {}
+
+    return DatasetHealth(
+        name=name,
+        size=dataset.size(),
+        cluster_distribution=cluster_distribution,
+        coverage_gap_score=None,
+        last_curation_at=entry.get("updated_at"),
+    )
+
+
+def _build_dataset_payload(
+    req: DatasetCreateRequest,
+    *,
+    version: int = 1,
+) -> dict:
+    """Build a fresh dataset payload for a manual create."""
+    now = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    return {
+        "version": version,
+        "name": req.name,
+        "desc": req.desc,
+        "source": req.source,
+        "sourceType": req.sourceType,
+        "use": list(req.use),
+        "owner": req.owner,
+        "growing": bool(req.growing),
+        "created_at": now,
+        "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+        "embedding_dim": 384,
+        "samples": [],
+        "history": [{"when": now, "what": f"You created this dataset ({req.sourceType})."}],
+        "metadata": {"phase": "P15.4.2", "stage": "manual_create"},
+    }
+
+
+@app.post("/datasets", response_model=DatasetView, status_code=201)
+async def create_dataset_endpoint(req: DatasetCreateRequest) -> DatasetView:
+    """Manual dataset creation. Goes through ``record_manual_change(kind="dataset")``
+    so the action surfaces as a Lesson + ledger entry, same as any other
+    edit to the editable surface."""
+    from harness.executor.promote import record_manual_dataset_change
+    from router.data.dataset_io import save_dataset
+    from router.data.dataset_registry import _load_registry, _vd
+
+    if not _NAME_PATTERN.match(req.name):
+        raise HTTPException(
+            status_code=400,
+            detail="name must match ^[a-z0-9][a-z0-9_-]{0,63}$",
+        )
+    valid_uses = {"Eval", "Distill"}
+    if not req.use or any(u not in valid_uses for u in req.use):
+        raise HTTPException(
+            status_code=400,
+            detail=f"use must be a non-empty subset of {sorted(valid_uses)}",
+        )
+    if req.owner not in {"agent", "human"}:
+        raise HTTPException(status_code=400, detail="owner must be 'agent' or 'human'")
+    if req.sourceType not in {"auto", "manual"}:
+        raise HTTPException(status_code=400, detail="sourceType must be 'auto' or 'manual'")
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    existing = (registry.get("datasets") or {}).get(req.name)
+    if existing and not existing.get("deleted"):
+        raise HTTPException(status_code=409, detail=f"dataset_already_exists: {req.name}")
+
+    payload = _build_dataset_payload(req)
+
+    def _writer() -> None:
+        save_dataset(payload)
+
+    use_label = " + ".join(req.use)
+    record_manual_dataset_change(
+        name=req.name,
+        new_version=1,
+        summary=f"Created dataset '{req.name}' ({use_label})",
+        apply_edit=_writer,
+        voice=f"I created the '{req.name}' dataset for {use_label.lower()} use.",
+    )
+
+    # Re-read the registry entry so `fresh` reflects the post-write timestamp.
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(req.name) or {}
+    return _registry_to_view(req.name, entry)
+
+
+@app.put("/datasets/{name}", response_model=DatasetView)
+async def update_dataset_endpoint(name: str, req: DatasetUpdateRequest) -> DatasetView:
+    """Manual meta edit (desc / use / growing). Bumps the dataset version
+    and emits a Lesson(kind="dataset", proposal_source="human")."""
+    from harness.executor.promote import record_manual_dataset_change
+    from router.data.dataset_io import load_current, save_dataset
+    from router.data.dataset_registry import _load_registry, _vd
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    if req.desc is None and req.use is None and req.growing is None:
+        raise HTTPException(status_code=400, detail="no fields to update")
+
+    try:
+        dataset = load_current(name)
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DatasetInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"dataset_invalid: {e}")
+
+    changes: list[str] = []
+    new_desc = dataset.metadata.desc if req.desc is None else req.desc
+    new_use = dataset.metadata.use if req.use is None else list(req.use)
+    new_growing = dataset.metadata.growing if req.growing is None else bool(req.growing)
+
+    if req.desc is not None and req.desc != dataset.metadata.desc:
+        changes.append(f"desc → {req.desc[:60]!r}")
+    if req.use is not None and req.use != dataset.metadata.use:
+        changes.append(f"use → {req.use}")
+    if req.growing is not None and req.growing != dataset.metadata.growing:
+        changes.append(f"growing → {req.growing}")
+
+    new_version = dataset.version + 1
+    now = (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+    payload = {
+        "version": new_version,
+        "name": name,
+        "desc": new_desc,
+        "source": dataset.metadata.source,
+        "sourceType": dataset.metadata.sourceType,
+        "use": new_use,
+        "owner": dataset.metadata.owner,
+        "growing": new_growing,
+        "created_at": dataset.created_at or now,
+        "embedder_model": dataset.metadata.embedder_model,
+        "embedding_dim": dataset.metadata.embedding_dim,
+        "samples": [
+            {
+                "id": s.id,
+                "prompt": s.prompt,
+                "ground_truth": s.ground_truth,
+                "tag": s.tag,
+                "trace_id": s.trace_id,
+                "added_at": s.added_at,
+                "source": s.source,
+                "embedding": s.embedding,
+            }
+            for s in dataset.samples
+        ],
+        "history": list(dataset.history) + [
+            {"when": now, "what": f"You edited the dataset ({', '.join(changes) or 'no-op'})."}
+        ],
+        "metadata": {
+            **(dataset.extra or {}),
+            "stage": "manual_edit",
+            "previous_version": dataset.version,
+        },
+    }
+    def _writer() -> None:
+        save_dataset(payload)
+
+    summary = f"Edited dataset '{name}': {'; '.join(changes) or 'no-op'}"
+    record_manual_dataset_change(
+        name=name,
+        new_version=new_version,
+        summary=summary,
+        apply_edit=_writer,
+        voice=f"I tweaked the '{name}' dataset's metadata.",
+    )
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name) or {}
+    return _registry_to_view(name, entry)
+
+
+@app.get("/datasets/{name}/export")
+async def export_dataset_endpoint(name: str):
+    """Stream the full dataset as NDJSON. Each line is one sample with
+    `prompt`, `ground_truth`, `tag`, `trace_id`, `added_at`, `source`,
+    and `embedding`. The wire shape from /datasets/{name} hides
+    embeddings + truncates prompt to a preview — this endpoint is the
+    full payload, suitable for distillation / offline analysis."""
+    from router.data.dataset_io import load_current
+    from router.data.dataset_registry import _load_registry, _vd
+    from router.errors import DatasetInvalidError, DatasetNotFoundError
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    try:
+        dataset = load_current(name)
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except DatasetInvalidError as e:
+        raise HTTPException(status_code=500, detail=f"dataset_invalid: {e}")
+
+    def _iter_lines():
+        for s in dataset.samples:
+            yield json.dumps({
+                "id": s.id,
+                "prompt": s.prompt,
+                "ground_truth": s.ground_truth,
+                "tag": s.tag,
+                "trace_id": s.trace_id,
+                "added_at": s.added_at,
+                "source": s.source,
+                "embedding": s.embedding,
+            }, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(
+        _iter_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name}.jsonl"',
+        },
+    )
+
+
+@app.delete("/datasets/{name}", status_code=204)
+async def delete_dataset_endpoint(name: str) -> None:
+    """Soft-delete: mark as deleted in the registry; v<n>.json files stay
+    on disk for rollback. Not a versioned mutation."""
+    from router.data.dataset_registry import (
+        _load_registry,
+        _vd,
+        delete_dataset,
+    )
+
+    registry = _load_registry(datasets_dir=_vd(None))
+    entry = (registry.get("datasets") or {}).get(name)
+    if entry is None or entry.get("deleted"):
+        raise HTTPException(status_code=404, detail=f"dataset_not_found: {name}")
+
+    delete_dataset(name)
+    return None
 
 
 def main() -> None:

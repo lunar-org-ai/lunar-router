@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------- YAML-parsed (Pydantic) ----------
@@ -54,9 +54,21 @@ class RubricSpec(BaseModel):
 class Suite(BaseModel):
     suite: str
     description: Optional[str] = None
-    goldens: list[str]            # ids; loaded from evals/golden/<id>.yaml
+    # Exactly one of `dataset` (new, P15.4) or `goldens` (legacy) is required.
+    dataset: Optional[str] = None        # P15.4 — preferred form
+    goldens: Optional[list[str]] = None  # legacy; DeprecationWarning at load time
     rubrics: list[RubricSpec]
-    aggregation: str = "mean"     # extensible later (median, p95…)
+    aggregation: str = "mean"            # extensible later (median, p95…)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self):
+        has_dataset = self.dataset is not None
+        has_goldens = bool(self.goldens)
+        if not has_dataset and not has_goldens:
+            raise ValueError("Suite must specify either 'dataset' or 'goldens'")
+        if has_dataset and has_goldens:
+            raise ValueError("Suite cannot specify both 'dataset' and 'goldens'")
+        return self
 
 
 # ---------- Runtime values (dataclass) ----------
