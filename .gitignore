@@ -34,3 +34,10 @@ uv.lock
 .env
 .env.local
 
+# Corpus index — operator-built locally; never committed
+corpora/indexed/*.faiss
+corpora/indexed/*.npy
+corpora/indexed/manifest.jsonl
+# Operator-curated documents may or may not be tracked; ignore by default
+corpora/ingested/
+
