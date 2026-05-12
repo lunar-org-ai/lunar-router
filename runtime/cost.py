@@ -63,6 +63,21 @@ def estimate_cost(
     return tokens_in, tokens_out, cost
 
 
+def cost_from_usage(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    model: Optional[str] = None,
+) -> tuple[int, int, float]:
+    """Like estimate_cost, but with exact token counts from the SDK's
+    ``response.usage``. P1.9 path: the generate stage stashes
+    ``input_tokens``/``output_tokens`` in ``ctx.state["llm_usage"]`` and the
+    executor calls this instead of the char-based estimator."""
+    rate_per_1k = _resolve_rate(model)
+    cost = round((input_tokens + output_tokens) * rate_per_1k / 1000.0, 6)
+    return int(input_tokens), int(output_tokens), cost
+
+
 def _resolve_rate(model: Optional[str]) -> float:
     """Pick $/1k for `model`. Fall back to the default model's rate when
     unknown — never raise, because we want stubs to keep working."""
