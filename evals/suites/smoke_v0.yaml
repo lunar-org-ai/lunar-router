@@ -1,5 +1,5 @@
 suite: smoke_v0
-description: "Basic smoke test for the stub agent \u2014 domain: e-commerce support"
+description: "Basic smoke test \u2014 domain: e-commerce support. Calibrated for real LLM (Haiku ~2-4s, matches agent budget)."
 goldens:
 - golden_001
 - golden_002
@@ -17,5 +17,5 @@ rubrics:
 - name: under_budget
   type: latency_under_budget
   params:
-    max_ms: 2000
+    max_ms: 4000
 aggregation: mean

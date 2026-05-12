@@ -10,6 +10,7 @@ import argparse
 import sys
 
 from evals.runners.runner import run_suite
+from runtime.dotenv import load_env
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -28,6 +29,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Exit with 1 if pass_rate is below this value (default: 0.0 = never fail)",
     )
     args = parser.parse_args(argv)
+
+    load_env()
 
     report = run_suite(args.suite, agent_path=args.agent, write_report=not args.no_write)
     s = report.summary
