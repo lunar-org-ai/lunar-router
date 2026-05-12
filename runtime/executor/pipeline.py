@@ -120,17 +120,27 @@ class PipelineExecutor:
 
         total_ms = round((time.perf_counter() - total_start) * 1000, 3)
 
-        # Cost estimation — uses the routing_model from the route stage when
-        # set, falls back to default. Char-based until P1.9 swaps for real
-        # usage numbers from the Anthropic SDK.
-        from runtime.cost import estimate_cost
+        # Cost estimation. P1.9 — when the generate stage made a real
+        # Anthropic call, ctx.state["llm_usage"] carries the SDK's exact
+        # input_tokens/output_tokens; we use those + the model's $/1k rate.
+        # Otherwise we fall back to the char-based estimate (offline mode,
+        # stub stages, dataset proposer runs without a key).
+        from runtime.cost import estimate_cost, cost_from_usage
         chosen_model = next(
             (r.routing_model for r in records if r.routing_model is not None),
             None,
         )
-        tokens_in, tokens_out, cost_usd = estimate_cost(
-            request, ctx.response, model=chosen_model
-        )
+        usage = ctx.state.get("llm_usage") if isinstance(ctx.state, dict) else None
+        if usage:
+            tokens_in, tokens_out, cost_usd = cost_from_usage(
+                input_tokens=usage.get("input_tokens", 0),
+                output_tokens=usage.get("output_tokens", 0),
+                model=usage.get("model") or chosen_model,
+            )
+        else:
+            tokens_in, tokens_out, cost_usd = estimate_cost(
+                request, ctx.response, model=chosen_model
+            )
 
         record = ExecutionRecord(
             request=request,

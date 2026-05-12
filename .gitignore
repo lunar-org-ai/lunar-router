@@ -29,3 +29,8 @@ build/
 
 # uv
 uv.lock
+
+# Local env (API keys, secrets) — never commit
+.env
+.env.local
+
