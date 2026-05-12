@@ -12,6 +12,7 @@ import sys
 
 from runtime.compiler.builder import compile_agent
 from runtime.compiler.loader import load_agent
+from runtime.dotenv import load_env
 from runtime.executor.pipeline import PipelineExecutor
 from runtime.executor.tracing import write_trace
 
@@ -32,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Print only the response (no per-stage summary)",
     )
     args = parser.parse_args(argv)
+
+    load_env()
 
     cfg = load_agent(args.agent)
     pipe = compile_agent(cfg)

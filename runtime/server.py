@@ -52,6 +52,7 @@ from pydantic import BaseModel
 
 from runtime.compiler.builder import compile_agent
 from runtime.compiler.loader import load_agent
+from runtime.dotenv import load_env
 from runtime.executor.pipeline import PipelineExecutor
 from runtime.executor.tracing import bus as trace_bus
 from runtime.executor.tracing import write_trace
@@ -119,6 +120,10 @@ _state: dict[str, Any] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio as _asyncio
+
+    loaded = load_env()
+    if loaded:
+        logger.info(".env loaded: %d key(s)", len(loaded))
 
     cfg = load_agent("agent/agent.yaml")
     pipeline = compile_agent(cfg)
