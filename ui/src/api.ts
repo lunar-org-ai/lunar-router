@@ -970,3 +970,55 @@ export async function deleteDataset(name: string): Promise<void> {
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// ─── Onboarding (P1.11) ─────────────────────────────────────────
+
+export interface OnboardingState {
+  template: string | null;
+  name: string;
+  company: string;
+  prompt: string;
+  model: string;
+  tools: string[];
+  channels: string[];
+  completed: boolean;
+  completed_at: string | null;
+  skipped: boolean;
+}
+
+export interface OnboardingCompleteRequest {
+  template: string | null;
+  name: string;
+  company: string;
+  prompt: string;
+  model: string;
+  tools: string[];
+  channels: string[];
+}
+
+export const getOnboardingState = () =>
+  _getJson<OnboardingState>('/v1/onboarding/state');
+
+export async function completeOnboarding(
+  body: OnboardingCompleteRequest,
+): Promise<OnboardingState> {
+  const res = await fetch('/v1/onboarding/complete', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function skipOnboarding(): Promise<OnboardingState> {
+  const res = await fetch('/v1/onboarding/skip', { method: 'POST' });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
