@@ -82,6 +82,10 @@ agentsRouter.put(
   '/:id/improvement',
   proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/improvement`),
 )
+agentsRouter.get(
+  '/:id/channels',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels`),
+)
 agentsRouter.post(
   '/:id/activate',
   proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/activate`),

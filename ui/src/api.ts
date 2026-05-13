@@ -1227,3 +1227,18 @@ export async function putAgentImprovement(
   }
   return res.json();
 }
+
+// Per-agent channel status (P3.3)
+
+export interface ChannelStatus {
+  connected: boolean;
+  meta: Record<string, unknown>;
+}
+
+export interface AgentChannelsResponse {
+  agent_id: string;
+  channels: Record<string, ChannelStatus>;
+}
+
+export const getAgentChannels = (id: string) =>
+  _getJson<AgentChannelsResponse>(`/v1/agents/${encodeURIComponent(id)}/channels`);

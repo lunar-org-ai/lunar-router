@@ -3176,6 +3176,32 @@ class AgentUpdateRequest(BaseModel):
     model: Optional[str] = None
 
 
+class ChannelStatus(BaseModel):
+    connected: bool
+    meta: dict
+
+
+class AgentChannelsResponse(BaseModel):
+    agent_id: str
+    channels: dict[str, ChannelStatus]
+
+
+@app.get("/agents/{agent_id}/channels", response_model=AgentChannelsResponse)
+def list_agent_channels_endpoint(agent_id: str) -> AgentChannelsResponse:
+    """Per-channel connection status for the agent (P3.3). Used by the
+    AgentSheet's Channels tab. Channel-specific connect/disconnect lives
+    on the dedicated channel routers (api/slack/whatsapp)."""
+    from runtime.agents.channels import status as channel_status
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    raw = channel_status(agent_id)
+    return AgentChannelsResponse(
+        agent_id=agent_id,
+        channels={k: ChannelStatus(**v) for k, v in raw.items()},
+    )
+
+
 class ImprovementConfigView(BaseModel):
     enabled: bool = True
     transport: str = "auto"
