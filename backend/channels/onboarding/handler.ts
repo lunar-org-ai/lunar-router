@@ -9,11 +9,20 @@
 import { Hono } from 'hono'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
-const TIMEOUT_MS = 15_000
+const FAST_TIMEOUT_MS = 15_000
+// /onboarding/turn spawns `claude --print` headless on the operator's
+// machine — model latency + subprocess startup can hit 60+s on the first
+// call. Hardcoding the slow timeout per path so other onboarding routes
+// stay snappy and surface stuck-runtime errors quickly.
+const SLOW_TIMEOUT_MS = 180_000
 
 export const onboardingRouter = new Hono()
 
-const proxy = (method: 'GET' | 'POST', path: string) => async (c: import('hono').Context) => {
+const proxy = (
+  method: 'GET' | 'POST',
+  path: string,
+  timeoutMs: number = FAST_TIMEOUT_MS,
+) => async (c: import('hono').Context) => {
   let body: unknown = undefined
   if (method === 'POST') {
     try {
@@ -23,7 +32,7 @@ const proxy = (method: 'GET' | 'POST', path: string) => async (c: import('hono')
     }
   }
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const res = await fetch(RUNTIME_URL + path, {
       method,
@@ -53,5 +62,5 @@ const proxy = (method: 'GET' | 'POST', path: string) => async (c: import('hono')
 onboardingRouter.get('/state', proxy('GET', '/onboarding/state'))
 onboardingRouter.post('/complete', proxy('POST', '/onboarding/complete'))
 onboardingRouter.post('/skip', proxy('POST', '/onboarding/skip'))
-onboardingRouter.post('/turn', proxy('POST', '/onboarding/turn'))
+onboardingRouter.post('/turn', proxy('POST', '/onboarding/turn', SLOW_TIMEOUT_MS))
 onboardingRouter.get('/transport', proxy('GET', '/onboarding/transport'))
