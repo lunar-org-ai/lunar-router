@@ -2571,3 +2571,32 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 @media (max-width: 640px) {
   .talk-welcome-grid { grid-template-columns: 1fr; }
 }
+
+/* P2.2.3 — Onboarding composer hint + placeholder cursor */
+.onbA-composer-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--fg-subtle);
+}
+.onbA-composer-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--fg-muted);
+}
+/* Hide the textarea caret while the rotating placeholder is showing —
+ * the operator's blinker would fight the typewriter animation. */
+.onbA-composer-input:placeholder-shown {
+  caret-color: transparent;
+}
