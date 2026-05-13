@@ -1370,6 +1370,94 @@ export async function disconnectWhatsAppChannel(id: string): Promise<void> {
   }
 }
 
+// Web widget channel (P3.5)
+
+export interface WebWidgetSettings {
+  position: 'br' | 'bl';
+  shape: 'circle' | 'rounded' | 'pill';
+  accent: 'green' | 'blue' | 'plum' | 'slate' | 'brand';
+  greeting: string;
+  welcome: string;
+  fallback: string;
+  show_greeting: boolean;
+  require_email: boolean;
+  pill_label: string;
+}
+
+export interface WebChannelStatus {
+  connected: boolean;
+  widget_id?: string | null;
+  signing_secret_mask?: string | null;
+  allowed_domains?: string[];
+  settings?: WebWidgetSettings;
+  installed_at?: string | null;
+  embed_url?: string | null;
+  message_url?: string | null;
+}
+
+export interface WebChannelConnectResponse {
+  connected: true;
+  widget_id: string;
+  signing_secret: string;
+  signing_secret_mask: string;
+  installed_at: string;
+  embed_url: string;
+  message_url: string;
+}
+
+export const getWebChannel = (id: string) =>
+  _getJson<WebChannelStatus>(`/v1/agents/${encodeURIComponent(id)}/channels/web`);
+
+export async function connectWebChannel(id: string): Promise<WebChannelConnectResponse> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/channels/web/connect`,
+    { method: 'POST' },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function rotateWebChannelSecret(id: string): Promise<WebChannelConnectResponse> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/channels/web/rotate-secret`,
+    { method: 'POST' },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function updateWebChannel(
+  id: string,
+  body: { allowed_domains?: string[]; settings?: Partial<WebWidgetSettings> },
+): Promise<WebChannelStatus> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/web`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function disconnectWebChannel(id: string): Promise<void> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/web`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
+
 // MCP / Hands (P3.4)
 
 export interface MCPServer {

@@ -40,14 +40,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from runtime.compiler.builder import compile_agent
@@ -3295,6 +3296,512 @@ def disconnect_api_channel_endpoint(agent_id: str) -> None:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
     remove(agent_id, "api")
     return None
+
+
+# ─── Web Widget channel (P3.5) ────────────────────────────────────────────
+# Per-agent floating chat widget operators embed on their website. The
+# widget_id is public (visible in the embed snippet); the signing secret
+# is private (used to verify outbound webhooks from us to the operator's
+# backend, if they wire one). The embed JS posts to /widget/<widget_id>/
+# message; we validate the Origin against allowed_domains, then run the
+# agent and return the response synchronously.
+
+
+class WebWidgetSettings(BaseModel):
+    position: str = "br"               # br | bl
+    shape: str = "circle"              # circle | rounded | pill
+    accent: str = "green"              # green | blue | plum | slate | brand
+    greeting: str = ""
+    welcome: str = ""
+    fallback: str = ""
+    show_greeting: bool = True
+    require_email: bool = False
+    pill_label: str = "Chat"
+
+
+class WebChannelStatus(BaseModel):
+    connected: bool
+    widget_id: Optional[str] = None
+    signing_secret_mask: Optional[str] = None
+    allowed_domains: list[str] = []
+    settings: WebWidgetSettings = WebWidgetSettings()
+    installed_at: Optional[str] = None
+    embed_url: Optional[str] = None
+    message_url: Optional[str] = None
+
+
+class WebChannelConnectResponse(BaseModel):
+    connected: bool
+    widget_id: str
+    signing_secret: str                  # returned ONCE on connect/rotate
+    signing_secret_mask: str
+    installed_at: str
+    embed_url: str
+    message_url: str
+
+
+class WebChannelUpdateRequest(BaseModel):
+    allowed_domains: Optional[list[str]] = None
+    settings: Optional[WebWidgetSettings] = None
+
+
+def _mint_widget_id() -> str:
+    import secrets as _secrets
+    return "w_" + _secrets.token_hex(8)
+
+
+def _mint_widget_secret() -> str:
+    import secrets as _secrets
+    return "whsec_" + _secrets.token_urlsafe(24)
+
+
+def _normalize_domain(d: str) -> str:
+    d = d.strip().lower()
+    if d.startswith("http://"):
+        d = d[7:]
+    elif d.startswith("https://"):
+        d = d[8:]
+    # strip path / port
+    return d.split("/", 1)[0].split(":", 1)[0]
+
+
+def _web_public_url(request: Request, widget_id: str, kind: str) -> str:
+    """Build the public URL operators paste into their site.
+
+    Prefers ``PUBLIC_BASE_URL`` so production URLs route through the TS
+    gateway (8002), not the internal Python runtime (8001). Falls back to
+    the request's own base for local dev where they're the same host."""
+    import os
+    base = (os.environ.get("PUBLIC_BASE_URL") or str(request.base_url)).rstrip("/")
+    if kind == "embed":
+        return f"{base}/widget/{widget_id}/v1.js"
+    return f"{base}/widget/{widget_id}/message"
+
+
+def _web_status(agent_id: str, request: Request) -> WebChannelStatus:
+    from runtime.agents.channels import _mask_token, load
+    cfg = load(agent_id, "web")
+    if cfg is None:
+        return WebChannelStatus(connected=False)
+    settings = cfg.get("settings") or {}
+    return WebChannelStatus(
+        connected=True,
+        widget_id=cfg.get("widget_id"),
+        signing_secret_mask=_mask_token(cfg.get("signing_secret", "")),
+        allowed_domains=list(cfg.get("allowed_domains", [])),
+        settings=WebWidgetSettings(**settings),
+        installed_at=cfg.get("installed_at"),
+        embed_url=_web_public_url(request, cfg.get("widget_id", ""), "embed"),
+        message_url=_web_public_url(request, cfg.get("widget_id", ""), "message"),
+    )
+
+
+@app.get("/agents/{agent_id}/channels/web", response_model=WebChannelStatus)
+def get_web_channel_endpoint(agent_id: str, request: Request) -> WebChannelStatus:
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    return _web_status(agent_id, request)
+
+
+@app.post(
+    "/agents/{agent_id}/channels/web/connect",
+    response_model=WebChannelConnectResponse,
+)
+def connect_web_channel_endpoint(
+    agent_id: str, request: Request,
+) -> WebChannelConnectResponse:
+    """Mint a widget_id + signing secret. Returned once so the operator
+    can copy the snippet; subsequent reads only get a mask."""
+    from runtime.agents.channels import _mask_token, load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    existing = load(agent_id, "web")
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="already_connected: rotate secret or disconnect first",
+        )
+    widget_id = _mint_widget_id()
+    secret = _mint_widget_secret()
+    installed_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    save(agent_id, "web", {
+        "widget_id": widget_id,
+        "signing_secret": secret,
+        "allowed_domains": [],
+        "settings": WebWidgetSettings().model_dump(),
+        "installed_at": installed_at,
+    })
+    return WebChannelConnectResponse(
+        connected=True,
+        widget_id=widget_id,
+        signing_secret=secret,
+        signing_secret_mask=_mask_token(secret),
+        installed_at=installed_at,
+        embed_url=_web_public_url(request, widget_id, "embed"),
+        message_url=_web_public_url(request, widget_id, "message"),
+    )
+
+
+@app.post(
+    "/agents/{agent_id}/channels/web/rotate-secret",
+    response_model=WebChannelConnectResponse,
+)
+def rotate_web_channel_secret_endpoint(
+    agent_id: str, request: Request,
+) -> WebChannelConnectResponse:
+    """Replace the signing secret. Old one stops working immediately."""
+    from runtime.agents.channels import _mask_token, load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    existing = load(agent_id, "web")
+    if existing is None:
+        raise HTTPException(status_code=404, detail="not_connected")
+    secret = _mint_widget_secret()
+    existing["signing_secret"] = secret
+    existing["rotated_at"] = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    save(agent_id, "web", existing)
+    return WebChannelConnectResponse(
+        connected=True,
+        widget_id=existing["widget_id"],
+        signing_secret=secret,
+        signing_secret_mask=_mask_token(secret),
+        installed_at=existing.get("installed_at", existing["rotated_at"]),
+        embed_url=_web_public_url(request, existing["widget_id"], "embed"),
+        message_url=_web_public_url(request, existing["widget_id"], "message"),
+    )
+
+
+@app.patch("/agents/{agent_id}/channels/web", response_model=WebChannelStatus)
+def update_web_channel_endpoint(
+    agent_id: str,
+    payload: WebChannelUpdateRequest,
+    request: Request,
+) -> WebChannelStatus:
+    """Update allowed domains or appearance/behavior settings."""
+    from runtime.agents.channels import load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    cfg = load(agent_id, "web")
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="not_connected")
+    if payload.allowed_domains is not None:
+        # Dedupe + normalize before persisting so we never store
+        # protocol/port/path mixed with bare hostnames.
+        seen: list[str] = []
+        for d in payload.allowed_domains:
+            n = _normalize_domain(d)
+            if n and n not in seen:
+                seen.append(n)
+        cfg["allowed_domains"] = seen
+    if payload.settings is not None:
+        cfg["settings"] = payload.settings.model_dump()
+    save(agent_id, "web", cfg)
+    return _web_status(agent_id, request)
+
+
+@app.delete("/agents/{agent_id}/channels/web", status_code=204)
+def disconnect_web_channel_endpoint(agent_id: str) -> None:
+    from runtime.agents.channels import remove
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    remove(agent_id, "web")
+    return None
+
+
+# ─── Public widget endpoints — Origin-gated, no bearer token ───────────────
+
+
+class WidgetMessageRequest(BaseModel):
+    message: str
+    session: Optional[str] = None
+    history: Optional[list[HistoryMessage]] = None
+
+
+class WidgetMessageResponse(BaseModel):
+    response: Optional[str]
+    session: str
+    trace_id: str
+
+
+def _origin_matches(origin: str, allowed: list[str]) -> bool:
+    """Allow exact match, plus a single leading wildcard for subdomains
+    (``*.acme.com`` matches ``help.acme.com`` but not ``acme.com``).
+    Localhost is allowed when ``allowed`` is empty so the operator can
+    test the embed locally before pinning origins."""
+    if not allowed:
+        return origin in ("", "null") or origin.startswith("http://localhost") or origin.startswith("http://127.0.0.1")
+    host = _normalize_domain(origin)
+    for d in allowed:
+        if d.startswith("*."):
+            if host.endswith(d[1:]):
+                return True
+        elif host == d:
+            return True
+    return False
+
+
+@app.options("/widget/{widget_id}/message")
+def widget_message_options(widget_id: str, request: Request) -> Response:
+    """CORS preflight — the embed script runs cross-origin on the
+    customer's site, so we must echo the requested origin."""
+    origin = request.headers.get("origin", "")
+    headers = {
+        "Access-Control-Allow-Origin": origin or "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "content-type",
+        "Access-Control-Max-Age": "600",
+    }
+    return Response(status_code=204, headers=headers)
+
+
+@app.post("/widget/{widget_id}/message", response_model=WidgetMessageResponse)
+def widget_message_endpoint(
+    widget_id: str, payload: WidgetMessageRequest, request: Request,
+) -> WidgetMessageResponse:
+    """Public inbound: the embed JS POSTs every visitor message here. We
+    look up the owning agent by widget_id, gate on Origin (allowed_domains),
+    run the pipeline, return the response synchronously. No auth — the
+    widget_id itself is the routing token; origin pinning is the gate."""
+    from runtime.agents.channels import find_agent_by_channel, load
+    from runtime.agents.registry import activate as activate_agent
+    from runtime.agents.registry import get_registry
+    from runtime.executor.tracing import write_trace
+    from runtime.protocols import Message
+
+    agent_id = find_agent_by_channel("web", {"widget_id": widget_id})
+    if agent_id is None:
+        raise HTTPException(status_code=404, detail="unknown_widget")
+    cfg = load(agent_id, "web") or {}
+    origin = request.headers.get("origin", "")
+    if not _origin_matches(origin, list(cfg.get("allowed_domains", []))):
+        raise HTTPException(status_code=403, detail="origin_not_allowed")
+
+    reg = get_registry()
+    if reg.active != agent_id:
+        try:
+            activate_agent(agent_id, on_activate=lambda m: _reload_live_pipeline(m.id))
+        except Exception as e:
+            logger.warning("widget message: failed to activate %s: %s", agent_id, e)
+
+    history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
+    executor = _state["executor"]
+    _, exec_record = executor.run(payload.message, history=history)
+    trace_id = write_trace(exec_record)
+    session = payload.session or f"web_{uuid.uuid4().hex[:12]}"
+    resp = WidgetMessageResponse(
+        response=exec_record.response,
+        session=session,
+        trace_id=trace_id,
+    )
+    # Echo the CORS header so the browser delivers the body.
+    return JSONResponse(
+        content=resp.model_dump(),
+        headers={
+            "Access-Control-Allow-Origin": origin or "*",
+            "Vary": "Origin",
+        },
+    )
+
+
+@app.get("/widget/{widget_id}/v1.js")
+def widget_embed_js_endpoint(widget_id: str, request: Request) -> Response:
+    """Self-hostable embed script. The operator drops the snippet (which
+    only knows widget_id + endpoint host) and this serves a tiny launcher
+    + chat panel UI that talks to /widget/<id>/message.
+
+    Kept intentionally small + dependency-free so it ships fast and is
+    easy to audit. The full design lives in the dashboard; this is the
+    bootstrap that customers see on the operator's site."""
+    from runtime.agents.channels import load, find_agent_by_channel
+    agent_id = find_agent_by_channel("web", {"widget_id": widget_id})
+    if agent_id is None:
+        return Response(status_code=404, content="// unknown widget", media_type="application/javascript")
+    cfg = load(agent_id, "web") or {}
+    settings = cfg.get("settings") or {}
+    base = str(request.base_url).rstrip("/")
+    accent_map = {
+        "green": "#22a06b",
+        "blue": "#2563eb",
+        "plum": "#9333ea",
+        "slate": "#334155",
+        "brand": "#ea580c",
+    }
+    accent = accent_map.get(settings.get("accent", "green"), "#22a06b")
+    position = settings.get("position", "br")
+    welcome = (settings.get("welcome") or "Hi! How can I help?").replace("`", "\\`")
+    greeting = (settings.get("greeting") or "").replace("`", "\\`")
+    js = _WIDGET_JS_TEMPLATE % {
+        "widget_id": widget_id,
+        "endpoint": f"{base}/widget/{widget_id}/message",
+        "accent": accent,
+        "position": position,
+        "welcome": welcome,
+        "greeting": greeting,
+        "pill_label": settings.get("pill_label", "Chat"),
+    }
+    return Response(
+        content=js,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=60",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+_WIDGET_JS_TEMPLATE = r"""// OpenTracy Web Widget v1 — dependency-free
+(function(){
+  if (window.__OT_WIDGET_LOADED__) return;
+  window.__OT_WIDGET_LOADED__ = true;
+  var WID = "%(widget_id)s";
+  var URL_ = "%(endpoint)s";
+  var ACCENT = "%(accent)s";
+  var POS = "%(position)s";
+  var WELCOME = "%(welcome)s";
+  var GREETING = "%(greeting)s";
+  var PILL = "%(pill_label)s";
+  var session = null;
+  var history = [];
+  var open = false;
+
+  function el(tag, props){
+    var e = document.createElement(tag);
+    for (var k in props) {
+      if (k === "style") for (var s in props[k]) e.style[s] = props[k][s];
+      else if (k === "text") e.textContent = props[k];
+      else e[k] = props[k];
+    }
+    return e;
+  }
+
+  var root = el("div", { style: {
+    position: "fixed",
+    zIndex: 2147483000,
+    bottom: "20px",
+    right: POS === "br" ? "20px" : "auto",
+    left: POS === "bl" ? "20px" : "auto",
+    fontFamily: "system-ui, sans-serif",
+  }});
+
+  var launcher = el("button", {
+    style: {
+      width: "56px", height: "56px", borderRadius: "50%%",
+      background: ACCENT, color: "white", border: "none",
+      boxShadow: "0 6px 24px rgba(0,0,0,0.18)", cursor: "pointer",
+      fontSize: "24px",
+    },
+    text: "\u{1F4AC}",
+    onclick: function(){ togglePanel(); },
+  });
+
+  var panel = el("div", { style: {
+    position: "absolute",
+    bottom: "70px",
+    right: POS === "br" ? "0" : "auto",
+    left: POS === "bl" ? "0" : "auto",
+    width: "340px", maxWidth: "calc(100vw - 40px)",
+    height: "480px", maxHeight: "calc(100vh - 100px)",
+    background: "white", color: "#111",
+    borderRadius: "14px", boxShadow: "0 12px 40px rgba(0,0,0,0.22)",
+    display: "none", flexDirection: "column", overflow: "hidden",
+  }});
+
+  var head = el("div", { style: {
+    padding: "14px 16px", background: ACCENT, color: "white",
+    fontWeight: "600", fontSize: "14px",
+  }, text: "Chat with us"});
+  var thread = el("div", { style: {
+    flex: "1", overflowY: "auto", padding: "14px",
+    display: "flex", flexDirection: "column", gap: "8px",
+    fontSize: "13.5px",
+  }});
+  var inputRow = el("div", { style: {
+    borderTop: "1px solid #eee", padding: "10px", display: "flex", gap: "8px",
+  }});
+  var inputField = el("input", {
+    type: "text", placeholder: "Type a message…",
+    style: { flex: "1", padding: "8px 10px", border: "1px solid #ddd",
+             borderRadius: "8px", fontSize: "13.5px", outline: "none" },
+  });
+  var sendBtn = el("button", {
+    style: { padding: "8px 12px", background: ACCENT, color: "white",
+             border: "none", borderRadius: "8px", cursor: "pointer",
+             fontSize: "13.5px" },
+    text: "Send",
+  });
+  inputField.addEventListener("keydown", function(e){
+    if (e.key === "Enter") send();
+  });
+  sendBtn.onclick = send;
+
+  inputRow.appendChild(inputField);
+  inputRow.appendChild(sendBtn);
+  panel.appendChild(head);
+  panel.appendChild(thread);
+  panel.appendChild(inputRow);
+  root.appendChild(panel);
+  root.appendChild(launcher);
+
+  function addBubble(role, text){
+    var b = el("div", { style: {
+      alignSelf: role === "user" ? "flex-end" : "flex-start",
+      background: role === "user" ? ACCENT : "#f1f3f5",
+      color: role === "user" ? "white" : "#111",
+      padding: "8px 12px", borderRadius: "14px", maxWidth: "80%%",
+      whiteSpace: "pre-wrap", lineHeight: "1.45",
+    }, text: text});
+    thread.appendChild(b);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  function togglePanel(){
+    open = !open;
+    panel.style.display = open ? "flex" : "none";
+    if (open && thread.childNodes.length === 0 && WELCOME) {
+      addBubble("agent", WELCOME);
+    }
+    if (open) setTimeout(function(){ inputField.focus(); }, 80);
+  }
+
+  function send(){
+    var text = inputField.value.trim();
+    if (!text) return;
+    addBubble("user", text);
+    inputField.value = "";
+    history.push({ role: "user", content: text });
+    var typing = el("div", { style: {
+      alignSelf: "flex-start", color: "#888", fontSize: "12px",
+      padding: "4px 12px",
+    }, text: "…"});
+    thread.appendChild(typing);
+    fetch(URL_, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: text, session: session, history: history }),
+    }).then(function(r){ return r.json(); }).then(function(data){
+      thread.removeChild(typing);
+      session = data.session || session;
+      var reply = data.response || "(no response)";
+      addBubble("agent", reply);
+      history.push({ role: "assistant", content: reply });
+    }).catch(function(){
+      thread.removeChild(typing);
+      addBubble("agent", "Sorry, something went wrong. Try again?");
+    });
+  }
+
+  document.body.appendChild(root);
+})();
+"""
 
 
 # ─── Public API: external callers chat with an agent via bearer token ─────

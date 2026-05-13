@@ -7,6 +7,7 @@ import { agentsRouter } from '../channels/agents/handler'
 import { apiChannelRouter } from '../channels/api/handler'
 import { slackRouter } from '../channels/slack/handler'
 import { whatsappRouter } from '../channels/whatsapp/handler'
+import { widgetPublicRouter } from '../channels/widget/handler'
 import { datasetRouter } from '../channels/dataset/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
@@ -41,6 +42,8 @@ app.route('/slack', slackRouter)
 // Twilio WhatsApp webhook. Same pattern — Twilio drives it, signs each
 // request with HMAC-SHA1 over URL+params; verified inside the handler.
 app.route('/whatsapp', whatsappRouter)
+// Web widget — embed JS + public inbound messages. Origin-gated, no auth.
+app.route('/widget', widgetPublicRouter)
 
 // All /v1/* routes require auth and are real channels.
 app.use('/v1/*', apiKeyAuth)
