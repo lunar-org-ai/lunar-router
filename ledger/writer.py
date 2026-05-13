@@ -23,9 +23,34 @@ from ledger.types import ENTRY_KINDS, LedgerEntry, Lesson
 # arbitrary cwd) still find the ledger reliably.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-ENTRIES_DIR = _PROJECT_ROOT / "ledger" / "entries"
-LESSONS_DIR = _PROJECT_ROOT / "ledger" / "lessons"
-DECISIONS_DIR = _PROJECT_ROOT / "ledger" / "decisions"
+_LEDGER_ROOT = _PROJECT_ROOT / "ledger"
+
+
+def _agent_partition() -> str:
+    """Lookup the active agent id at call time. Indirect import so tests
+    that monkeypatch ``runtime.agent_context._active`` see the override."""
+    from runtime.agent_context import get_active
+    return get_active()
+
+
+def _entries_dir_for(agent_id: Optional[str] = None) -> Path:
+    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "entries"
+
+
+def _lessons_dir_for(agent_id: Optional[str] = None) -> Path:
+    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "lessons"
+
+
+def _decisions_dir_for(agent_id: Optional[str] = None) -> Path:
+    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "decisions"
+
+
+# Back-compat aliases — preserved so existing tests that monkeypatch
+# these names keep working. Callers should treat them as fallbacks; the
+# resolver above is the live source of truth.
+ENTRIES_DIR = _LEDGER_ROOT / "entries"
+LESSONS_DIR = _LEDGER_ROOT / "lessons"
+DECISIONS_DIR = _LEDGER_ROOT / "decisions"
 
 
 def _now_iso() -> str:
@@ -51,7 +76,8 @@ def write_entry(
     agent_version_before: Optional[str] = None,
     agent_version_after: Optional[str] = None,
     payload: Optional[dict[str, Any]] = None,
-    entries_dir: Path | str = ENTRIES_DIR,
+    entries_dir: Optional[Path | str] = None,
+    agent_id: Optional[str] = None,
 ) -> LedgerEntry:
     """Append a LedgerEntry. Returns the entry (with assigned id + timestamp)."""
     if kind not in ENTRY_KINDS:
@@ -69,7 +95,7 @@ def write_entry(
         payload=payload or {},
     )
 
-    out_dir = Path(entries_dir)
+    out_dir = Path(entries_dir) if entries_dir is not None else _entries_dir_for(agent_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     path = out_dir / f"{today}.jsonl"
@@ -78,9 +104,14 @@ def write_entry(
     return entry
 
 
-def write_lesson(lesson: Lesson, lessons_dir: Path | str = LESSONS_DIR) -> Path:
+def write_lesson(
+    lesson: Lesson,
+    lessons_dir: Optional[Path | str] = None,
+    *,
+    agent_id: Optional[str] = None,
+) -> Path:
     """Persist a Lesson as a standalone JSON file the UI can read."""
-    out_dir = Path(lessons_dir)
+    out_dir = Path(lessons_dir) if lessons_dir is not None else _lessons_dir_for(agent_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{lesson.id}.json"
     with path.open("w") as f:
@@ -92,7 +123,8 @@ def write_decision(
     kind: str,
     payload: dict[str, Any],
     *,
-    decisions_dir: Path | str = DECISIONS_DIR,
+    decisions_dir: Optional[Path | str] = None,
+    agent_id: Optional[str] = None,
 ) -> Path:
     """Persist a brain decision artifact (P15.3.9).
 
@@ -104,7 +136,7 @@ def write_decision(
     Filename: ``<kind>_<utc_iso_compact>.json`` (e.g.
     ``router_wakeup_20260510T143022Z.json``). Compact ISO is a sort key.
     """
-    out_dir = Path(decisions_dir)
+    out_dir = Path(decisions_dir) if decisions_dir is not None else _decisions_dir_for(agent_id)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = out_dir / f"{kind}_{ts}.json"
@@ -118,10 +150,14 @@ def write_decision(
     return path
 
 
-def read_entries(entries_dir: Path | str = ENTRIES_DIR) -> list[LedgerEntry]:
+def read_entries(
+    entries_dir: Optional[Path | str] = None,
+    *,
+    agent_id: Optional[str] = None,
+) -> list[LedgerEntry]:
     """Read all entries (chronological). For the harness, ledger/ui to query."""
     out: list[LedgerEntry] = []
-    root = Path(entries_dir)
+    root = Path(entries_dir) if entries_dir is not None else _entries_dir_for(agent_id)
     if not root.exists():
         return out
     for p in sorted(root.glob("*.jsonl")):
@@ -135,9 +171,13 @@ def read_entries(entries_dir: Path | str = ENTRIES_DIR) -> list[LedgerEntry]:
     return out
 
 
-def read_lessons(lessons_dir: Path | str = LESSONS_DIR) -> list[Lesson]:
+def read_lessons(
+    lessons_dir: Optional[Path | str] = None,
+    *,
+    agent_id: Optional[str] = None,
+) -> list[Lesson]:
     out: list[Lesson] = []
-    root = Path(lessons_dir)
+    root = Path(lessons_dir) if lessons_dir is not None else _lessons_dir_for(agent_id)
     if not root.exists():
         return out
     for p in sorted(root.glob("*.json")):
@@ -147,9 +187,15 @@ def read_lessons(lessons_dir: Path | str = LESSONS_DIR) -> list[Lesson]:
     return out
 
 
-def read_lesson(lesson_id: str, lessons_dir: Path | str = LESSONS_DIR) -> Optional[Lesson]:
+def read_lesson(
+    lesson_id: str,
+    lessons_dir: Optional[Path | str] = None,
+    *,
+    agent_id: Optional[str] = None,
+) -> Optional[Lesson]:
     """Read a single Lesson by id. Returns None if not found."""
-    p = Path(lessons_dir) / f"{lesson_id}.json"
+    root = Path(lessons_dir) if lessons_dir is not None else _lessons_dir_for(agent_id)
+    p = root / f"{lesson_id}.json"
     if not p.exists():
         return None
     with p.open() as f:
@@ -157,18 +203,22 @@ def read_lesson(lesson_id: str, lessons_dir: Path | str = LESSONS_DIR) -> Option
 
 
 def update_lesson(
-    lesson_id: str, *, lessons_dir: Path | str = LESSONS_DIR, **fields: Any
+    lesson_id: str,
+    *,
+    lessons_dir: Optional[Path | str] = None,
+    agent_id: Optional[str] = None,
+    **fields: Any,
 ) -> Lesson:
     """Mutate a Lesson on disk. Provisional lessons are written by the loop
     and later mutated when a human approves or rejects them — that's the only
     legitimate path for a Lesson to change. Returns the updated Lesson.
     """
-    lesson = read_lesson(lesson_id, lessons_dir)
+    lesson = read_lesson(lesson_id, lessons_dir, agent_id=agent_id)
     if lesson is None:
         raise FileNotFoundError(f"lesson {lesson_id!r} not found")
     for k, v in fields.items():
         if not hasattr(lesson, k):
             raise AttributeError(f"Lesson has no field {k!r}")
         setattr(lesson, k, v)
-    write_lesson(lesson, lessons_dir)
+    write_lesson(lesson, lessons_dir, agent_id=agent_id)
     return lesson

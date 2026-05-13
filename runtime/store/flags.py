@@ -24,7 +24,21 @@ from pathlib import Path
 from typing import Optional
 
 
-_FLAGS_ROOT = Path("traces") / "flagged"
+_DEFAULT_FLAGS_ROOT = Path("traces") / "flagged"
+_FLAGS_ROOT = _DEFAULT_FLAGS_ROOT  # back-compat alias for test overrides
+
+
+def _flags_root_for(agent_id: Optional[str] = None) -> Path:
+    from runtime.agent_context import get_active
+    return Path("traces") / (agent_id or get_active()) / "flagged"
+
+
+def _resolve_root(root: Optional[Path], agent_id: Optional[str] = None) -> Path:
+    if root is not None:
+        return root
+    if _FLAGS_ROOT != _DEFAULT_FLAGS_ROOT:
+        return _FLAGS_ROOT
+    return _flags_root_for(agent_id)
 
 
 def write_flag(
@@ -42,7 +56,7 @@ def write_flag(
             f"{{manual, csat_low, latency_outlier, error, unflag}}, got {source!r}"
         )
 
-    root = root or _FLAGS_ROOT
+    root = _resolve_root(root)
     root.mkdir(parents=True, exist_ok=True)
 
     at = now_iso or _now_iso()
@@ -65,7 +79,7 @@ def iter_flag_rows(
     root: Optional[Path] = None,
 ):
     """Stream flag rows from JSONL partitions, date-filtered."""
-    root = root or _FLAGS_ROOT
+    root = _resolve_root(root)
     if not root.exists():
         return
     since_date = (since_iso or "")[:10] if since_iso else ""

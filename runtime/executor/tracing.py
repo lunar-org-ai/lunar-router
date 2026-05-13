@@ -25,7 +25,13 @@ from runtime.executor.pipeline import ExecutionRecord
 
 logger = logging.getLogger(__name__)
 
-TRACES_DIR = Path("traces/raw")
+TRACES_DIR = Path("traces/raw")  # back-compat alias for tests
+
+
+def _traces_dir_for(agent_id: Optional[str] = None) -> Path:
+    """Resolve ``traces/<agent_id>/raw`` at call time via agent_context."""
+    from runtime.agent_context import get_active
+    return Path("traces") / (agent_id or get_active()) / "raw"
 
 
 class TraceBus:
@@ -140,11 +146,19 @@ def envelope(
 
 def write_trace(
     record: ExecutionRecord,
-    traces_dir: Path | str = TRACES_DIR,
+    traces_dir: Optional[Path | str] = None,
     trace_id: str | None = None,
+    *,
+    agent_id: Optional[str] = None,
 ) -> str:
     """Append the trace as JSONL, then publish a summary event to TraceBus.
-    Returns the trace_id."""
+    Returns the trace_id.
+
+    P2.1: when ``traces_dir`` is not provided, partitions by the active
+    agent: ``traces/<agent_id>/raw/<date>.jsonl``.
+    """
+    if traces_dir is None:
+        traces_dir = _traces_dir_for(agent_id)
     traces_dir = Path(traces_dir)
     traces_dir.mkdir(parents=True, exist_ok=True)
 

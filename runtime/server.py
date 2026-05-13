@@ -127,9 +127,16 @@ async def lifespan(app: FastAPI):
 
     # P2.0 — ensure multi-agent registry exists. On first run this
     # migrates the legacy ``agent/`` dir to ``agents/_default/`` and
-    # writes ``agents/registry.json`` pointing at it. Idempotent.
-    from runtime.agents.registry import ensure_bootstrapped
+    # writes ``agents/registry.json`` pointing at it. P2.1 also moves
+    # flat ledger/* and traces/* dirs into <root>/_default/<kind>/.
+    # Idempotent.
+    from runtime.agent_context import set_active as _set_active_agent
+    from runtime.agents.registry import ensure_bootstrapped, get_registry
     ensure_bootstrapped()
+    reg = get_registry()
+    if reg.active:
+        _set_active_agent(reg.active)
+        logger.info("active agent: %s", reg.active)
 
     cfg = load_agent("agent/agent.yaml")
     pipeline = compile_agent(cfg)
@@ -2951,7 +2958,7 @@ def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingState:
     # the pipeline so /run starts using the new prompt/model immediately.
     try:
         meta = create_agent(body)
-        activate_agent(meta.id, on_activate=lambda _m: _reload_live_pipeline())
+        activate_agent(meta.id, on_activate=lambda m: _reload_live_pipeline(m.id))
     except Exception as e:
         logger.warning(
             "agent registry create+activate failed (%s) — falling back to legacy "
@@ -3083,14 +3090,19 @@ def _summarize(meta, *, active_id: Optional[str]) -> AgentSummary:
     )
 
 
-def _reload_live_pipeline() -> None:
+def _reload_live_pipeline(agent_id: Optional[str] = None) -> None:
     """Recompile the pipeline from the live ``agent/`` dir and swap into
-    the running executor. Called after activate()."""
+    the running executor. Called after activate(). Also updates the
+    process-global agent context so subsequent writes (traces, lessons,
+    etc) partition under the new agent."""
     cfg = load_agent("agent/agent.yaml")
     pipeline = compile_agent(cfg)
     executor = PipelineExecutor(pipeline)
     _state["cfg"] = cfg
     _state["executor"] = executor
+    if agent_id:
+        from runtime.agent_context import set_active
+        set_active(agent_id)
     logger.info("agent %s re-compiled after activate (%d stages)", cfg.version, len(pipeline.stages))
 
 
@@ -3122,7 +3134,7 @@ def create_agent_endpoint(payload: AgentCreateRequest) -> AgentSummary:
 
     meta = create_agent(payload.model_dump())
     if payload.activate:
-        activate_agent(meta.id, on_activate=lambda _m: _reload_live_pipeline())
+        activate_agent(meta.id, on_activate=lambda m: _reload_live_pipeline(m.id))
     return _summarize(meta, active_id=get_registry().active)
 
 
@@ -3135,7 +3147,7 @@ class AgentActivateResponse(BaseModel):
 def activate_agent_endpoint(agent_id: str) -> AgentActivateResponse:
     from runtime.agents.registry import activate as activate_agent
     try:
-        activate_agent(agent_id, on_activate=lambda _m: _reload_live_pipeline())
+        activate_agent(agent_id, on_activate=lambda m: _reload_live_pipeline(m.id))
     except KeyError:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
     except (FileNotFoundError, ValueError) as e:

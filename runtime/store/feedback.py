@@ -25,7 +25,28 @@ from pathlib import Path
 from typing import Optional
 
 
-_FEEDBACK_ROOT = Path("traces") / "feedback"
+_DEFAULT_FEEDBACK_ROOT = Path("traces") / "feedback"
+# Back-compat alias — tests monkeypatch this to point at tmp_path. The
+# resolver below checks whether the alias was overridden and honors it.
+_FEEDBACK_ROOT = _DEFAULT_FEEDBACK_ROOT
+
+
+def _feedback_root_for(agent_id: Optional[str] = None) -> Path:
+    from runtime.agent_context import get_active
+    return Path("traces") / (agent_id or get_active()) / "feedback"
+
+
+def _resolve_root(root: Optional[Path], agent_id: Optional[str] = None) -> Path:
+    """Resolution order:
+      1. explicit ``root=`` param (preferred for new callsites)
+      2. monkeypatched ``_FEEDBACK_ROOT`` module attr (back-compat tests)
+      3. partition under the active agent
+    """
+    if root is not None:
+        return root
+    if _FEEDBACK_ROOT != _DEFAULT_FEEDBACK_ROOT:
+        return _FEEDBACK_ROOT
+    return _feedback_root_for(agent_id)
 
 
 def write_feedback(
@@ -44,7 +65,7 @@ def write_feedback(
     if not isinstance(score, int) or not (1 <= score <= 5):
         raise ValueError(f"score must be int in [1, 5], got {score!r}")
 
-    root = root or _FEEDBACK_ROOT
+    root = _resolve_root(root)
     root.mkdir(parents=True, exist_ok=True)
 
     at = now_iso or _now_iso()
@@ -67,7 +88,7 @@ def iter_feedback(
     root: Optional[Path] = None,
 ):
     """Stream feedback rows from JSONL partitions, date-filtered."""
-    root = root or _FEEDBACK_ROOT
+    root = _resolve_root(root)
     if not root.exists():
         return
     since_date = (since_iso or "")[:10] if since_iso else ""
