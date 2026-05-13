@@ -53,15 +53,17 @@ const proxy = (
     if (res.status === 204) {
       return c.body(null, 204)
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      return c.json(
-        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
-        502,
-      )
-    }
-    const data = await res.json()
-    return c.json(data)
+    // Pass the runtime's status through verbatim — including 4xx like
+    // 404 (unknown agent), 409 (already_connected), 400 (validation).
+    // The UI relies on these codes to choose its branch (e.g. "already
+    // connected, prompt to rotate" vs "real error"). The gateway only
+    // synthesizes its own 502 / 504 when fetch itself failed (below).
+    const text = await res.text()
+    const ct = res.headers.get('content-type') ?? 'application/json'
+    return new Response(text, {
+      status: res.status,
+      headers: { 'content-type': ct },
+    })
   } catch (e) {
     return c.json(
       { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
