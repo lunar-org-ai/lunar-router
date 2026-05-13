@@ -11,12 +11,15 @@ import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  getAgentImprovement,
   getAgentSecrets,
   listAgents,
+  putAgentImprovement,
   putAgentSecrets,
   updateAgent,
   type AgentSecretsResponse,
   type AgentSummary,
+  type ImprovementConfig,
 } from '../api';
 
 type Tab = 'brain' | 'hands' | 'mouths' | 'keys';
@@ -292,24 +295,12 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
               <div className="sheet-section">
                 <h3>Self-improvement engineer</h3>
                 <p className="desc">
-                  Claude Code reads traces, drafts changes, runs evals, opens proposals.
+                  The brain that reads traces, drafts changes, runs evals, and opens proposals.
+                  Pick which transport powers it + which model it uses.
                 </p>
-                <div className="row-item on">
-                  <div className="ricon">
-                    <Icon name="code" size={16} />
-                  </div>
-                  <div className="rmain">
-                    <div className="rname">Claude Code</div>
-                    <div className="rmeta">
-                      <span className="mono">github.com/you/support-agent</span> · last activity 2h
-                      ago
-                    </div>
-                  </div>
-                  <Tag kind="success">
-                    <span className="dot" />
-                    Connected
-                  </Tag>
-                </div>
+                {activeAgent && (
+                  <ImprovementSection agentId={activeAgent.id} />
+                )}
               </div>
             </>
           )}
@@ -558,6 +549,155 @@ const KeyRow = ({
         <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
           Inherited from the global <span className="mono">.env</span>. Save a key here to
           override per-agent.
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Self-improvement engineer section (P3.2) ──────────────────
+const TRANSPORTS: Array<{ id: ImprovementConfig['transport']; name: string; meta: string }> = [
+  { id: 'auto', name: 'Auto', meta: 'Picks claude CLI if installed, else API.' },
+  { id: 'claude_code_cli', name: 'Claude Code CLI', meta: 'Runs `claude --print` locally. Has filesystem + MCP access.' },
+  { id: 'anthropic_api', name: 'Anthropic API', meta: 'Direct SDK call. Sandboxed, no fs.' },
+  { id: 'disabled', name: 'Disabled', meta: 'No autonomous improvement. The agent stays static.' },
+];
+
+const IMPROVEMENT_MODELS: Array<{ id: string; name: string }> = [
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
+];
+
+const ImprovementSection = ({ agentId }: { agentId: string }) => {
+  const [cfg, setCfg] = useState<ImprovementConfig | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getAgentImprovement(agentId)
+      .then((next) => {
+        if (!cancelled) setCfg(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+
+  const patch = async (delta: Partial<ImprovementConfig>) => {
+    if (!cfg || saving) return;
+    const prev = cfg;
+    const optimistic = { ...cfg, ...delta };
+    setCfg(optimistic);
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await putAgentImprovement(agentId, delta);
+      setCfg(next);
+    } catch (e) {
+      setCfg(prev);
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!cfg) {
+    return <div className="dim" style={{ fontSize: 12 }}>Loading…</div>;
+  }
+
+  return (
+    <div className="improvement-stack">
+      <div className="improvement-toggle">
+        <label className="improvement-toggle-label">
+          <input
+            type="checkbox"
+            checked={cfg.enabled && cfg.transport !== 'disabled'}
+            onChange={(e) => void patch({ enabled: e.target.checked })}
+            disabled={saving}
+          />
+          <span>
+            <strong>Autonomous improvement</strong>
+            <span className="dim" style={{ fontSize: 11.5, marginLeft: 8 }}>
+              {cfg.enabled && cfg.transport !== 'disabled' ? 'ON' : 'OFF'}
+            </span>
+          </span>
+        </label>
+        <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+          When ON, the wakeup loop runs the proposer/critic on a cadence.
+        </div>
+      </div>
+
+      <div className="improvement-field">
+        <div className="improvement-field-label">Transport</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          {TRANSPORTS.map((t) => (
+            <button
+              key={t.id}
+              className="row-item"
+              style={{
+                cursor: saving ? 'progress' : 'pointer',
+                borderColor: cfg.transport === t.id ? 'var(--foreground)' : undefined,
+                margin: 0,
+                textAlign: 'left',
+                opacity: saving ? 0.7 : 1,
+              }}
+              onClick={() => void patch({ transport: t.id })}
+              disabled={saving}
+            >
+              <div className="rmain">
+                <div className="rname">{t.name}</div>
+                <div className="rmeta">{t.meta}</div>
+              </div>
+              {cfg.transport === t.id && <Icon name="check" size={14} />}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="improvement-field">
+        <div className="improvement-field-label">Model</div>
+        <select
+          className="improvement-select"
+          value={cfg.model}
+          onChange={(e) => void patch({ model: e.target.value })}
+          disabled={saving || cfg.transport === 'claude_code_cli'}
+        >
+          {IMPROVEMENT_MODELS.map((m) => (
+            <option key={m.id} value={m.id}>{m.name}</option>
+          ))}
+        </select>
+        {cfg.transport === 'claude_code_cli' && (
+          <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
+            Claude Code CLI uses whichever model your local <span className="mono">claude</span> is
+            logged in with — this dropdown only matters for the Anthropic API transport.
+          </div>
+        )}
+      </div>
+
+      <div className="improvement-field">
+        <div className="improvement-field-label">Cadence (minutes)</div>
+        <input
+          type="number"
+          className="improvement-cadence"
+          min={0}
+          max={1440}
+          step={5}
+          value={cfg.cadence_minutes}
+          onChange={(e) => void patch({ cadence_minutes: Number(e.target.value) })}
+          disabled={saving}
+        />
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 4 }}>
+          How often the wakeup loop fires (when enabled). Zero disables the timer; the brain
+          still runs on every Nth /run via the trace counter.
+        </div>
+      </div>
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>
+          {error}
         </div>
       )}
     </div>

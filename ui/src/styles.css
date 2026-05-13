@@ -2631,3 +2631,30 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 }
 .byok-row-input input:focus { border-color: var(--fg); }
 .byok-row-input input:disabled { opacity: 0.6; }
+
+/* P3.2 — improvement section */
+.improvement-stack { display: flex; flex-direction: column; gap: 14px; margin-top: 12px; }
+.improvement-toggle {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.improvement-toggle-label {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 13px; cursor: pointer;
+}
+.improvement-toggle-label input[type=checkbox] { width: 16px; height: 16px; }
+.improvement-field { display: flex; flex-direction: column; gap: 6px; }
+.improvement-field-label { font-size: 12px; font-weight: 500; }
+.improvement-select, .improvement-cadence {
+  font: inherit;
+  font-size: 13px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+}
+.improvement-cadence { max-width: 120px; font-family: var(--font-mono); }
+.improvement-select:focus, .improvement-cadence:focus { border-color: var(--fg); outline: none; }

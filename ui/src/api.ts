@@ -1198,3 +1198,32 @@ export async function putAgentSecrets(
   }
   return res.json();
 }
+
+// Per-agent improvement brain config (P3.2)
+
+export interface ImprovementConfig {
+  enabled: boolean;
+  transport: 'auto' | 'claude_code_cli' | 'anthropic_api' | 'disabled';
+  model: string;
+  cadence_minutes: number;
+  notes: string;
+}
+
+export const getAgentImprovement = (id: string) =>
+  _getJson<ImprovementConfig>(`/v1/agents/${encodeURIComponent(id)}/improvement`);
+
+export async function putAgentImprovement(
+  id: string,
+  body: Partial<ImprovementConfig>,
+): Promise<ImprovementConfig> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/improvement`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
