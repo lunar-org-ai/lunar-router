@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { EmptyState } from '../components/EmptyState';
 import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
@@ -514,24 +515,49 @@ export const Traces = () => {
             <div></div>
           </div>
           {visibleItems.length === 0 ? (
-            <div className="empty-state">
-              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
-                {filter === 'flag'
-                  ? 'No flagged traces yet. Flag one from the drawer to triage it later.'
-                  : 'No traces match those filters.'}
+            // P2.2 — fork between "truly no data yet" (day-zero) and
+            // "filtered to zero". A fresh agent has zero traces total
+            // and no filters set; show the day-zero CTA pointing the
+            // operator at the Talk surface.
+            filter === 'all' && versionFilter === 'all' && !search && total === 0 ? (
+              <div style={{ padding: 8 }}>
+                <EmptyState
+                  icon="timeline"
+                  title="No conversations yet"
+                  description={
+                    <>
+                      Once your agent answers its first request, the trace lands here
+                      with every stage, doc, and decision it made along the way.
+                    </>
+                  }
+                  cta={{
+                    label: 'Talk to your agent',
+                    onClick: () => {
+                      window.location.href = '/talk';
+                    },
+                  }}
+                />
               </div>
-              <button
-                className="btn sm ghost"
-                style={{ marginTop: 12 }}
-                onClick={() => {
-                  setFilter('all');
-                  setVersionFilter('all');
-                  setSearch('');
-                }}
-              >
-                Clear filters
-              </button>
-            </div>
+            ) : (
+              <div className="empty-state">
+                <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
+                  {filter === 'flag'
+                    ? 'No flagged traces yet. Flag one from the drawer to triage it later.'
+                    : 'No traces match those filters.'}
+                </div>
+                <button
+                  className="btn sm ghost"
+                  style={{ marginTop: 12 }}
+                  onClick={() => {
+                    setFilter('all');
+                    setVersionFilter('all');
+                    setSearch('');
+                  }}
+                >
+                  Clear filters
+                </button>
+              </div>
+            )
           ) : (
             visibleItems.map((t) => {
               const v = verdictOf(t);
@@ -1441,13 +1467,25 @@ export const EvalSuites = () => {
             <div></div>
           </div>
           {filtered.length === 0 ? (
-            <div className="empty-state" style={{ padding: 48 }}>
-              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
-                {suites.length === 0
-                  ? 'No suites defined yet. Add a YAML to evals/suites/.'
-                  : 'No suites match.'}
+            suites.length === 0 ? (
+              <div style={{ padding: 8 }}>
+                <EmptyState
+                  icon="flask"
+                  title="No eval suites yet"
+                  description={
+                    <>
+                      Eval suites freeze your agent against a battery of golden inputs +
+                      rubrics. Drop a YAML in <code className="mono">evals/suites/</code> to
+                      see it here — the smoke_v0 starter is a good template.
+                    </>
+                  }
+                />
               </div>
-              {(filter !== 'all' || search) && suites.length > 0 && (
+            ) : (
+              <div className="empty-state" style={{ padding: 48 }}>
+                <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>
+                  No suites match.
+                </div>
                 <button
                   className="btn sm ghost"
                   style={{ marginTop: 12 }}
@@ -1458,8 +1496,8 @@ export const EvalSuites = () => {
                 >
                   Clear filters
                 </button>
-              )}
-            </div>
+              </div>
+            )
           ) : (
             filtered.map((s) => {
               const score = s.last_pass_rate;
@@ -2845,14 +2883,28 @@ export const Datasets = () => {
       </div>
 
       {filtered.length === 0 ? (
-        <div className="card">
-          <div className="empty-state">
-            <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No datasets match.</div>
-            <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
-              Clear filters
-            </button>
+        datasets.length === 0 ? (
+          <EmptyState
+            icon="book"
+            title="No datasets yet"
+            description={
+              <>
+                Datasets accumulate examples your agent has handled — failures, low-CSAT
+                turns, or whatever you curate. The harness mines them for new candidates
+                when it has enough signal.
+              </>
+            }
+          />
+        ) : (
+          <div className="card">
+            <div className="empty-state">
+              <div style={{ fontSize: 13, color: 'var(--muted-foreground)' }}>No datasets match.</div>
+              <button className="btn sm ghost" style={{ marginTop: 12 }} onClick={() => { setFilter('all'); setSearch(''); }}>
+                Clear filters
+              </button>
+            </div>
           </div>
-        </div>
+        )
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
           {filtered.map((d) => (

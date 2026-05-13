@@ -49,7 +49,6 @@ type Filter = 'all' | 'approved' | 'rolled_back';
 
 export const Evolution = () => {
   const { openAgent } = useRootContext();
-  const dayZero = false;
   const [lessons, setLessons] = useState<LessonSummary[]>([]);
   const [metrics, setMetrics] = useState<MetricsOverview | null>(null);
   const [loading, setLoading] = useState(true);
@@ -119,40 +118,6 @@ export const Evolution = () => {
     }
     return lessons;
   }, [lessons, filter]);
-
-  if (dayZero) {
-    return (
-      <div className="content">
-        <h1 className="page-title">Welcome to your agent.</h1>
-        <p className="page-sub">It's not deployed yet. Three small steps and it starts learning.</p>
-        <div className="day-zero">
-          <div className="steps">
-            <div className="step">
-              <div className="n">1</div>
-              <div className="name">Give it a brain</div>
-              <div className="help">A system prompt and a default model.</div>
-            </div>
-            <div className="step">
-              <div className="n">2</div>
-              <div className="name">Give it hands</div>
-              <div className="help">Tools or an MCP server it can call.</div>
-            </div>
-            <div className="step">
-              <div className="n">3</div>
-              <div className="name">Give it a mouth</div>
-              <div className="help">A channel — WhatsApp, Slack, API, or web.</div>
-            </div>
-          </div>
-          <Button onClick={openAgent}>
-            Set up agent <Icon name="chevron" size={14} />
-          </Button>
-          <div className="dim" style={{ fontSize: 12.5, marginTop: 14 }}>
-            Once it's running, this page fills with everything it learns.
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="content">
@@ -306,14 +271,8 @@ export const Evolution = () => {
 
       {loading && lessons.length === 0 ? (
         <div className="dim" style={{ padding: '24px 0', fontSize: 13 }}>Loading lessons…</div>
-      ) : lessons.length === 0 ? (
-        <Card className="px-5 py-12 text-center">
-          <div className="mb-1.5 text-[15px] font-medium">No lessons yet</div>
-          <div className="dim mx-auto max-w-[480px] text-[13px]">
-            The agent hasn't promoted any change yet. Run the harness loop to generate
-            candidates — promotions land here as they happen.
-          </div>
-        </Card>
+      ) : lessons.filter((l) => l.kind !== 'agent_created').length === 0 ? (
+        <DayZero onSetUp={openAgent} />
       ) : (
         <div className="timeline">
           {filtered.map((l) => {
@@ -382,3 +341,38 @@ export const Evolution = () => {
     </div>
   );
 };
+
+// ─── Day-zero empty state ───────────────────────────────────────
+// Shown when the only Lesson is the `agent_created` one from onboarding —
+// i.e. the agent exists but hasn't actually been used or improved yet.
+const DayZero = ({ onSetUp }: { onSetUp: () => void }) => (
+  <>
+    <h1 className="page-title" style={{ marginTop: 0 }}>Welcome to your agent.</h1>
+    <p className="page-sub">It's not deployed yet. Three small steps and it starts learning.</p>
+    <div className="day-zero">
+      <div className="steps">
+        <div className="step">
+          <div className="n">1</div>
+          <div className="name">Give it a brain</div>
+          <div className="help">A system prompt and a default model.</div>
+        </div>
+        <div className="step">
+          <div className="n">2</div>
+          <div className="name">Give it hands</div>
+          <div className="help">Tools or an MCP server it can call.</div>
+        </div>
+        <div className="step">
+          <div className="n">3</div>
+          <div className="name">Give it a mouth</div>
+          <div className="help">A channel — WhatsApp, Slack, API, or web.</div>
+        </div>
+      </div>
+      <Button onClick={onSetUp}>
+        Set up agent <Icon name="chevron" size={14} />
+      </Button>
+      <div className="dim" style={{ fontSize: 12.5, marginTop: 14 }}>
+        Once it's running, this page fills with everything it learns.
+      </div>
+    </div>
+  </>
+);

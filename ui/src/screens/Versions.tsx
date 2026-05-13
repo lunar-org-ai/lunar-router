@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { EmptyState } from '../components/EmptyState';
 import { Icon } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import { Button } from '../components/ui/button';
@@ -100,8 +101,18 @@ export const Versions = () => {
       <div className="content">
         <h1 className="page-title">Versions</h1>
         <p className="page-sub">
-          No versions yet. Promote a candidate via the harness to create the first one.
+          A timeline of every version this agent has been. Rollbacks land here too.
         </p>
+        <EmptyState
+          icon="git"
+          title="No versions yet"
+          description={
+            <>
+              When the harness promotes its first improvement — or you approve a Lesson —
+              the new version snapshot lands here. You can roll back any time.
+            </>
+          }
+        />
       </div>
     );
   }
