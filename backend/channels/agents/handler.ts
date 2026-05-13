@@ -11,6 +11,11 @@
 import { Hono } from 'hono'
 import { SlackConfigError } from '../slack/config'
 import { disconnectAgentSlack, getAgentSlackStatus } from '../slack/handler'
+import {
+  connectAgentWhatsApp,
+  disconnectAgentWhatsApp,
+  getAgentWhatsAppStatus,
+} from '../whatsapp/handler'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 30_000
@@ -127,6 +132,52 @@ agentsRouter.delete('/:id/channels/slack', async (c) => {
     if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
     return c.json(
       { error: 'slack disconnect failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+// ─── WhatsApp / Twilio ─────────────────────────────────────────────────────
+agentsRouter.get('/:id/channels/whatsapp', async (c) => {
+  const id = c.req.param('id') ?? ''
+  return c.json(await getAgentWhatsAppStatus(id))
+})
+
+agentsRouter.put('/:id/channels/whatsapp', async (c) => {
+  const id = c.req.param('id') ?? ''
+  let body: { account_sid?: string; auth_token?: string; from_number?: string; installer_email?: string | null }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  if (!body.account_sid || !body.auth_token || !body.from_number) {
+    return c.json(
+      { error: 'missing fields: account_sid, auth_token, from_number all required' },
+      400,
+    )
+  }
+  try {
+    await connectAgentWhatsApp(id, body as {
+      account_sid: string; auth_token: string; from_number: string; installer_email?: string | null;
+    })
+    return c.json(await getAgentWhatsAppStatus(id))
+  } catch (e) {
+    return c.json(
+      { error: 'whatsapp connect failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+agentsRouter.delete('/:id/channels/whatsapp', async (c) => {
+  const id = c.req.param('id') ?? ''
+  try {
+    await disconnectAgentWhatsApp(id)
+    return c.body(null, 204)
+  } catch (e) {
+    return c.json(
+      { error: 'whatsapp disconnect failed', detail: e instanceof Error ? e.message : String(e) },
       500,
     )
   }

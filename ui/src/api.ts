@@ -1321,3 +1321,51 @@ export async function disconnectSlackChannel(id: string): Promise<void> {
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// WhatsApp / Twilio channel (P3.3.3)
+
+export interface WhatsAppChannelStatus {
+  configured: boolean;
+  connected: boolean;
+  from_number: string | null;
+  account_sid_mask: string | null;
+  installed_at: string | null;
+  inbound_url: string | null;
+  detail: string | null;
+}
+
+export interface WhatsAppConnectRequest {
+  account_sid: string;
+  auth_token: string;
+  from_number: string;
+  installer_email?: string | null;
+}
+
+export const getWhatsAppChannel = (id: string) =>
+  _getJson<WhatsAppChannelStatus>(`/v1/agents/${encodeURIComponent(id)}/channels/whatsapp`);
+
+export async function connectWhatsAppChannel(
+  id: string,
+  body: WhatsAppConnectRequest,
+): Promise<WhatsAppChannelStatus> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/whatsapp`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function disconnectWhatsAppChannel(id: string): Promise<void> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/whatsapp`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
