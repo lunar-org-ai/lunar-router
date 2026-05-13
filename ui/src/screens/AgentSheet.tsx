@@ -146,28 +146,15 @@ export const AgentSheet = ({
   const [drill, setDrill] = useState<Drill>(null);
   const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
   const [savingModel, setSavingModel] = useState(false);
-  const [secrets, setSecrets] = useState<AgentSecretsResponse | null>(null);
-  const [anthropicDraft, setAnthropicDraft] = useState('');
-  const [openaiDraft, setOpenaiDraft] = useState('');
-  const [savingKey, setSavingKey] = useState<'anthropic' | 'openai' | null>(null);
-  const [keyError, setKeyError] = useState<string | null>(null);
-
-  const loadSecrets = async (id: string) => {
-    try {
-      const next = await getAgentSecrets(id);
-      setSecrets(next);
-    } catch (e) {
-      if (!(e instanceof ApiError)) console.warn('getAgentSecrets failed', e);
-    }
-  };
 
   // Load the target agent on mount. If the caller passed `agentId`, we
   // load THAT agent's config (peek mode); otherwise we resolve to
-  // whichever agent the registry says is active.
+  // whichever agent the registry says is active. The Keys tab owns its
+  // own secrets fetch — no need to preload here.
   useEffect(() => {
     let cancelled = false;
     void listAgents()
-      .then(async (res) => {
+      .then((res) => {
         if (cancelled) return;
         const target = agentId
           ? res.agents.find((a) => a.id === agentId) ?? null
@@ -175,7 +162,6 @@ export const AgentSheet = ({
         if (target) {
           setActiveAgent(target);
           setModel(target.model);
-          await loadSecrets(target.id);
         }
       })
       .catch(() => {});
@@ -353,162 +339,13 @@ export const AgentSheet = ({
   );
 };
 
-// ─── BYOK section (P3.1) ────────────────────────────────────────
-// Per-agent Anthropic + OpenAI keys. Resolution status comes from the
-// server (per-agent | global | unset) so the operator sees which keys
-// are wired and where they live before they overwrite.
-interface BYOKSectionProps {
-  agent: AgentSummary;
-  secrets: AgentSecretsResponse | null;
-  anthropicDraft: string;
-  openaiDraft: string;
-  setAnthropicDraft: (s: string) => void;
-  setOpenaiDraft: (s: string) => void;
-  saving: 'anthropic' | 'openai' | null;
-  error: string | null;
-  onSave: (provider: 'anthropic' | 'openai') => Promise<void>;
-  onRemove: (provider: 'anthropic' | 'openai') => Promise<void>;
-}
-
-const BYOKSection = ({
-  agent,
-  secrets,
-  anthropicDraft,
-  openaiDraft,
-  setAnthropicDraft,
-  setOpenaiDraft,
-  saving,
-  error,
-  onSave,
-  onRemove,
-}: BYOKSectionProps) => {
-  const anthropic = secrets?.providers.anthropic;
-  const openai = secrets?.providers.openai;
-  return (
-    <div className="sheet-section">
-      <h3>Provider keys (BYOK)</h3>
-      <p className="desc">
-        Per-agent API keys for <span className="mono">{agent.id}</span>. Files live in{' '}
-        <span className="mono">agents/{agent.id}/secrets.env</span> (gitignored, mode 0600).
-        When unset, the server falls back to the global <span className="mono">.env</span>.
-      </p>
-
-      <KeyRow
-        label="Anthropic"
-        status={anthropic}
-        draft={anthropicDraft}
-        setDraft={setAnthropicDraft}
-        saving={saving === 'anthropic'}
-        placeholder="sk-ant-api03-…"
-        onSave={() => void onSave('anthropic')}
-        onRemove={() => void onRemove('anthropic')}
-      />
-
-      <KeyRow
-        label="OpenAI"
-        status={openai}
-        draft={openaiDraft}
-        setDraft={setOpenaiDraft}
-        saving={saving === 'openai'}
-        placeholder="sk-proj-…"
-        onSave={() => void onSave('openai')}
-        onRemove={() => void onRemove('openai')}
-      />
-
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const KeyRow = ({
-  label,
-  status,
-  draft,
-  setDraft,
-  saving,
-  placeholder,
-  onSave,
-  onRemove,
-}: {
-  label: string;
-  status: { set: boolean; source: string; mask: string | null; var: string } | undefined;
-  draft: string;
-  setDraft: (s: string) => void;
-  saving: boolean;
-  placeholder: string;
-  onSave: () => void;
-  onRemove: () => void;
-}) => {
-  const isPerAgent = status?.source === 'per-agent';
-  const isGlobal = status?.source === 'global';
-  return (
-    <div className="byok-row">
-      <div className="byok-row-head">
-        <span className="byok-label">{label}</span>
-        {status?.set ? (
-          <Tag kind={isPerAgent ? 'success' : 'warn'}>
-            <span className="dot" />
-            {isPerAgent ? 'per-agent' : 'global .env'}
-          </Tag>
-        ) : (
-          <Tag kind="bad">
-            <span className="dot" />
-            unset
-          </Tag>
-        )}
-        {status?.mask && (
-          <span className="mono dim" style={{ fontSize: 11.5, marginLeft: 'auto' }}>
-            {status.mask}
-          </span>
-        )}
-      </div>
-      <div className="byok-row-input">
-        <input
-          type="password"
-          autoComplete="off"
-          placeholder={isPerAgent ? `Replace ${label} key` : placeholder}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          disabled={saving}
-        />
-        <button
-          className="btn sm primary"
-          onClick={onSave}
-          disabled={saving || !draft.trim()}
-        >
-          {saving ? 'Saving…' : isPerAgent ? 'Rotate' : 'Save'}
-        </button>
-        {isPerAgent && (
-          <button
-            className="btn sm ghost"
-            onClick={onRemove}
-            disabled={saving}
-            title={`Remove the per-agent key; ${label} falls back to global .env`}
-          >
-            Remove
-          </button>
-        )}
-      </div>
-      {isGlobal && (
-        <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
-          Inherited from the global <span className="mono">.env</span>. Save a key here to
-          override per-agent.
-        </div>
-      )}
-    </div>
-  );
-};
 
 // ─── Claude Code status row (simplified Brain → Self-improvement) ──
 // Single row + tag. Matches the design's minimal "Claude Code is connected
-// via your subscription" affordance. The detailed transport/cadence
-// controls live in ImprovementSection below (still mounted by Policies),
-// but the Brain tab keeps it terse on purpose: 90% of operators just want
-// to know "is it on?".
+// via your subscription" affordance — 90% of operators just want to know
+// "is it on?". Transport + cadence + model still live in the runtime's
+// improvement.yaml; flipping the toggle here PATCHes enabled. A richer
+// Policies-side surface for the rest of the knobs can come later.
 const ClaudeCodeStatusRow = ({ agentId }: { agentId: string }) => {
   const [transport, setTransport] = useState<'claude_code_cli' | 'anthropic_api' | 'none' | 'loading'>('loading');
   const [cfg, setCfg] = useState<ImprovementConfig | null>(null);
@@ -597,154 +434,6 @@ const ClaudeCodeStatusRow = ({ agentId }: { agentId: string }) => {
   );
 };
 
-// ─── Self-improvement engineer section (P3.2) ──────────────────
-const TRANSPORTS: Array<{ id: ImprovementConfig['transport']; name: string; meta: string }> = [
-  { id: 'auto', name: 'Auto', meta: 'Picks claude CLI if installed, else API.' },
-  { id: 'claude_code_cli', name: 'Claude Code CLI', meta: 'Runs `claude --print` locally. Has filesystem + MCP access.' },
-  { id: 'anthropic_api', name: 'Anthropic API', meta: 'Direct SDK call. Sandboxed, no fs.' },
-  { id: 'disabled', name: 'Disabled', meta: 'No autonomous improvement. The agent stays static.' },
-];
-
-const IMPROVEMENT_MODELS: Array<{ id: string; name: string }> = [
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-];
-
-const ImprovementSection = ({ agentId }: { agentId: string }) => {
-  const [cfg, setCfg] = useState<ImprovementConfig | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getAgentImprovement(agentId)
-      .then((next) => {
-        if (!cancelled) setCfg(next);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [agentId]);
-
-  const patch = async (delta: Partial<ImprovementConfig>) => {
-    if (!cfg || saving) return;
-    const prev = cfg;
-    const optimistic = { ...cfg, ...delta };
-    setCfg(optimistic);
-    setSaving(true);
-    setError(null);
-    try {
-      const next = await putAgentImprovement(agentId, delta);
-      setCfg(next);
-    } catch (e) {
-      setCfg(prev);
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!cfg) {
-    return <div className="dim" style={{ fontSize: 12 }}>Loading…</div>;
-  }
-
-  return (
-    <div className="improvement-stack">
-      <div className="improvement-toggle">
-        <label className="improvement-toggle-label">
-          <input
-            type="checkbox"
-            checked={cfg.enabled && cfg.transport !== 'disabled'}
-            onChange={(e) => void patch({ enabled: e.target.checked })}
-            disabled={saving}
-          />
-          <span>
-            <strong>Autonomous improvement</strong>
-            <span className="dim" style={{ fontSize: 11.5, marginLeft: 8 }}>
-              {cfg.enabled && cfg.transport !== 'disabled' ? 'ON' : 'OFF'}
-            </span>
-          </span>
-        </label>
-        <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
-          When ON, the wakeup loop runs the proposer/critic on a cadence.
-        </div>
-      </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Transport</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {TRANSPORTS.map((t) => (
-            <button
-              key={t.id}
-              className="row-item"
-              style={{
-                cursor: saving ? 'progress' : 'pointer',
-                borderColor: cfg.transport === t.id ? 'var(--foreground)' : undefined,
-                margin: 0,
-                textAlign: 'left',
-                opacity: saving ? 0.7 : 1,
-              }}
-              onClick={() => void patch({ transport: t.id })}
-              disabled={saving}
-            >
-              <div className="rmain">
-                <div className="rname">{t.name}</div>
-                <div className="rmeta">{t.meta}</div>
-              </div>
-              {cfg.transport === t.id && <Icon name="check" size={14} />}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Model</div>
-        <select
-          className="improvement-select"
-          value={cfg.model}
-          onChange={(e) => void patch({ model: e.target.value })}
-          disabled={saving || cfg.transport === 'claude_code_cli'}
-        >
-          {IMPROVEMENT_MODELS.map((m) => (
-            <option key={m.id} value={m.id}>{m.name}</option>
-          ))}
-        </select>
-        {cfg.transport === 'claude_code_cli' && (
-          <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
-            Claude Code CLI uses whichever model your local <span className="mono">claude</span> is
-            logged in with — this dropdown only matters for the Anthropic API transport.
-          </div>
-        )}
-      </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Cadence (minutes)</div>
-        <input
-          type="number"
-          className="improvement-cadence"
-          min={0}
-          max={1440}
-          step={5}
-          value={cfg.cadence_minutes}
-          onChange={(e) => void patch({ cadence_minutes: Number(e.target.value) })}
-          disabled={saving}
-        />
-        <div className="dim" style={{ fontSize: 11.5, marginTop: 4 }}>
-          How often the wakeup loop fires (when enabled). Zero disables the timer; the brain
-          still runs on every Nth /run via the trace counter.
-        </div>
-      </div>
-
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-};
 
 // ─── Channels tab (P3.5 — cards list + drill-in) ────────────────
 // Top-level view is a card per channel; tapping "Configure" opens a
