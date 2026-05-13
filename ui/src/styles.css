@@ -2694,3 +2694,38 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   word-break: break-all;
   margin: 0;
 }
+
+/* P3.3.3 — WhatsApp / Twilio form */
+.whatsapp-form {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.whatsapp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.whatsapp-field > span {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+.whatsapp-input {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+}
+.whatsapp-input:focus { border-color: var(--fg); }
+.whatsapp-input:disabled { opacity: 0.6; }
+.whatsapp-input.mono { font-family: var(--font-mono); font-size: 11.5px; }

@@ -12,13 +12,16 @@ import { Tag } from '../components/Tag';
 import {
   ApiError,
   connectApiChannel,
+  connectWhatsAppChannel,
   disconnectApiChannel,
   disconnectSlackChannel,
+  disconnectWhatsAppChannel,
   getAgentChannels,
   getAgentImprovement,
   getAgentSecrets,
   getApiChannel,
   getSlackChannel,
+  getWhatsAppChannel,
   listAgents,
   putAgentImprovement,
   putAgentSecrets,
@@ -31,6 +34,7 @@ import {
   type ApiChannelStatus,
   type ImprovementConfig,
   type SlackChannelStatus,
+  type WhatsAppChannelStatus,
 } from '../api';
 
 type Tab = 'brain' | 'hands' | 'mouths' | 'keys';
@@ -720,17 +724,7 @@ const ChannelsTab = ({ agentId }: { agentId: string }) => {
 
       <ApiChannelCard agentId={agentId} status={status?.channels.api ?? null} onChange={refresh} />
       <SlackChannelCard agentId={agentId} onChange={refresh} />
-
-      <div className="channel-coming-soon">
-        <div className="row-item" style={{ opacity: 0.6 }}>
-          <div className="ricon"><Icon name="chat" size={14} /></div>
-          <div className="rmain">
-            <div className="rname">WhatsApp</div>
-            <div className="rmeta">Twilio integration — coming next (P3.3.3)</div>
-          </div>
-          <Tag>not yet</Tag>
-        </div>
-      </div>
+      <WhatsAppChannelCard agentId={agentId} onChange={refresh} />
     </div>
   );
 };
@@ -1001,6 +995,206 @@ const SlackChannelCard = ({
           Events URL (configure in Slack app's Event Subscriptions):
           <code className="mono" style={{ marginLeft: 4, padding: '1px 6px', background: 'var(--bg-muted)', borderRadius: 3 }}>
             {status.events_url}
+          </code>
+        </div>
+      )}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const WhatsAppChannelCard = ({
+  agentId,
+  onChange,
+}: {
+  agentId: string;
+  onChange: () => void | Promise<void>;
+}) => {
+  const [status, setStatus] = useState<WhatsAppChannelStatus | null>(null);
+  const [accountSid, setAccountSid] = useState('');
+  const [authToken, setAuthToken] = useState('');
+  const [fromNumber, setFromNumber] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const next = await getWhatsAppChannel(agentId);
+      setStatus(next);
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getWhatsAppChannel failed', e);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [agentId]);
+
+  const save = async () => {
+    if (!accountSid.trim() || !authToken.trim() || !fromNumber.trim()) {
+      setError('All three fields are required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await connectWhatsAppChannel(agentId, {
+        account_sid: accountSid.trim(),
+        auth_token: authToken.trim(),
+        from_number: fromNumber.trim(),
+      });
+      // Clear inputs after success (token shouldn't linger in memory)
+      setAccountSid('');
+      setAuthToken('');
+      setFromNumber('');
+      setEditing(false);
+      await refresh();
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!confirm('Disconnect WhatsApp? The agent will stop receiving messages on this number.')) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await disconnectWhatsAppChannel(agentId);
+      await refresh();
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <div className="row-item" style={{ opacity: 0.6 }}>
+        <div className="ricon"><Icon name="chat" size={14} /></div>
+        <div className="rmain">
+          <div className="rname">WhatsApp</div>
+          <div className="rmeta">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+
+  const showForm = !status.connected || editing;
+
+  return (
+    <div className={`row-item ${status.connected ? 'on' : ''}`} style={{ display: 'block' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="ricon"><Icon name="chat" size={14} /></div>
+        <div className="rmain" style={{ flex: 1 }}>
+          <div className="rname">WhatsApp (Twilio)</div>
+          <div className="rmeta">
+            {status.connected
+              ? <>Connected · <span className="mono">{status.from_number}</span> · SID {status.account_sid_mask}</>
+              : <>Bring your own Twilio number. Sandbox is free; live numbers ~$1/mo.</>}
+            {status.installed_at && status.connected && (
+              <> · installed {new Date(status.installed_at).toLocaleDateString()}</>
+            )}
+          </div>
+        </div>
+        {status.connected && !editing && (
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn sm" onClick={() => setEditing(true)} disabled={busy}>
+              Rotate
+            </button>
+            <button className="btn ghost sm" onClick={() => void disconnect()} disabled={busy}>
+              Disconnect
+            </button>
+          </div>
+        )}
+      </div>
+
+      {!status.configured && (
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.5 }}>
+          Set <span className="mono">PUBLIC_BASE_URL</span> on the backend so Twilio can reach the
+          inbound webhook before connecting. {status.detail}
+        </div>
+      )}
+
+      {status.configured && showForm && (
+        <div className="whatsapp-form">
+          <div style={{ fontSize: 11.5, color: 'var(--fg-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+            From Twilio Console → Account → API keys & tokens. Sandbox <span className="mono">From</span> number is{' '}
+            <span className="mono">whatsapp:+14155238886</span> (operators DM <span className="mono">join &lt;code&gt;</span> to join). For prod, use your Twilio WhatsApp-enabled number.
+          </div>
+          <label className="whatsapp-field">
+            <span>Account SID</span>
+            <input
+              className="whatsapp-input mono"
+              autoComplete="off"
+              placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              value={accountSid}
+              onChange={(e) => setAccountSid(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label className="whatsapp-field">
+            <span>Auth Token</span>
+            <input
+              className="whatsapp-input mono"
+              type="password"
+              autoComplete="off"
+              placeholder="paste your Twilio Auth Token"
+              value={authToken}
+              onChange={(e) => setAuthToken(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label className="whatsapp-field">
+            <span>From Number</span>
+            <input
+              className="whatsapp-input mono"
+              autoComplete="off"
+              placeholder="whatsapp:+14155238886"
+              value={fromNumber}
+              onChange={(e) => setFromNumber(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button className="btn primary sm" onClick={() => void save()} disabled={busy}>
+              {busy ? 'Saving…' : status.connected ? 'Rotate' : 'Connect'}
+            </button>
+            {editing && (
+              <button
+                className="btn ghost sm"
+                onClick={() => {
+                  setEditing(false);
+                  setAccountSid('');
+                  setAuthToken('');
+                  setFromNumber('');
+                }}
+                disabled={busy}
+              >
+                Cancel
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {status.connected && status.inbound_url && !editing && (
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.6 }}>
+          Twilio inbound URL (configure in Messaging → Sender → Webhooks):
+          <code className="mono" style={{ marginLeft: 4, padding: '1px 6px', background: 'var(--bg-muted)', borderRadius: 3 }}>
+            {status.inbound_url}
           </code>
         </div>
       )}

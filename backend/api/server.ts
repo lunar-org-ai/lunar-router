@@ -6,6 +6,7 @@ import { agentRouter } from '../channels/agent/handler'
 import { agentsRouter } from '../channels/agents/handler'
 import { apiChannelRouter } from '../channels/api/handler'
 import { slackRouter } from '../channels/slack/handler'
+import { whatsappRouter } from '../channels/whatsapp/handler'
 import { datasetRouter } from '../channels/dataset/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
@@ -37,6 +38,9 @@ app.get('/health', (c) => c.json({ status: 'ok' }))
 // signed events webhook for messages). Each endpoint authenticates
 // itself: OAuth via state cookie, events via signature.
 app.route('/slack', slackRouter)
+// Twilio WhatsApp webhook. Same pattern — Twilio drives it, signs each
+// request with HMAC-SHA1 over URL+params; verified inside the handler.
+app.route('/whatsapp', whatsappRouter)
 
 // All /v1/* routes require auth and are real channels.
 app.use('/v1/*', apiKeyAuth)
