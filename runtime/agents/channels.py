@@ -163,7 +163,10 @@ def _summarize(channel: str, cfg: dict[str, Any]) -> dict[str, Any]:
     if channel == "web":
         return {
             "widget_id": cfg.get("widget_id"),
-            "embedded_at": cfg.get("embedded_at"),
+            "installed_at": cfg.get("installed_at"),
+            "signing_secret_mask": _mask_token(cfg.get("signing_secret", "")),
+            "allowed_domains": list(cfg.get("allowed_domains", [])),
+            "settings": cfg.get("settings", {}),
         }
     return {}
 

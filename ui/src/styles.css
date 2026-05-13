@@ -2758,3 +2758,178 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 }
 .mcp-input:focus { border-color: var(--fg); }
 .mcp-input.mono { font-family: var(--font-mono); font-size: 11.5px; }
+
+/* ─── Channels tab — P3.5 cards-list + drill-in ─────────────────── */
+
+.sheet { transition: width 280ms cubic-bezier(0.2, 0.9, 0.3, 1); }
+.sheet.wide { width: min(960px, calc(100vw - 48px)); }
+
+.channel-list { display: flex; flex-direction: column; gap: 10px; }
+
+.channel-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 16px 14px;
+  transition: border-color 120ms;
+}
+.channel-card:hover { border-color: var(--foreground); }
+.channel-card.connected { }
+
+.channel-head { display: flex; align-items: flex-start; gap: 12px; }
+.channel-tile {
+  width: 40px; height: 40px;
+  min-width: 40px;
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.channel-tile.sm { width: 22px; height: 22px; min-width: 22px; border-radius: 6px; }
+.channel-tile.sm svg { width: 14px; height: 14px; }
+.channel-tile svg { display: block; }
+.channel-card.connected .channel-tile.t-whatsapp { background: oklch(0.94 0.06 150); color: oklch(0.42 0.13 150); }
+.channel-card.connected .channel-tile.t-widget   { background: oklch(0.94 0.04 80);  color: oklch(0.32 0.005 80); }
+.channel-card.connected .channel-tile.t-api      { background: oklch(0.94 0.04 250); color: oklch(0.38 0.13 250); }
+.channel-tile.t-slack { background: oklch(0.94 0.04 320); color: oklch(0.42 0.13 320); }
+.channel-card:not(.connected) .channel-tile { background: var(--muted); color: var(--muted-foreground); }
+
+.channel-body { flex: 1; min-width: 0; }
+.channel-title-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.channel-name { font-size: 14px; font-weight: 600; letter-spacing: -0.005em; white-space: nowrap; }
+.channel-desc { font-size: 12.5px; color: var(--muted-foreground); margin-top: 3px; line-height: 1.5; }
+
+.channel-status {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.channel-status.connected { background: var(--accent-soft, oklch(0.94 0.06 150)); color: var(--accent-fg, oklch(0.42 0.13 150)); }
+.channel-status.notconfigured { background: var(--muted); color: var(--muted-foreground); border: 1px solid var(--border); padding: 1px 7px; }
+.channel-status .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.channel-meta {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px;
+  color: var(--muted-foreground);
+  min-width: 0;
+}
+.channel-meta .mono {
+  font-size: 11.5px; color: var(--foreground);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex: 0 1 auto;
+}
+.channel-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+/* ─── Drill-in shell ──────────────────────────────────────────── */
+.wcfg {
+  display: flex; flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+}
+.wcfg-topbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.wcfg-back {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 12.5px; color: var(--muted-foreground);
+  background: transparent; border: none;
+  padding: 4px 8px; border-radius: 6px;
+  cursor: pointer;
+}
+.wcfg-back:hover { color: var(--foreground); background: var(--muted); }
+.wcfg-back svg { width: 14px; height: 14px; }
+.wcfg-crumb {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 500;
+}
+.wcfg-crumb .sep { color: var(--muted-foreground); font-weight: 400; }
+.wcfg-crumb .now { display: inline-flex; align-items: center; gap: 6px; }
+.wcfg-config-pane {
+  flex: 1; overflow-y: auto;
+  padding: 24px;
+}
+.wcfg-section { margin-bottom: 28px; }
+.wcfg-section:last-child { margin-bottom: 0; }
+.wcfg-section-head { margin-bottom: 12px; }
+.wcfg-section-head h3 {
+  margin: 0 0 4px; font-size: 13px; font-weight: 600;
+}
+.wcfg-section-head .desc {
+  font-size: 12px; color: var(--muted-foreground); line-height: 1.55;
+}
+.wcfg-row {
+  display: grid; grid-template-columns: 160px 1fr;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: center;
+}
+.wcfg-row:last-child { border-bottom: none; }
+.wcfg-row .k { font-size: 12.5px; color: var(--foreground); }
+
+/* ─── Domain chips ───────────────────────────────────────────── */
+.domain-list {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+.domain-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--muted);
+  border-radius: 6px;
+  padding: 4px 4px 4px 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--foreground);
+}
+.domain-chip .remove {
+  background: transparent; border: none;
+  padding: 2px; border-radius: 4px;
+  cursor: pointer; color: var(--muted-foreground);
+  display: inline-flex; align-items: center;
+}
+.domain-chip .remove:hover { color: var(--foreground); background: var(--background); }
+.domain-input {
+  flex: 1; min-width: 140px;
+  background: transparent; border: none; outline: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--foreground);
+  padding: 4px 8px;
+}
+
+/* ─── Danger zone (disconnect rows) ──────────────────────────── */
+.danger-zone {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+}
+.danger-zone > div:first-child { flex: 1; min-width: 0; }
+.dz-title { font-size: 12.5px; font-weight: 600; }
+.dz-meta { font-size: 11.5px; color: var(--muted-foreground); margin-top: 2px; line-height: 1.5; }
+
+.btn.danger {
+  background: var(--card);
+  color: var(--bad-fg, oklch(0.50 0.18 25));
+  border-color: var(--border);
+}
+.btn.danger:hover {
+  background: var(--bad-soft, oklch(0.94 0.06 25));
+  border-color: var(--bad-soft, oklch(0.94 0.06 25));
+}

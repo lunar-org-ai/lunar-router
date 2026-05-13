@@ -136,6 +136,30 @@ agentsRouter.delete(
   proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api`),
 )
 
+// ─── Web widget channel (P3.5) ─────────────────────────────────────────────
+// Operator-facing CRUD proxies straight to the Python runtime; storage,
+// secret minting, and origin matching all live there.
+agentsRouter.get(
+  '/:id/channels/web',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/web`),
+)
+agentsRouter.post(
+  '/:id/channels/web/connect',
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/web/connect`),
+)
+agentsRouter.post(
+  '/:id/channels/web/rotate-secret',
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/web/rotate-secret`),
+)
+agentsRouter.patch(
+  '/:id/channels/web',
+  proxy('PATCH', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/web`),
+)
+agentsRouter.delete(
+  '/:id/channels/web',
+  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/web`),
+)
+
 // ─── Slack channel (handled locally — OAuth files live in TS) ──────────────
 agentsRouter.get('/:id/channels/slack', async (c) => {
   const id = c.req.param('id')
