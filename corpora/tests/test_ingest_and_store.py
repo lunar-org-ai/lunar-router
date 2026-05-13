@@ -27,9 +27,13 @@ class _BagOfWordsEmbedder:
         self.dim = dim
 
     def embed(self, text: str) -> np.ndarray:
+        import hashlib
         v = np.zeros(self.dim, dtype=np.float32)
         for tok in text.lower().split():
-            v[hash(tok) % self.dim] += 1.0
+            # Stable bucketing — Python's built-in hash() is salted per
+            # process so test ranks could shift run-to-run.
+            bucket = int.from_bytes(hashlib.sha1(tok.encode()).digest()[:4], "big")
+            v[bucket % self.dim] += 1.0
         return v
 
     def embed_batch(self, texts: list[str]) -> np.ndarray:

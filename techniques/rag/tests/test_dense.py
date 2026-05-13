@@ -16,9 +16,11 @@ class _BagOfWordsEmbedder:
     def __init__(self, dim: int = 64) -> None:
         self.dim = dim
     def embed(self, text: str) -> np.ndarray:
+        import hashlib
         v = np.zeros(self.dim, dtype=np.float32)
         for tok in text.lower().split():
-            v[hash(tok) % self.dim] += 1.0
+            bucket = int.from_bytes(hashlib.sha1(tok.encode()).digest()[:4], "big")
+            v[bucket % self.dim] += 1.0
         return v
     def embed_batch(self, texts):
         return np.stack([self.embed(t) for t in texts], axis=0)

@@ -1,0 +1,227 @@
+"""Tests for the conversational onboarding turn (P1.12)."""
+
+from __future__ import annotations
+
+import sys
+import types
+from dataclasses import dataclass
+
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# extract_json — tolerant parsing
+# ---------------------------------------------------------------------------
+
+
+def test_extract_json_plain_object():
+    from runtime.store.onboarding_chat import extract_json
+    out = extract_json('{"reply":"hi","config":{}}')
+    assert out == {"reply": "hi", "config": {}}
+
+
+def test_extract_json_with_fence():
+    from runtime.store.onboarding_chat import extract_json
+    text = '```json\n{"reply":"hi","config":{}}\n```'
+    assert extract_json(text) == {"reply": "hi", "config": {}}
+
+
+def test_extract_json_with_prose_before():
+    from runtime.store.onboarding_chat import extract_json
+    text = 'Sure, here is the JSON:\n{"reply":"hi","config":{}}'
+    assert extract_json(text) == {"reply": "hi", "config": {}}
+
+
+def test_extract_json_handles_nested_braces():
+    from runtime.store.onboarding_chat import extract_json
+    text = '{"reply":"hi","config":{"name":"x","tools":["a"]},"ready":true}'
+    out = extract_json(text)
+    assert out["config"]["name"] == "x"
+    assert out["ready"] is True
+
+
+def test_extract_json_returns_none_on_garbage():
+    from runtime.store.onboarding_chat import extract_json
+    assert extract_json("no json here") is None
+    assert extract_json("") is None
+    assert extract_json("{ unclosed") is None
+
+
+# ---------------------------------------------------------------------------
+# run_turn — scripted fallback path
+# ---------------------------------------------------------------------------
+
+
+def test_run_turn_scripted_fallback_when_no_key(monkeypatch):
+    """No ANTHROPIC_API_KEY → returns scripted SCRIPT[0] for first user
+    message; SCRIPT[1] for second; clamps at last entry."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from runtime.store.onboarding_chat import run_turn
+
+    # 1st user message → SCRIPT[0]
+    out1 = run_turn([{"role": "user", "content": "build a support agent"}])
+    assert "refund" in out1["reply"].lower()
+    assert out1["config"]["tools"] == ["lookup_order", "search_kb"]
+    assert out1["ready"] is False
+
+    # 5th user message → SCRIPT[4] (ready=True)
+    history = [{"role": "user", "content": f"answer {i}"} for i in range(5)]
+    # Interleave assistant turns so it's a realistic history
+    history = []
+    for i in range(5):
+        history.append({"role": "user", "content": f"answer {i}"})
+        history.append({"role": "assistant", "content": "thinking"})
+    out_last = run_turn(history)
+    assert out_last["ready"] is True
+
+
+def test_run_turn_scripted_clamps_beyond_script(monkeypatch):
+    """More user turns than the script has → keep returning the last entry."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from runtime.store.onboarding_chat import run_turn
+
+    history = []
+    for i in range(20):
+        history.append({"role": "user", "content": f"turn {i}"})
+    out = run_turn(history)
+    assert out["ready"] is True
+
+
+# ---------------------------------------------------------------------------
+# run_turn — real-path with mocked Anthropic
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Block:
+    text: str
+
+
+class _Resp:
+    def __init__(self, text: str):
+        self.content = [_Block(text=text)]
+
+
+class _Messages:
+    def __init__(self, text: str):
+        self._text = text
+        self.captured: dict = {}
+
+    def create(self, **kw):
+        self.captured.update(kw)
+        return _Resp(self._text)
+
+
+class _FakeAnthropic:
+    def __init__(self, api_key=None):
+        self.api_key = api_key
+        self.messages = _Messages(_FakeAnthropic.next_text)
+    next_text = ""
+
+
+def _inject_anthropic(monkeypatch, text: str):
+    _FakeAnthropic.next_text = text
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = _FakeAnthropic
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+
+def test_run_turn_parses_valid_json(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _inject_anthropic(
+        monkeypatch,
+        '{"reply":"Cool!","config":{"name":"x-agent","model":"claude-haiku-4-5","prompt":"You are X.","tools":["t1"],"channels":["web"]},"justAdded":{"tool":"t1"},"ready":false}',
+    )
+    from runtime.store.onboarding_chat import run_turn
+    out = run_turn([{"role": "user", "content": "what's it for?"}])
+    assert out["reply"] == "Cool!"
+    assert out["config"]["name"] == "x-agent"
+    assert out["config"]["model"] == "claude-haiku-4-5"
+    assert out["config"]["tools"] == ["t1"]
+    assert out["justAdded"] == {"tool": "t1"}
+    assert out["ready"] is False
+
+
+def test_run_turn_falls_back_when_json_malformed(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    _inject_anthropic(monkeypatch, "I'm not returning JSON, I'm just chatting!")
+    from runtime.store.onboarding_chat import run_turn
+    out = run_turn([{"role": "user", "content": "hi"}])
+    # Falls back to SCRIPT[0]
+    assert "refund" in out["reply"].lower()
+
+
+def test_run_turn_falls_back_when_anthropic_raises(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+
+    class _Bad:
+        def __init__(self, api_key=None):
+            self.messages = self
+        def create(self, **kw):
+            raise RuntimeError("rate limit")
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = _Bad
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    from runtime.store.onboarding_chat import run_turn
+    out = run_turn([{"role": "user", "content": "hi"}])
+    # Did NOT crash; got scripted instead
+    assert out["reply"]
+    assert "config" in out
+
+
+def test_run_turn_strips_invalid_message_roles(monkeypatch):
+    """We send only user/assistant messages to Anthropic — never 'system'
+    (that's the top-level system arg) and never empty content."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
+    captured = {}
+
+    class _Cap:
+        def __init__(self, api_key=None):
+            self.messages = self
+        def create(self, **kw):
+            captured.update(kw)
+            return _Resp('{"reply":"ok","config":{}}')
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = _Cap
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+
+    from runtime.store.onboarding_chat import run_turn
+    run_turn([
+        {"role": "system", "content": "ignore me"},
+        {"role": "user", "content": "real"},
+        {"role": "user", "content": ""},  # empty drops
+        {"role": "assistant", "content": "I am here"},
+    ])
+    msgs = captured["messages"]
+    assert all(m["role"] in {"user", "assistant"} for m in msgs)
+    assert all(m["content"].strip() for m in msgs)
+    assert any(m["content"] == "real" for m in msgs)
+
+
+# ---------------------------------------------------------------------------
+# Server endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_post_onboarding_turn_endpoint(monkeypatch):
+    """POST /onboarding/turn returns the parsed turn shape."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    from fastapi.testclient import TestClient
+    from runtime.server import app
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/onboarding/turn",
+            json={"messages": [{"role": "user", "content": "I want a support agent"}]},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["reply"]
+        assert body["config"]["model"] in {
+            "claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7",
+        }
+        assert "tools" in body["config"]
+        assert "channels" in body["config"]

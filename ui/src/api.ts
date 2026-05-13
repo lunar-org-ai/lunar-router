@@ -1022,3 +1022,46 @@ export async function skipOnboarding(): Promise<OnboardingState> {
   }
   return res.json();
 }
+
+// Conversational onboarding turn (P1.12)
+
+export interface OnboardingChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface OnboardingTurnConfig {
+  name: string;
+  model: string;
+  prompt: string;
+  tools: string[];
+  channels: string[];
+}
+
+export interface OnboardingJustAdded {
+  tool?: string | null;
+  model?: string | null;
+  channel?: string | null;
+}
+
+export interface OnboardingTurnResponse {
+  reply: string;
+  config: OnboardingTurnConfig;
+  justAdded: OnboardingJustAdded | null;
+  ready: boolean;
+}
+
+export async function onboardingTurn(
+  messages: OnboardingChatMessage[],
+): Promise<OnboardingTurnResponse> {
+  const res = await fetch('/v1/onboarding/turn', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ messages }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
