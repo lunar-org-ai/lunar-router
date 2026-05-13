@@ -1065,3 +1065,12 @@ export async function onboardingTurn(
   }
   return res.json();
 }
+
+export interface OnboardingTransportInfo {
+  transport: 'claude_code_cli' | 'anthropic_api' | 'none';
+  cwd: string;
+  claude_version: string | null;
+}
+
+export const getOnboardingTransport = () =>
+  _getJson<OnboardingTransportInfo>('/v1/onboarding/transport');

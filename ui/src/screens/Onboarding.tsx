@@ -20,11 +20,13 @@ import { useEffect, useRef, useState } from 'react';
 
 import {
   completeOnboarding,
+  getOnboardingTransport,
   onboardingTurn,
   skipOnboarding,
   type OnboardingChatMessage,
   type OnboardingJustAdded,
   type OnboardingState,
+  type OnboardingTransportInfo,
   type OnboardingTurnConfig,
 } from '../api';
 import { Icon } from '../components/Icon';
@@ -104,6 +106,19 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
   const [thinking, setThinking] = useState(false);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [transport, setTransport] = useState<OnboardingTransportInfo | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getOnboardingTransport()
+      .then((t) => {
+        if (!cancelled) setTransport(t);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const callTurn = async (history: ChatMsg[]) => {
     setThinking(true);
@@ -180,7 +195,7 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
         onSkip={skip}
         onBack={stage === 'confirm' ? () => setStage('chat') : null}
       />
-      {stage === 'welcome' && <Welcome onSend={handleFirstSend} />}
+      {stage === 'welcome' && <Welcome onSend={handleFirstSend} transport={transport} />}
       {stage === 'chat' && (
         <ChatStage
           messages={messages}
@@ -262,8 +277,58 @@ const UserAvatar = ({ size = 28, label = 'You' }: { size?: number; label?: strin
   </div>
 );
 
+// ─── Transport badge — shows which brain is driving the chat ────────────
+const TransportBadge = ({ transport }: { transport: OnboardingTransportInfo }) => {
+  if (transport.transport === 'claude_code_cli') {
+    return (
+      <div className="onbA-transport-badge onbA-transport-cli">
+        <span className="onbA-transport-dot" />
+        <span>
+          Connected to <strong>Claude Code</strong>
+          {transport.claude_version && ` v${transport.claude_version}`} · reading{' '}
+          <code className="mono">{shortCwd(transport.cwd)}</code>
+        </span>
+      </div>
+    );
+  }
+  if (transport.transport === 'anthropic_api') {
+    return (
+      <div className="onbA-transport-badge">
+        <span className="onbA-transport-dot" />
+        <span>
+          Connected via <strong>Anthropic API</strong> · no filesystem access
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="onbA-transport-badge onbA-transport-offline">
+      <span className="onbA-transport-dot" />
+      <span>
+        Offline mode · scripted onboarding (install <code className="mono">claude</code> or set ANTHROPIC_API_KEY)
+      </span>
+    </div>
+  );
+};
+
+function shortCwd(p: string): string {
+  if (!p) return '~';
+  const home = '/Users/';
+  if (p.startsWith(home)) {
+    const rest = p.slice(home.length).split('/').slice(1).join('/');
+    return rest ? `~/${rest}` : '~';
+  }
+  return p;
+}
+
 // ─── Welcome ──────────────────────────────────────────────────────────────
-const Welcome = ({ onSend }: { onSend: (text: string) => void }) => {
+const Welcome = ({
+  onSend,
+  transport,
+}: {
+  onSend: (text: string) => void;
+  transport: OnboardingTransportInfo | null;
+}) => {
   const [text, setText] = useState('');
   const taRef = useRef<HTMLTextAreaElement>(null);
 
@@ -287,6 +352,7 @@ const Welcome = ({ onSend }: { onSend: (text: string) => void }) => {
             Tell me what it should do and who it's for. I'll set up the prompt, model, tools,
             and channels — you can review and tweak everything before launch.
           </p>
+          {transport && <TransportBadge transport={transport} />}
         </div>
 
         <div className="onbA-composer">
