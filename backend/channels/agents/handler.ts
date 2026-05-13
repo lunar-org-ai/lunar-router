@@ -82,6 +82,26 @@ agentsRouter.put(
   '/:id/improvement',
   proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/improvement`),
 )
+agentsRouter.get(
+  '/:id/channels',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels`),
+)
+agentsRouter.get(
+  '/:id/channels/api',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api`),
+)
+agentsRouter.post(
+  '/:id/channels/api/connect',
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api/connect`),
+)
+agentsRouter.post(
+  '/:id/channels/api/rotate',
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api/rotate`),
+)
+agentsRouter.delete(
+  '/:id/channels/api',
+  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api`),
+)
 agentsRouter.post(
   '/:id/activate',
   proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/activate`),

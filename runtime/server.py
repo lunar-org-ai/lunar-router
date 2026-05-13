@@ -3176,6 +3176,216 @@ class AgentUpdateRequest(BaseModel):
     model: Optional[str] = None
 
 
+class ChannelStatus(BaseModel):
+    connected: bool
+    meta: dict
+
+
+class AgentChannelsResponse(BaseModel):
+    agent_id: str
+    channels: dict[str, ChannelStatus]
+
+
+class ApiChannelStatus(BaseModel):
+    connected: bool
+    token_mask: Optional[str] = None
+    created_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+
+
+@app.get("/agents/{agent_id}/channels/api", response_model=ApiChannelStatus)
+def get_api_channel_endpoint(agent_id: str) -> ApiChannelStatus:
+    from runtime.agents.channels import load
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    cfg = load(agent_id, "api")
+    if cfg is None:
+        return ApiChannelStatus(connected=False)
+    from runtime.agents.channels import _mask_token
+    return ApiChannelStatus(
+        connected=True,
+        token_mask=_mask_token(cfg.get("token", "")),
+        created_at=cfg.get("created_at"),
+        last_used_at=cfg.get("last_used_at"),
+    )
+
+
+class ApiChannelConnectResponse(BaseModel):
+    connected: bool
+    token: str
+    token_mask: str
+    created_at: str
+    public_url: str
+
+
+def _mint_api_token() -> str:
+    import secrets as _secrets
+    return f"ot_{_secrets.token_urlsafe(32)}"
+
+
+@app.post("/agents/{agent_id}/channels/api/connect", response_model=ApiChannelConnectResponse)
+def connect_api_channel_endpoint(agent_id: str, request: Request) -> ApiChannelConnectResponse:
+    """Mint a token. Returned ONCE (raw) so the operator can copy it.
+    Subsequent reads only get a mask."""
+    from runtime.agents.channels import _mask_token, load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    existing = load(agent_id, "api")
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="already_connected: rotate to mint a new token, or disconnect first",
+        )
+
+    token = _mint_api_token()
+    created_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    save(agent_id, "api", {
+        "token": token,
+        "created_at": created_at,
+        "last_used_at": None,
+    })
+    base = str(request.base_url).rstrip("/")
+    return ApiChannelConnectResponse(
+        connected=True,
+        token=token,
+        token_mask=_mask_token(token),
+        created_at=created_at,
+        public_url=f"{base}/api/{agent_id}/chat",
+    )
+
+
+@app.post("/agents/{agent_id}/channels/api/rotate", response_model=ApiChannelConnectResponse)
+def rotate_api_channel_endpoint(agent_id: str, request: Request) -> ApiChannelConnectResponse:
+    """Replace the current token. Old one stops working immediately."""
+    from runtime.agents.channels import _mask_token, load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    existing = load(agent_id, "api") or {}
+
+    token = _mint_api_token()
+    created_at = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    save(agent_id, "api", {
+        "token": token,
+        "created_at": existing.get("created_at") or created_at,
+        "last_used_at": existing.get("last_used_at"),
+        "rotated_at": created_at,
+    })
+    base = str(request.base_url).rstrip("/")
+    return ApiChannelConnectResponse(
+        connected=True,
+        token=token,
+        token_mask=_mask_token(token),
+        created_at=existing.get("created_at") or created_at,
+        public_url=f"{base}/api/{agent_id}/chat",
+    )
+
+
+@app.delete("/agents/{agent_id}/channels/api", status_code=204)
+def disconnect_api_channel_endpoint(agent_id: str) -> None:
+    from runtime.agents.channels import remove
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    remove(agent_id, "api")
+    return None
+
+
+# ─── Public API: external callers chat with an agent via bearer token ─────
+
+
+class ApiChatRequest(BaseModel):
+    request: str
+    history: Optional[list[HistoryMessage]] = None
+
+
+class ApiChatResponse(BaseModel):
+    response: Optional[str]
+    trace_id: str
+    duration_ms: float
+    success: bool
+    error: Optional[str] = None
+
+
+@app.post("/api/{agent_id}/chat", response_model=ApiChatResponse)
+def api_chat_endpoint(
+    agent_id: str, payload: ApiChatRequest, request: Request,
+) -> ApiChatResponse:
+    """Public chat endpoint — authenticate via Bearer token, route to
+    the agent, return the response synchronously. The token is the one
+    minted by /agents/<id>/channels/api/connect."""
+    from runtime.agents.channels import load, save
+    from runtime.agents.registry import activate as activate_agent
+    from runtime.agents.registry import get_agent, get_registry
+    from runtime.executor.tracing import write_trace
+    from runtime.protocols import Message
+
+    auth = request.headers.get("authorization", "")
+    m = _BEARER_RE.match(auth)
+    if not m:
+        raise HTTPException(status_code=401, detail="missing_bearer_token")
+    token = m.group(1).strip()
+
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    cfg = load(agent_id, "api")
+    if cfg is None or cfg.get("token") != token:
+        raise HTTPException(status_code=401, detail="invalid_token")
+
+    # Bump last_used_at so the UI shows freshness
+    now_iso = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
+    cfg["last_used_at"] = now_iso
+    save(agent_id, "api", cfg)
+
+    # Activate the agent if not already, so /run uses the right pipeline
+    reg = get_registry()
+    if reg.active != agent_id:
+        try:
+            activate_agent(agent_id, on_activate=lambda m: _reload_live_pipeline(m.id))
+        except Exception as e:
+            logger.warning("api chat: failed to activate %s: %s", agent_id, e)
+
+    history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
+    executor = _state["executor"]
+    _, exec_record = executor.run(payload.request, history=history)
+    trace_id = write_trace(exec_record)
+
+    return ApiChatResponse(
+        response=exec_record.response,
+        trace_id=trace_id,
+        duration_ms=exec_record.duration_ms,
+        success=exec_record.success,
+        error=exec_record.error,
+    )
+
+
+_BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
+
+
+@app.get("/agents/{agent_id}/channels", response_model=AgentChannelsResponse)
+def list_agent_channels_endpoint(agent_id: str) -> AgentChannelsResponse:
+    """Per-channel connection status for the agent (P3.3). Used by the
+    AgentSheet's Channels tab. Channel-specific connect/disconnect lives
+    on the dedicated channel routers (api/slack/whatsapp)."""
+    from runtime.agents.channels import status as channel_status
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    raw = channel_status(agent_id)
+    return AgentChannelsResponse(
+        agent_id=agent_id,
+        channels={k: ChannelStatus(**v) for k, v in raw.items()},
+    )
+
+
 class ImprovementConfigView(BaseModel):
     enabled: bool = True
     transport: str = "auto"
