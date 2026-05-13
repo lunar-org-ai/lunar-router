@@ -1,18 +1,18 @@
 /**
- * Slack OAuth app config (P3.3.2).
+ * Slack OAuth app config (P3.3.2 + P3.5 BYOK).
  *
- * The operator registers ONE Slack app and brings credentials via env:
- *   - SLACK_CLIENT_ID
- *   - SLACK_CLIENT_SECRET
- *   - SLACK_SIGNING_SECRET
- *   - PUBLIC_BASE_URL    (e.g. https://yourdomain.com — used for redirect_uri)
- *   - UI_BASE_URL        (optional; defaults to PUBLIC_BASE_URL)
+ * Each agent can bring its own Slack app credentials, pasted into the
+ * UI and stored at agents/<id>/integrations/slack_app.json. When
+ * resolving config for an agent, we prefer those over global env vars:
  *
- * Each agent's install lives at agents/<id>/integrations/slack.json so
- * the same Slack app can be installed in multiple workspaces; each
- * workspace's install attaches to the agent the operator was setting
- * up when they clicked Connect.
+ *   - per-agent slack_app.json  → preferred
+ *   - global env (SLACK_CLIENT_ID / SLACK_CLIENT_SECRET / SLACK_SIGNING_SECRET) → fallback
+ *
+ * PUBLIC_BASE_URL stays global (it's where Slack reaches us) and is
+ * required regardless of credential source.
  */
+
+import { readAppCredentialsSync } from './app_credentials'
 
 export interface SlackOAuthConfig {
   clientId: string
@@ -21,6 +21,7 @@ export interface SlackOAuthConfig {
   publicBaseUrl: string
   uiBaseUrl: string
   scopes: string
+  source: 'per-agent' | 'global'
 }
 
 export class SlackConfigError extends Error {
@@ -44,22 +45,45 @@ function trimTrail(s: string): string {
   return s.replace(/\/+$/, '')
 }
 
-export function loadSlackOAuthConfig(): SlackOAuthConfig {
-  const clientId = process.env.SLACK_CLIENT_ID ?? ''
-  const clientSecret = process.env.SLACK_CLIENT_SECRET ?? ''
-  const signingSecret = process.env.SLACK_SIGNING_SECRET ?? ''
+/**
+ * Resolve OAuth config for a given agent, preferring per-agent creds
+ * over global env vars. Pass `agentId=null` to force the global path
+ * (used by callers that don't know which agent yet — like the env-only
+ * health check).
+ */
+export function loadSlackOAuthConfig(agentId: string | null = null): SlackOAuthConfig {
   const publicBaseUrl = trimTrail(process.env.PUBLIC_BASE_URL ?? '')
   const uiBaseUrl = trimTrail(process.env.UI_BASE_URL ?? '') || publicBaseUrl
 
+  let clientId = ''
+  let clientSecret = ''
+  let signingSecret = ''
+  let source: 'per-agent' | 'global' = 'global'
+
+  if (agentId) {
+    const perAgent = readAppCredentialsSync(agentId)
+    if (perAgent) {
+      clientId = perAgent.client_id
+      clientSecret = perAgent.client_secret
+      signingSecret = perAgent.signing_secret
+      source = 'per-agent'
+    }
+  }
+
+  if (!clientId) clientId = process.env.SLACK_CLIENT_ID ?? ''
+  if (!clientSecret) clientSecret = process.env.SLACK_CLIENT_SECRET ?? ''
+  if (!signingSecret) signingSecret = process.env.SLACK_SIGNING_SECRET ?? ''
+
   const missing: string[] = []
-  if (!clientId) missing.push('SLACK_CLIENT_ID')
-  if (!clientSecret) missing.push('SLACK_CLIENT_SECRET')
-  if (!signingSecret) missing.push('SLACK_SIGNING_SECRET')
+  if (!clientId) missing.push('client_id')
+  if (!clientSecret) missing.push('client_secret')
+  if (!signingSecret) missing.push('signing_secret')
   if (!publicBaseUrl) missing.push('PUBLIC_BASE_URL')
 
   if (missing.length > 0) {
     throw new SlackConfigError(
-      `Slack is not configured. Set these env vars on the backend: ${missing.join(', ')}.`,
+      `Slack is not configured. Missing: ${missing.join(', ')}. ` +
+        `Paste app credentials in the agent's Slack panel, or set the env vars on the backend.`,
     )
   }
 
@@ -70,12 +94,18 @@ export function loadSlackOAuthConfig(): SlackOAuthConfig {
     publicBaseUrl,
     uiBaseUrl,
     scopes: REQUIRED_SCOPES,
+    source,
   }
 }
 
-export function isSlackConfigured(): boolean {
+/**
+ * True iff EITHER global env vars are set OR the given agent has its
+ * own per-agent app creds. Pass `agentId=null` to check the env-only
+ * path (used for the global "is Slack reachable at all" status).
+ */
+export function isSlackConfigured(agentId: string | null = null): boolean {
   try {
-    loadSlackOAuthConfig()
+    loadSlackOAuthConfig(agentId)
     return true
   } catch {
     return false

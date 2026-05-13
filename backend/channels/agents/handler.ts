@@ -10,7 +10,13 @@
 
 import { Hono } from 'hono'
 import { SlackConfigError } from '../slack/config'
-import { disconnectAgentSlack, getAgentSlackStatus } from '../slack/handler'
+import {
+  deleteAgentSlackCredentials,
+  disconnectAgentSlack,
+  getAgentSlackCredentials,
+  getAgentSlackStatus,
+  putAgentSlackCredentials,
+} from '../slack/handler'
 import {
   connectAgentWhatsApp,
   disconnectAgentWhatsApp,
@@ -47,15 +53,17 @@ const proxy = (
     if (res.status === 204) {
       return c.body(null, 204)
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => '')
-      return c.json(
-        { error: 'runtime error', detail: `${res.status}: ${text.slice(0, 200)}` },
-        502,
-      )
-    }
-    const data = await res.json()
-    return c.json(data)
+    // Pass the runtime's status through verbatim — including 4xx like
+    // 404 (unknown agent), 409 (already_connected), 400 (validation).
+    // The UI relies on these codes to choose its branch (e.g. "already
+    // connected, prompt to rotate" vs "real error"). The gateway only
+    // synthesizes its own 502 / 504 when fetch itself failed (below).
+    const text = await res.text()
+    const ct = res.headers.get('content-type') ?? 'application/json'
+    return new Response(text, {
+      status: res.status,
+      headers: { 'content-type': ct },
+    })
   } catch (e) {
     return c.json(
       { error: 'runtime call failed', detail: e instanceof Error ? e.message : String(e) },
@@ -182,6 +190,62 @@ agentsRouter.delete('/:id/channels/slack', async (c) => {
     if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
     return c.json(
       { error: 'slack disconnect failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+// ─── Per-agent Slack app credentials (P3.5 BYOK) ───────────────────────────
+agentsRouter.get('/:id/channels/slack/credentials', async (c) => {
+  const id = c.req.param('id') ?? ''
+  try {
+    return c.json(await getAgentSlackCredentials(id))
+  } catch (e) {
+    return c.json(
+      { error: 'slack credentials read failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+agentsRouter.put('/:id/channels/slack/credentials', async (c) => {
+  const id = c.req.param('id') ?? ''
+  let body: { client_id?: string; client_secret?: string; signing_secret?: string }
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: 'invalid json' }, 400)
+  }
+  if (!body.client_id || !body.client_secret || !body.signing_secret) {
+    return c.json(
+      { error: 'missing fields: client_id, client_secret, signing_secret all required' },
+      400,
+    )
+  }
+  try {
+    return c.json(
+      await putAgentSlackCredentials(id, body as {
+        client_id: string
+        client_secret: string
+        signing_secret: string
+      }),
+    )
+  } catch (e) {
+    return c.json(
+      { error: 'slack credentials write failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+agentsRouter.delete('/:id/channels/slack/credentials', async (c) => {
+  const id = c.req.param('id') ?? ''
+  try {
+    await deleteAgentSlackCredentials(id)
+    return c.body(null, 204)
+  } catch (e) {
+    return c.json(
+      { error: 'slack credentials delete failed', detail: e instanceof Error ? e.message : String(e) },
       500,
     )
   }

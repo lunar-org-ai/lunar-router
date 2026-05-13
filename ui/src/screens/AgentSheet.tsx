@@ -14,7 +14,9 @@ import {
   addMCPServer,
   connectApiChannel,
   connectWebChannel,
+  getOnboardingTransport,
   connectWhatsAppChannel,
+  deleteSlackAppCredentials,
   disconnectApiChannel,
   disconnectSlackChannel,
   disconnectWebChannel,
@@ -24,6 +26,7 @@ import {
   getAgentImprovement,
   getAgentSecrets,
   getApiChannel,
+  getSlackAppCredentials,
   getSlackChannel,
   getWebChannel,
   getWhatsAppChannel,
@@ -31,6 +34,7 @@ import {
   listMCPServers,
   putAgentImprovement,
   putAgentSecrets,
+  putSlackAppCredentials,
   removeMCPServer,
   rotateApiChannel,
   rotateWebChannelSecret,
@@ -45,9 +49,11 @@ import {
   type ImprovementConfig,
   type MCPServer,
   type MCPTool,
+  type SlackAppCredentialsView,
   type SlackChannelStatus,
   type WebChannelConnectResponse,
   type WebChannelStatus,
+  type WebWidgetSettings,
   type WhatsAppChannelStatus,
 } from '../api';
 
@@ -67,13 +73,6 @@ interface Channel {
   desc: string;
   on: boolean;
   vol: string | null;
-}
-
-interface Key {
-  id: string;
-  name: string;
-  mask: string;
-  valid: boolean;
 }
 
 const TABS: Array<{ id: Tab; label: string }> = [
@@ -110,11 +109,12 @@ const INITIAL_CHANNELS: Channel[] = [
   { id: 'slack', name: 'Slack', desc: 'Not connected', on: false, vol: null },
 ];
 
-const INITIAL_KEYS: Key[] = [
-  { id: 'k1', name: 'Anthropic', mask: 'sk-ant-…f72a', valid: true },
-  { id: 'k2', name: 'OpenAI', mask: 'sk-…1c0d', valid: true },
-  { id: 'k3', name: 'Stripe', mask: 'sk_live_…b3', valid: true },
-];
+function shortModel(id: string | undefined | null): string {
+  if (!id) return '—';
+  const m = /^claude-(haiku|sonnet|opus)-(\d+)-(\d+)/i.exec(id);
+  if (m) return `${m[1]} ${m[2]}.${m[3]}`;
+  return id;
+}
 
 const toolIcon = (src: Tool['src']): IconName =>
   src === 'mcp' ? 'route' : src === 'builtin' ? 'sparkles' : 'code';
@@ -123,50 +123,52 @@ const channelIcon = (id: Channel['id']): IconName => (id === 'api' ? 'code' : 'c
 
 type Drill = null | 'widget' | 'slack' | 'whatsapp' | 'api';
 
-export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
+/**
+ * AgentSheet — the four-tab drawer (Brain / Hands / Channels / Keys).
+ *
+ * When `agentId` is provided, the sheet loads that specific agent's
+ * config without activating it — useful for peeking at another agent's
+ * brain from the AgentSwitcher dropdown. When omitted, it loads
+ * whichever agent the registry says is active.
+ */
+export const AgentSheet = ({
+  onClose,
+  agentId,
+}: {
+  onClose: () => void;
+  agentId?: string | null;
+}) => {
   const [tab, setTab] = useState<Tab>('brain');
   const [model, setModel] = useState('claude-sonnet-4-6');
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
   const [tools, setTools] = useState<Tool[]>(INITIAL_TOOLS);
   const [channels, setChannels] = useState<Channel[]>(INITIAL_CHANNELS);
-  const [keys] = useState<Key[]>(INITIAL_KEYS);
   const [drill, setDrill] = useState<Drill>(null);
   const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
   const [savingModel, setSavingModel] = useState(false);
-  const [secrets, setSecrets] = useState<AgentSecretsResponse | null>(null);
-  const [anthropicDraft, setAnthropicDraft] = useState('');
-  const [openaiDraft, setOpenaiDraft] = useState('');
-  const [savingKey, setSavingKey] = useState<'anthropic' | 'openai' | null>(null);
-  const [keyError, setKeyError] = useState<string | null>(null);
 
-  const loadSecrets = async (id: string) => {
-    try {
-      const next = await getAgentSecrets(id);
-      setSecrets(next);
-    } catch (e) {
-      if (!(e instanceof ApiError)) console.warn('getAgentSecrets failed', e);
-    }
-  };
-
-  // Load the active agent on mount so the Brain tab reflects the
-  // operator's real configuration, not a hardcoded default.
+  // Load the target agent on mount. If the caller passed `agentId`, we
+  // load THAT agent's config (peek mode); otherwise we resolve to
+  // whichever agent the registry says is active. The Keys tab owns its
+  // own secrets fetch — no need to preload here.
   useEffect(() => {
     let cancelled = false;
     void listAgents()
-      .then(async (res) => {
+      .then((res) => {
         if (cancelled) return;
-        const active = res.agents.find((a) => a.id === res.active) ?? null;
-        if (active) {
-          setActiveAgent(active);
-          setModel(active.model);
-          await loadSecrets(active.id);
+        const target = agentId
+          ? res.agents.find((a) => a.id === agentId) ?? null
+          : res.agents.find((a) => a.id === res.active) ?? null;
+        if (target) {
+          setActiveAgent(target);
+          setModel(target.model);
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agentId]);
 
   const pickModel = async (next: string) => {
     if (!activeAgent || next === model || savingModel) return;
@@ -198,10 +200,21 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
         <div className="sheet-head">
           <div className="sidebar-mark" style={{ width: 26, height: 26, borderRadius: 8 }} />
           <div style={{ flex: 1 }}>
-            <h2>support-agent</h2>
+            <h2>{activeAgent?.name ?? activeAgent?.id ?? 'agent'}</h2>
             <div className="dim" style={{ fontSize: 12, marginTop: 2 }}>
-              <span className="mono">v0.40</span> · live ·{' '}
-              <span style={{ color: 'var(--accent-fg)' }}>● healthy</span>
+              <span className="mono">{activeAgent?.id ?? '—'}</span>
+              {' · '}
+              {activeAgent?.is_active ? (
+                <span style={{ color: 'var(--accent-fg)' }}>● live</span>
+              ) : (
+                <span style={{ color: 'var(--fg-muted)' }}>○ inactive (peeking)</span>
+              )}
+              {activeAgent?.model && (
+                <>
+                  {' · '}
+                  <span className="mono">{shortModel(activeAgent.model)}</span>
+                </>
+              )}
             </div>
           </div>
           <button className="btn ghost sm" onClick={onClose} aria-label="Close">
@@ -295,60 +308,13 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                 )}
               </div>
 
-              {activeAgent && (
-                <BYOKSection
-                  agent={activeAgent}
-                  secrets={secrets}
-                  anthropicDraft={anthropicDraft}
-                  openaiDraft={openaiDraft}
-                  setAnthropicDraft={setAnthropicDraft}
-                  setOpenaiDraft={setOpenaiDraft}
-                  saving={savingKey}
-                  error={keyError}
-                  onSave={async (provider) => {
-                    setSavingKey(provider);
-                    setKeyError(null);
-                    try {
-                      const body = provider === 'anthropic'
-                        ? { anthropic: anthropicDraft }
-                        : { openai: openaiDraft };
-                      const next = await putAgentSecrets(activeAgent.id, body);
-                      setSecrets(next);
-                      if (provider === 'anthropic') setAnthropicDraft('');
-                      else setOpenaiDraft('');
-                    } catch (e) {
-                      setKeyError(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setSavingKey(null);
-                    }
-                  }}
-                  onRemove={async (provider) => {
-                    setSavingKey(provider);
-                    setKeyError(null);
-                    try {
-                      const body = provider === 'anthropic'
-                        ? { anthropic: '' }
-                        : { openai: '' };
-                      const next = await putAgentSecrets(activeAgent.id, body);
-                      setSecrets(next);
-                    } catch (e) {
-                      setKeyError(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setSavingKey(null);
-                    }
-                  }}
-                />
-              )}
-
               <div className="sheet-section">
                 <h3>Self-improvement engineer</h3>
                 <p className="desc">
-                  The brain that reads traces, drafts changes, runs evals, and opens proposals.
-                  Pick which transport powers it + which model it uses.
+                  Claude Code reads traces, drafts changes, runs evals, opens proposals.
+                  Uses your Claude Code subscription — no separate API key needed.
                 </p>
-                {activeAgent && (
-                  <ImprovementSection agentId={activeAgent.id} />
-                )}
+                {activeAgent && <ClaudeCodeStatusRow agentId={activeAgent.id} />}
               </div>
             </>
           )}
@@ -365,37 +331,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
             />
           )}
 
-          {tab === 'keys' && (
-            <div className="sheet-section">
-              <h3>API keys</h3>
-              <p className="desc">Stored encrypted. Used by the model router and tools.</p>
-              {keys.map((k) => (
-                <div className="row-item on" key={k.id}>
-                  <div className="ricon">
-                    <Icon name="shield" size={14} />
-                  </div>
-                  <div className="rmain">
-                    <div className="rname">{k.name}</div>
-                    <div className="rmeta mono">{k.mask}</div>
-                  </div>
-                  {k.valid ? (
-                    <Tag kind="success">
-                      <span className="dot" />
-                      Valid
-                    </Tag>
-                  ) : (
-                    <Tag kind="bad">
-                      <span className="dot" />
-                      Invalid
-                    </Tag>
-                  )}
-                </div>
-              ))}
-              <button className="add-btn" style={{ marginTop: 8 }}>
-                + Add API key
-              </button>
-            </div>
-          )}
+          {tab === 'keys' && activeAgent && <KeysTab agentId={activeAgent.id} />}
         </div>
         )}
       </div>
@@ -403,304 +339,101 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
   );
 };
 
-// ─── BYOK section (P3.1) ────────────────────────────────────────
-// Per-agent Anthropic + OpenAI keys. Resolution status comes from the
-// server (per-agent | global | unset) so the operator sees which keys
-// are wired and where they live before they overwrite.
-interface BYOKSectionProps {
-  agent: AgentSummary;
-  secrets: AgentSecretsResponse | null;
-  anthropicDraft: string;
-  openaiDraft: string;
-  setAnthropicDraft: (s: string) => void;
-  setOpenaiDraft: (s: string) => void;
-  saving: 'anthropic' | 'openai' | null;
-  error: string | null;
-  onSave: (provider: 'anthropic' | 'openai') => Promise<void>;
-  onRemove: (provider: 'anthropic' | 'openai') => Promise<void>;
-}
 
-const BYOKSection = ({
-  agent,
-  secrets,
-  anthropicDraft,
-  openaiDraft,
-  setAnthropicDraft,
-  setOpenaiDraft,
-  saving,
-  error,
-  onSave,
-  onRemove,
-}: BYOKSectionProps) => {
-  const anthropic = secrets?.providers.anthropic;
-  const openai = secrets?.providers.openai;
-  return (
-    <div className="sheet-section">
-      <h3>Provider keys (BYOK)</h3>
-      <p className="desc">
-        Per-agent API keys for <span className="mono">{agent.id}</span>. Files live in{' '}
-        <span className="mono">agents/{agent.id}/secrets.env</span> (gitignored, mode 0600).
-        When unset, the server falls back to the global <span className="mono">.env</span>.
-      </p>
-
-      <KeyRow
-        label="Anthropic"
-        status={anthropic}
-        draft={anthropicDraft}
-        setDraft={setAnthropicDraft}
-        saving={saving === 'anthropic'}
-        placeholder="sk-ant-api03-…"
-        onSave={() => void onSave('anthropic')}
-        onRemove={() => void onRemove('anthropic')}
-      />
-
-      <KeyRow
-        label="OpenAI"
-        status={openai}
-        draft={openaiDraft}
-        setDraft={setOpenaiDraft}
-        saving={saving === 'openai'}
-        placeholder="sk-proj-…"
-        onSave={() => void onSave('openai')}
-        onRemove={() => void onRemove('openai')}
-      />
-
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-          {error}
-        </div>
-      )}
-    </div>
-  );
-};
-
-const KeyRow = ({
-  label,
-  status,
-  draft,
-  setDraft,
-  saving,
-  placeholder,
-  onSave,
-  onRemove,
-}: {
-  label: string;
-  status: { set: boolean; source: string; mask: string | null; var: string } | undefined;
-  draft: string;
-  setDraft: (s: string) => void;
-  saving: boolean;
-  placeholder: string;
-  onSave: () => void;
-  onRemove: () => void;
-}) => {
-  const isPerAgent = status?.source === 'per-agent';
-  const isGlobal = status?.source === 'global';
-  return (
-    <div className="byok-row">
-      <div className="byok-row-head">
-        <span className="byok-label">{label}</span>
-        {status?.set ? (
-          <Tag kind={isPerAgent ? 'success' : 'warn'}>
-            <span className="dot" />
-            {isPerAgent ? 'per-agent' : 'global .env'}
-          </Tag>
-        ) : (
-          <Tag kind="bad">
-            <span className="dot" />
-            unset
-          </Tag>
-        )}
-        {status?.mask && (
-          <span className="mono dim" style={{ fontSize: 11.5, marginLeft: 'auto' }}>
-            {status.mask}
-          </span>
-        )}
-      </div>
-      <div className="byok-row-input">
-        <input
-          type="password"
-          autoComplete="off"
-          placeholder={isPerAgent ? `Replace ${label} key` : placeholder}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          disabled={saving}
-        />
-        <button
-          className="btn sm primary"
-          onClick={onSave}
-          disabled={saving || !draft.trim()}
-        >
-          {saving ? 'Saving…' : isPerAgent ? 'Rotate' : 'Save'}
-        </button>
-        {isPerAgent && (
-          <button
-            className="btn sm ghost"
-            onClick={onRemove}
-            disabled={saving}
-            title={`Remove the per-agent key; ${label} falls back to global .env`}
-          >
-            Remove
-          </button>
-        )}
-      </div>
-      {isGlobal && (
-        <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
-          Inherited from the global <span className="mono">.env</span>. Save a key here to
-          override per-agent.
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ─── Self-improvement engineer section (P3.2) ──────────────────
-const TRANSPORTS: Array<{ id: ImprovementConfig['transport']; name: string; meta: string }> = [
-  { id: 'auto', name: 'Auto', meta: 'Picks claude CLI if installed, else API.' },
-  { id: 'claude_code_cli', name: 'Claude Code CLI', meta: 'Runs `claude --print` locally. Has filesystem + MCP access.' },
-  { id: 'anthropic_api', name: 'Anthropic API', meta: 'Direct SDK call. Sandboxed, no fs.' },
-  { id: 'disabled', name: 'Disabled', meta: 'No autonomous improvement. The agent stays static.' },
-];
-
-const IMPROVEMENT_MODELS: Array<{ id: string; name: string }> = [
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-];
-
-const ImprovementSection = ({ agentId }: { agentId: string }) => {
+// ─── Claude Code status row (simplified Brain → Self-improvement) ──
+// Single row + tag. Matches the design's minimal "Claude Code is connected
+// via your subscription" affordance — 90% of operators just want to know
+// "is it on?". Transport + cadence + model still live in the runtime's
+// improvement.yaml; flipping the toggle here PATCHes enabled. A richer
+// Policies-side surface for the rest of the knobs can come later.
+const ClaudeCodeStatusRow = ({ agentId }: { agentId: string }) => {
+  const [transport, setTransport] = useState<'claude_code_cli' | 'anthropic_api' | 'none' | 'loading'>('loading');
   const [cfg, setCfg] = useState<ImprovementConfig | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    void getAgentImprovement(agentId)
-      .then((next) => {
-        if (!cancelled) setCfg(next);
+    void getOnboardingTransport()
+      .then((t) => {
+        if (cancelled) return;
+        setTransport(t.transport);
+        setVersion(t.claude_version);
       })
+      .catch(() => !cancelled && setTransport('none'));
+    void getAgentImprovement(agentId)
+      .then((c) => !cancelled && setCfg(c))
       .catch(() => {});
     return () => {
       cancelled = true;
     };
   }, [agentId]);
 
-  const patch = async (delta: Partial<ImprovementConfig>) => {
+  const toggle = async () => {
     if (!cfg || saving) return;
-    const prev = cfg;
-    const optimistic = { ...cfg, ...delta };
-    setCfg(optimistic);
     setSaving(true);
-    setError(null);
     try {
-      const next = await putAgentImprovement(agentId, delta);
+      const next = await putAgentImprovement(agentId, { enabled: !cfg.enabled });
       setCfg(next);
     } catch (e) {
-      setCfg(prev);
-      setError(e instanceof Error ? e.message : String(e));
+      console.warn('toggle improvement failed', e);
     } finally {
       setSaving(false);
     }
   };
 
-  if (!cfg) {
-    return <div className="dim" style={{ fontSize: 12 }}>Loading…</div>;
-  }
+  const isOn = cfg ? cfg.enabled && cfg.transport !== 'disabled' : false;
+  const hasCli = transport === 'claude_code_cli';
 
   return (
-    <div className="improvement-stack">
-      <div className="improvement-toggle">
-        <label className="improvement-toggle-label">
-          <input
-            type="checkbox"
-            checked={cfg.enabled && cfg.transport !== 'disabled'}
-            onChange={(e) => void patch({ enabled: e.target.checked })}
-            disabled={saving}
-          />
-          <span>
-            <strong>Autonomous improvement</strong>
-            <span className="dim" style={{ fontSize: 11.5, marginLeft: 8 }}>
-              {cfg.enabled && cfg.transport !== 'disabled' ? 'ON' : 'OFF'}
-            </span>
-          </span>
-        </label>
-        <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
-          When ON, the wakeup loop runs the proposer/critic on a cadence.
-        </div>
-      </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Transport</div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-          {TRANSPORTS.map((t) => (
-            <button
-              key={t.id}
-              className="row-item"
-              style={{
-                cursor: saving ? 'progress' : 'pointer',
-                borderColor: cfg.transport === t.id ? 'var(--foreground)' : undefined,
-                margin: 0,
-                textAlign: 'left',
-                opacity: saving ? 0.7 : 1,
-              }}
-              onClick={() => void patch({ transport: t.id })}
-              disabled={saving}
-            >
-              <div className="rmain">
-                <div className="rname">{t.name}</div>
-                <div className="rmeta">{t.meta}</div>
-              </div>
-              {cfg.transport === t.id && <Icon name="check" size={14} />}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Model</div>
-        <select
-          className="improvement-select"
-          value={cfg.model}
-          onChange={(e) => void patch({ model: e.target.value })}
-          disabled={saving || cfg.transport === 'claude_code_cli'}
-        >
-          {IMPROVEMENT_MODELS.map((m) => (
-            <option key={m.id} value={m.id}>{m.name}</option>
-          ))}
-        </select>
-        {cfg.transport === 'claude_code_cli' && (
-          <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
-            Claude Code CLI uses whichever model your local <span className="mono">claude</span> is
-            logged in with — this dropdown only matters for the Anthropic API transport.
+    <div className={`row-item ${isOn ? 'on' : ''}`} style={{ display: 'block' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="ricon"><Icon name="code" size={16} /></div>
+        <div className="rmain">
+          <div className="rname">Claude Code</div>
+          <div className="rmeta">
+            {transport === 'loading' ? (
+              'Checking local installation…'
+            ) : hasCli ? (
+              <>
+                CLI detected{version && <> · <span className="mono">{version}</span></>}
+                {' · '}uses your Claude Code subscription
+              </>
+            ) : transport === 'anthropic_api' ? (
+              <>No local <span className="mono">claude</span> CLI · falling back to Anthropic API key</>
+            ) : (
+              <>Not installed locally — <a href="https://claude.com/claude-code" target="_blank" rel="noreferrer">install Claude Code</a> to enable</>
+            )}
           </div>
+        </div>
+        {hasCli ? (
+          <Tag kind="success"><span className="dot" />Connected</Tag>
+        ) : transport === 'anthropic_api' ? (
+          <Tag kind="warn"><span className="dot" />API fallback</Tag>
+        ) : (
+          <Tag kind="bad"><span className="dot" />Not installed</Tag>
         )}
       </div>
-
-      <div className="improvement-field">
-        <div className="improvement-field-label">Cadence (minutes)</div>
-        <input
-          type="number"
-          className="improvement-cadence"
-          min={0}
-          max={1440}
-          step={5}
-          value={cfg.cadence_minutes}
-          onChange={(e) => void patch({ cadence_minutes: Number(e.target.value) })}
-          disabled={saving}
-        />
-        <div className="dim" style={{ fontSize: 11.5, marginTop: 4 }}>
-          How often the wakeup loop fires (when enabled). Zero disables the timer; the brain
-          still runs on every Nth /run via the trace counter.
-        </div>
-      </div>
-
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>
-          {error}
+      {cfg && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--fg)' }}>
+            <button
+              className={`switch ${isOn ? 'on' : ''}`}
+              onClick={() => void toggle()}
+              disabled={saving || transport === 'none'}
+              aria-label="Toggle autonomous improvement"
+            />
+            Autonomous improvement
+          </label>
+          <span className="dim" style={{ fontSize: 11.5, marginLeft: 'auto' }}>
+            {isOn ? `runs every ${cfg.cadence_minutes}m` : 'paused'}
+          </span>
         </div>
       )}
     </div>
   );
 };
+
 
 // ─── Channels tab (P3.5 — cards list + drill-in) ────────────────
 // Top-level view is a card per channel; tapping "Configure" opens a
@@ -892,23 +625,22 @@ interface ChannelCardSpec {
   meta: { primary: string; vol: string | null } | null;
   primaryAction: { label: string; icon: string; primary?: boolean; onClick: () => void };
 }
-
-// ─── Drill-in shell (back nav + breadcrumb) ─────────────────────
+// ─── Drill-in shell (back nav + breadcrumb + status pill) ──────
 interface DrillFrameProps {
   channelName: string;
-  tileClass: string;
   glyph: React.ReactNode;
   connected: boolean;
   onBack: () => void;
+  topActions?: React.ReactNode;
   children: React.ReactNode;
 }
 
 const ChannelDrillFrame = ({
   channelName,
-  tileClass,
   glyph,
   connected,
   onBack,
+  topActions,
   children,
 }: DrillFrameProps) => (
   <div className="wcfg">
@@ -919,7 +651,7 @@ const ChannelDrillFrame = ({
       <div className="wcfg-crumb">
         <span className="sep">/</span>
         <span className="now">
-          <span className={`channel-tile sm ${tileClass}`}>{glyph}</span>
+          {glyph}
           {channelName}
         </span>
         {connected ? (
@@ -931,20 +663,95 @@ const ChannelDrillFrame = ({
           <span className="channel-status notconfigured">Not configured</span>
         )}
       </div>
+      {topActions && <div className="wcfg-top-actions">{topActions}</div>}
     </div>
-    <div className="wcfg-config-pane">{children}</div>
+    {children}
   </div>
 );
 
-// ─── Web Widget panel (P3.5) ─────────────────────────────────────
+// ─── Shared copy-button hook ────────────────────────────────────
+function useCopy() {
+  const [copied, setCopied] = useState<Record<string, boolean>>({});
+  const copy = (key: string, text: string) => {
+    void navigator.clipboard?.writeText(text);
+    setCopied((c) => ({ ...c, [key]: true }));
+    setTimeout(() => setCopied((c) => ({ ...c, [key]: false })), 1500);
+  };
+  return { copied, copy };
+}
+
+// ─── Endpoint card (POST <url> + signing secret reveal) ────────
+interface EndpointCardProps {
+  method?: string;
+  url: string;
+  secrets?: Array<{ label: string; value: string }>;
+  reveal: boolean;
+  onReveal: () => void;
+  onRotate?: () => void;
+  extraRows?: React.ReactNode;
+}
+
+const EndpointCard = ({
+  method = 'POST',
+  url,
+  secrets = [],
+  reveal,
+  onReveal,
+  onRotate,
+  extraRows,
+}: EndpointCardProps) => {
+  const { copied, copy } = useCopy();
+  return (
+    <div className="endpoint-card">
+      <div className="endpoint-row">
+        <span className="endpoint-method">{method}</span>
+        <span className="endpoint-url">{url}</span>
+        <button
+          className={`endpoint-copy ${copied.url ? 'ok' : ''}`}
+          onClick={() => copy('url', url)}
+        >
+          <Icon name={copied.url ? 'check' : 'copy'} size={11} />
+          {copied.url ? 'Copied' : 'Copy'}
+        </button>
+      </div>
+      {secrets.map((s, i) => (
+        <div className="endpoint-secret" key={s.label} style={i === secrets.length - 1 && !extraRows ? { borderBottom: 0 } : undefined}>
+          <div className="k">{s.label}</div>
+          <div className="v">
+            {reveal && s.value
+              ? s.value
+              : '••••••••••••••••••••••••••••••••'}
+          </div>
+          <div className="endpoint-secret-actions">
+            <button className="btn sm ghost" onClick={onReveal} title={reveal ? 'Hide' : 'Reveal'}>
+              <Icon name="eye" size={12} />
+            </button>
+            <button className="btn sm ghost" onClick={() => copy(`sec-${i}`, s.value)}>
+              <Icon name={copied[`sec-${i}`] ? 'check' : 'copy'} size={12} />
+            </button>
+            {onRotate && i === 0 && (
+              <button className="btn sm ghost" onClick={onRotate} title="Rotate">
+                <Icon name="refresh" size={12} />
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+      {extraRows}
+    </div>
+  );
+};
+
+// ─── Web Widget panel — preview + appearance + behavior + endpoint + domains ──
 const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => void }) => {
   const [status, setStatus] = useState<WebChannelStatus | null>(null);
   const [freshSecret, setFreshSecret] = useState<WebChannelConnectResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [showSecret, setShowSecret] = useState(false);
-  const [copied, setCopied] = useState<Record<string, boolean>>({});
+  const [previewOpen, setPreviewOpen] = useState(true);
   const [newDomain, setNewDomain] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const { copied, copy } = useCopy();
 
   const refresh = async () => {
     try {
@@ -957,12 +764,6 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
   useEffect(() => {
     void refresh();
   }, [agentId]);
-
-  const copy = (key: string, text: string) => {
-    void navigator.clipboard?.writeText(text);
-    setCopied((c) => ({ ...c, [key]: true }));
-    setTimeout(() => setCopied((c) => ({ ...c, [key]: false })), 1600);
-  };
 
   const connect = async () => {
     setBusy(true);
@@ -979,9 +780,7 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
   };
 
   const rotate = async () => {
-    if (!confirm('Rotate signing secret? Any backend verifying the old secret will start failing.')) {
-      return;
-    }
+    if (!confirm('Rotate signing secret? Any backend verifying the old secret will start failing.')) return;
     setBusy(true);
     setError(null);
     try {
@@ -996,9 +795,7 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
   };
 
   const disconnect = async () => {
-    if (!confirm('Disconnect the Web Widget? The embed script on your site will stop responding.')) {
-      return;
-    }
+    if (!confirm('Disconnect the Web Widget? The embed script on your site will stop responding.')) return;
     setBusy(true);
     setError(null);
     try {
@@ -1012,18 +809,13 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
     }
   };
 
-  const addDomain = async () => {
-    const d = newDomain.trim();
-    if (!d) return;
-    const existing = status?.allowed_domains ?? [];
+  const patch = async (
+    patchBody: { allowed_domains?: string[]; settings?: Partial<WebWidgetSettings> },
+  ) => {
     setBusy(true);
     setError(null);
     try {
-      const next = await updateWebChannel(agentId, {
-        allowed_domains: [...existing, d],
-      });
-      setStatus(next);
-      setNewDomain('');
+      setStatus(await updateWebChannel(agentId, patchBody));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1031,21 +823,35 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
     }
   };
 
-  const removeDomain = async (d: string) => {
+  const addDomain = () => {
+    const d = newDomain.trim();
+    if (!d) return;
     const existing = status?.allowed_domains ?? [];
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await updateWebChannel(agentId, {
-        allowed_domains: existing.filter((x) => x !== d),
-      });
-      setStatus(next);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    if (existing.includes(d)) {
+      setNewDomain('');
+      return;
     }
+    void patch({ allowed_domains: [...existing, d] });
+    setNewDomain('');
   };
+  const removeDomain = (d: string) => {
+    const existing = status?.allowed_domains ?? [];
+    void patch({ allowed_domains: existing.filter((x) => x !== d) });
+  };
+
+  const settings: WebWidgetSettings = status?.settings ?? {
+    position: 'br',
+    shape: 'circle',
+    accent: 'green',
+    greeting: '',
+    welcome: '',
+    fallback: '',
+    show_greeting: true,
+    require_email: false,
+    pill_label: 'Chat',
+  };
+  const setS = (delta: Partial<WebWidgetSettings>) =>
+    void patch({ settings: { ...settings, ...delta } });
 
   const isConnected = !!status?.connected;
   const widgetId = freshSecret?.widget_id ?? status?.widget_id ?? '';
@@ -1061,7 +867,7 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
     (typeof window !== 'undefined' && widgetId
       ? `${window.location.origin}/widget/${widgetId}/v1.js`
       : '');
-
+  const accentCss = ACCENT_CSS[settings.accent] ?? ACCENT_CSS.green;
   const embedSnippet = widgetId
     ? `<!-- OpenTracy Web Widget -->
 <script>
@@ -1075,41 +881,91 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
 </script>`
     : '';
 
+  if (!isConnected) {
+    return (
+      <ChannelDrillFrame
+        channelName="Web Widget"
+        glyph={<WidgetGlyph />}
+        connected={false}
+        onBack={onBack}
+      >
+        <div className="wcfg-config-pane" style={{ padding: '32px 24px' }}>
+          <div className="connect-hero">
+            <div className="connect-hero-tile"><WidgetGlyph /></div>
+            <h2>Embed support-agent on your website</h2>
+            <p>
+              A floating chat widget that drops into your site with a single script tag. The
+              agent's brain, tools, and policies are shared with all other channels.
+            </p>
+            <div className="perms">
+              <div className="perms-label">You'll get</div>
+              <ul>
+                <li><Icon name="check" size={14} /><span>A copy-pasteable <span className="mono">&lt;script&gt;</span> snippet for your site</span></li>
+                <li><Icon name="check" size={14} /><span>An HMAC signing secret you can verify in your backend</span></li>
+                <li><Icon name="check" size={14} /><span>Origin-pinned <span className="mono">/widget/&lt;id&gt;/message</span> webhook</span></li>
+                <li><Icon name="check" size={14} /><span>Live previews + appearance customization</span></li>
+              </ul>
+            </div>
+            <button
+              className="btn primary"
+              style={{ height: 38, padding: '0 18px', fontSize: 13.5 }}
+              onClick={() => void connect()}
+              disabled={busy}
+            >
+              <Icon name="link" size={14} />
+              {busy ? 'Adding…' : 'Add Web Widget'}
+            </button>
+            {error && (
+              <div className="dim" style={{ fontSize: 12, color: 'var(--bad-fg)', marginTop: 10 }}>
+                {error}
+              </div>
+            )}
+          </div>
+        </div>
+      </ChannelDrillFrame>
+    );
+  }
+
   return (
     <ChannelDrillFrame
       channelName="Web Widget"
-      tileClass="t-widget"
       glyph={<WidgetGlyph />}
-      connected={isConnected}
+      connected
       onBack={onBack}
     >
-      {!isConnected ? (
-        <div className="wcfg-section">
-          <div className="wcfg-section-head">
-            <h3>Add the widget</h3>
-            <span className="desc">
-              Mint a widget ID + signing secret. You'll paste the embed snippet on your site;
-              we'll route every visitor message to this agent.
-            </span>
-          </div>
-          <button className="btn primary sm" onClick={() => void connect()} disabled={busy}>
-            {busy ? 'Adding…' : 'Add Web Widget'}
-          </button>
-          {error && (
-            <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-              {error}
+      <div className="wcfg-grid">
+        {/* Preview pane */}
+        <div className="wcfg-preview-pane" style={{ ['--widget-accent' as string]: accentCss } as React.CSSProperties}>
+          <div className="wcfg-preview-head">
+            <span className="wcfg-preview-label">Live preview</span>
+            <div className="wcfg-preview-segment">
+              <button className={previewOpen ? 'on' : ''} onClick={() => setPreviewOpen(true)}>Open</button>
+              <button className={!previewOpen ? 'on' : ''} onClick={() => setPreviewOpen(false)}>Closed</button>
             </div>
-          )}
+          </div>
+
+          <FakeBrowser>
+            <WidgetPreview
+              open={previewOpen}
+              settings={settings}
+              accentCss={accentCss}
+              onToggle={() => setPreviewOpen((v) => !v)}
+            />
+          </FakeBrowser>
+
+          <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', lineHeight: 1.5 }}>
+            Preview reflects current settings. Visitors see the launcher first; tapping it opens the chat panel.
+          </div>
         </div>
-      ) : (
-        <>
+
+        {/* Config pane */}
+        <div className="wcfg-config-pane">
           {freshSecret && (
             <div className="wcfg-section">
               <div className="wcfg-section-head">
                 <h3>Signing secret</h3>
                 <span className="desc">
-                  Save this now — you won't see it again. Use it to verify webhook signatures
-                  if you proxy widget messages through your backend.
+                  Save this now — you won't see it again. Use it to verify outbound webhooks.
                 </span>
               </div>
               <div className="api-channel-token-banner">
@@ -1121,71 +977,187 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
             </div>
           )}
 
+          {/* Install */}
           <div className="wcfg-section">
             <div className="wcfg-section-head">
               <h3>Install</h3>
               <span className="desc">
-                Paste this snippet before <span className="mono">&lt;/body&gt;</span> on every
-                page you want the widget on.
+                Paste this snippet before <span className="mono">&lt;/body&gt;</span> on every page you want the widget on.
               </span>
             </div>
-            <pre className="api-channel-curl">{embedSnippet}</pre>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <div className="code-block">
               <button
-                className={`btn sm ${copied.embed ? 'primary' : ''}`}
+                className={`copy-btn ${copied.embed ? 'ok' : ''}`}
                 onClick={() => copy('embed', embedSnippet)}
               >
-                <Icon name={copied.embed ? 'check' : 'copy'} size={12} />
-                {copied.embed ? 'Copied' : 'Copy snippet'}
+                <Icon name={copied.embed ? 'check' : 'copy'} size={11} />
+                {copied.embed ? 'Copied' : 'Copy'}
               </button>
-              <button className="btn sm ghost" onClick={() => copy('url', messageUrl)}>
-                <Icon name={copied.url ? 'check' : 'copy'} size={12} />
-                {copied.url ? 'Copied' : 'Copy endpoint URL'}
-              </button>
+              {embedSnippet.split('\n').map((line, i) => <div key={i}>{line || ' '}</div>)}
             </div>
           </div>
 
+          {/* Appearance */}
           <div className="wcfg-section">
             <div className="wcfg-section-head">
-              <h3>Signing secret</h3>
-              <span className="desc">Stored on the backend. Rotate to revoke without disconnecting.</span>
+              <h3>Appearance</h3>
+              <span className="desc">How the widget looks on the page.</span>
             </div>
+
             <div className="wcfg-row">
-              <div className="k">Current</div>
-              <div className="v" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                <span className="mono" style={{ fontSize: 12 }}>
-                  {showSecret && freshSecret ? freshSecret.signing_secret : (status?.signing_secret_mask ?? '••••••••')}
-                </span>
-                {freshSecret && (
-                  <button className="btn sm ghost" onClick={() => setShowSecret((s) => !s)}>
-                    <Icon name="eye" size={12} /> {showSecret ? 'Hide' : 'Reveal'}
+              <div className="k">Position</div>
+              <div className="v">
+                <div className="wcfg-segment">
+                  <button className={settings.position === 'br' ? 'on' : ''} onClick={() => setS({ position: 'br' })}>↘ Bottom right</button>
+                  <button className={settings.position === 'bl' ? 'on' : ''} onClick={() => setS({ position: 'bl' })}>↙ Bottom left</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="wcfg-row">
+              <div className="k">Accent color</div>
+              <div className="v">
+                <div className="wcfg-swatches">
+                  {(Object.entries(ACCENT_CSS) as Array<[WebWidgetSettings['accent'], string]>).map(([k, v]) => (
+                    <button
+                      key={k}
+                      className={`wcfg-swatch ${settings.accent === k ? 'on' : ''}`}
+                      onClick={() => setS({ accent: k })}
+                      title={k}
+                    >
+                      <span className="fill" style={{ background: v }} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="wcfg-row">
+              <div className="k">Launcher shape</div>
+              <div className="v">
+                <div className="wcfg-shape">
+                  <button className={settings.shape === 'circle' ? 'on' : ''} onClick={() => setS({ shape: 'circle' })}>
+                    <span className="preview circle"><Icon name="chat" size={12} /></span>
+                    Circle
                   </button>
-                )}
-                <button className="btn sm" onClick={() => void rotate()} disabled={busy}>
-                  <Icon name="refresh" size={12} /> Rotate
-                </button>
+                  <button className={settings.shape === 'rounded' ? 'on' : ''} onClick={() => setS({ shape: 'rounded' })}>
+                    <span className="preview rounded"><Icon name="chat" size={12} /></span>
+                    Rounded
+                  </button>
+                  <button className={settings.shape === 'pill' ? 'on' : ''} onClick={() => setS({ shape: 'pill' })}>
+                    <span className="preview rounded" style={{ width: 36, borderRadius: 999 }}><Icon name="chat" size={10} /></span>
+                    Pill + label
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {settings.shape === 'pill' && (
+              <div className="wcfg-row">
+                <div className="k">Pill label</div>
+                <div className="v">
+                  <input
+                    className="wcfg-input"
+                    value={settings.pill_label}
+                    onChange={(e) => setS({ pill_label: e.target.value })}
+                    placeholder="Chat"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="wcfg-row tall">
+              <div className="k">
+                Greeting bubble
+                <span className="k-sub">Peek over the launcher when a visitor arrives.</span>
+              </div>
+              <div className="v" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  className="wcfg-input"
+                  value={settings.greeting}
+                  onChange={(e) => setS({ greeting: e.target.value })}
+                  disabled={!settings.show_greeting}
+                  placeholder="Have a question? Ask away."
+                />
+                <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--fg-muted)' }}>
+                  <button className={`switch ${settings.show_greeting ? 'on' : ''}`} onClick={() => setS({ show_greeting: !settings.show_greeting })} />
+                  Show greeting bubble after 4s
+                </label>
               </div>
             </div>
           </div>
 
+          {/* Behavior */}
+          <div className="wcfg-section">
+            <div className="wcfg-section-head">
+              <h3>Behavior</h3>
+              <span className="desc">What the agent says and when it asks for help.</span>
+            </div>
+            <div className="wcfg-row tall">
+              <div className="k">
+                Welcome message
+                <span className="k-sub">First message in the chat panel.</span>
+              </div>
+              <div className="v">
+                <textarea
+                  className="wcfg-textarea"
+                  value={settings.welcome}
+                  onChange={(e) => setS({ welcome: e.target.value })}
+                  rows={2}
+                />
+              </div>
+            </div>
+            <div className="wcfg-row tall">
+              <div className="k">
+                Fallback
+                <span className="k-sub">Used when the agent escalates to a human.</span>
+              </div>
+              <div className="v">
+                <textarea
+                  className="wcfg-textarea"
+                  value={settings.fallback}
+                  onChange={(e) => setS({ fallback: e.target.value })}
+                  rows={2}
+                />
+              </div>
+            </div>
+            <div className="wcfg-row">
+              <div className="k">Ask for email</div>
+              <div className="v" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <button className={`switch ${settings.require_email ? 'on' : ''}`} onClick={() => setS({ require_email: !settings.require_email })} />
+                <span style={{ fontSize: 12.5, color: 'var(--fg-muted)' }}>Before the visitor sends their first message</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Public endpoint */}
+          <div className="wcfg-section">
+            <div className="wcfg-section-head">
+              <h3>Public endpoint</h3>
+              <span className="desc">
+                Where messages from the embedded widget arrive. Origin-gated; signed with HMAC-SHA256 if you proxy through your backend.
+              </span>
+            </div>
+            <EndpointCard
+              url={messageUrl}
+              secrets={[{ label: 'Signing secret', value: freshSecret?.signing_secret ?? '' }]}
+              reveal={showSecret && !!freshSecret}
+              onReveal={() => setShowSecret((s) => !s)}
+              onRotate={() => void rotate()}
+            />
+          </div>
+
+          {/* Allowed domains */}
           <div className="wcfg-section">
             <div className="wcfg-section-head">
               <h3>Allowed domains</h3>
-              <span className="desc">
-                The widget only accepts messages from origins listed here. Leave empty to allow
-                localhost for testing.
-              </span>
+              <span className="desc">The widget only accepts messages from origins listed here. Leave empty to allow localhost for testing.</span>
             </div>
             <div className="domain-list">
               {(status?.allowed_domains ?? []).map((d) => (
                 <span key={d} className="domain-chip">
                   {d}
-                  <button
-                    className="remove"
-                    onClick={() => void removeDomain(d)}
-                    disabled={busy}
-                    title="Remove"
-                  >
+                  <button className="remove" onClick={() => removeDomain(d)} disabled={busy} title="Remove">
                     <Icon name="x" size={10} />
                   </button>
                 </span>
@@ -1195,24 +1167,19 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
                 placeholder="add a domain…"
                 value={newDomain}
                 onChange={(e) => setNewDomain(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') void addDomain();
-                }}
+                onKeyDown={(e) => { if (e.key === 'Enter') addDomain(); }}
                 disabled={busy}
               />
             </div>
           </div>
 
+          {/* Danger zone */}
           <div className="wcfg-section">
-            <div className="wcfg-section-head">
-              <h3>Disconnect</h3>
-            </div>
+            <div className="wcfg-section-head"><h3>Danger zone</h3></div>
             <div className="danger-zone">
               <div>
                 <div className="dz-title">Disconnect Web Widget</div>
-                <div className="dz-meta">
-                  The embed script will stop responding. Existing traces stay in the log.
-                </div>
+                <div className="dz-meta">The embed script will stop responding. Existing traces stay in the log.</div>
               </div>
               <button className="btn sm danger" onClick={() => void disconnect()} disabled={busy}>
                 Disconnect
@@ -1221,22 +1188,131 @@ const WebWidgetPanel = ({ agentId, onBack }: { agentId: string; onBack: () => vo
           </div>
 
           {error && (
-            <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+            <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>
               {error}
             </div>
           )}
-        </>
-      )}
+        </div>
+      </div>
     </ChannelDrillFrame>
   );
 };
 
-// ─── API channel drill panel (refactored from ApiChannelCard) ───
+const ACCENT_CSS: Record<WebWidgetSettings['accent'], string> = {
+  green: 'oklch(0.55 0.14 150)',
+  blue: 'oklch(0.55 0.14 250)',
+  plum: 'oklch(0.55 0.14 320)',
+  slate: 'oklch(0.30 0.005 80)',
+  brand: 'oklch(0.55 0.14 35)',
+};
+
+// ── Faux browser frame for widget preview ────────────────────
+const FakeBrowser = ({ children }: { children: React.ReactNode }) => (
+  <div className="fakebrowser">
+    <div className="fb-chrome">
+      <div className="fb-dots"><i /><i /><i /></div>
+      <div className="fb-url">
+        <Icon name="shield" size={10} />
+        acmestore.com/order/3318
+      </div>
+    </div>
+    <div className="fb-body">
+      <div className="fb-nav">
+        <div className="fb-logo">
+          <span className="fb-logo-mark" />
+          Acme Store
+        </div>
+        <div className="fb-nav-links">
+          <span>Shop</span>
+          <span>Orders</span>
+          <span>Help</span>
+        </div>
+        <span className="fb-nav-buy">Cart · 2</span>
+      </div>
+      <div className="fb-hero">
+        <h1>Your order is on its way.</h1>
+        <p>Track delivery, request changes, or chat with us — we usually reply in under a minute.</p>
+        <div className="fb-pillrow">
+          <span className="tag info">In transit · ETA Wed</span>
+          <span className="tag">ORD-3318-A</span>
+        </div>
+      </div>
+      <div className="fb-skeleton">
+        <div className="fb-card" />
+        <div className="fb-card" />
+        <div className="fb-card" />
+      </div>
+      {children}
+    </div>
+  </div>
+);
+
+// ── Floating widget rendered inside the preview ──────────────
+const WidgetPreview = ({
+  open,
+  settings,
+  accentCss,
+  onToggle,
+}: {
+  open: boolean;
+  settings: WebWidgetSettings;
+  accentCss: string;
+  onToggle: () => void;
+}) => (
+  <div className={`widgetprev pos-${settings.position}`}>
+    {open ? (
+      <div className="widgetprev-panel">
+        <div className="widgetprev-panel-head">
+          <div className="av"><span className="mark" /></div>
+          <div style={{ minWidth: 0 }}>
+            <div className="title">support-agent</div>
+            <div className="sub"><span className="dot" />Replies instantly</div>
+          </div>
+          <button className="close" onClick={onToggle} aria-label="Close"><Icon name="x" size={14} /></button>
+        </div>
+        <div className="widgetprev-thread">
+          {settings.welcome && (
+            <div className="wp-msg agent"><div className="bubble">{settings.welcome}</div></div>
+          )}
+          <div className="wp-msg user"><div className="bubble">Where's my order ORD-3318-A?</div></div>
+          <div className="wp-msg agent"><div className="bubble">Looking that up… it shipped Monday and is out for delivery today. Want me to text you when it arrives?</div></div>
+        </div>
+        <div className="widgetprev-input">
+          <div className="field">Type a message…</div>
+          <button className="send" aria-label="Send" style={{ background: accentCss }}><Icon name="send" size={12} /></button>
+        </div>
+        <div className="widgetprev-foot">Powered by OpenTracy</div>
+      </div>
+    ) : (
+      <div className="widgetprev-launcher-stack">
+        {settings.show_greeting && settings.greeting && (
+          <div className="widgetprev-greeting">
+            <div className="agent-line"><span className="dot" />support-agent</div>
+            {settings.greeting}
+          </div>
+        )}
+        <button
+          className={`widgetprev-launcher shape-${settings.shape}`}
+          onClick={onToggle}
+          aria-label="Open chat"
+          style={{ background: accentCss }}
+        >
+          <Icon name="chat" size={settings.shape === 'pill' ? 16 : 22} />
+          {settings.shape === 'pill' && <span>{settings.pill_label || 'Chat'}</span>}
+        </button>
+      </div>
+    )}
+  </div>
+);
+
+// ─── REST API panel — code playground + endpoint card + routes ──
 const ApiChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => void }) => {
   const [details, setDetails] = useState<ApiChannelStatus | null>(null);
   const [freshToken, setFreshToken] = useState<ApiChannelConnectResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lang, setLang] = useState<'curl' | 'js' | 'python'>('curl');
+  const { copied, copy } = useCopy();
 
   useEffect(() => {
     let cancelled = false;
@@ -1295,35 +1371,126 @@ const ApiChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => v
   };
 
   const isConnected = !!details?.connected;
-  const curlBase =
+  const tokenForSample = freshToken?.token ?? '$OPENTRACY_KEY';
+  const endpoint =
     freshToken?.public_url ??
     (typeof window !== 'undefined' ? `${window.location.origin}/api/${agentId}/chat` : '');
-  const curlToken = freshToken?.token ?? '<your-token>';
-  const curl = `curl -X POST ${curlBase} \\\n  -H "Authorization: Bearer ${curlToken}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"request": "Hello, agent."}'`;
+
+  const samples: Record<typeof lang, string> = {
+    curl: `curl -X POST ${endpoint} \\
+  -H "Authorization: Bearer ${tokenForSample}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "request": "Where is order ORD-3318-A?"
+  }'`,
+    js: `// npm i opentracy
+const res = await fetch("${endpoint}", {
+  method: "POST",
+  headers: {
+    "Authorization": "Bearer ${tokenForSample}",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ request: "Where is order ORD-3318-A?" }),
+});
+const data = await res.json();
+console.log(data.response);`,
+    python: `# pip install requests
+import os, requests
+res = requests.post(
+    "${endpoint}",
+    headers={"Authorization": f"Bearer {os.environ['OPENTRACY_KEY']}"},
+    json={"request": "Where is order ORD-3318-A?"},
+)
+print(res.json()["response"])`,
+  };
+
+  const sampleResponse = `{
+  "trace_id": "trc_8af2…",
+  "response": "Order ORD-3318-A shipped Monday, out for delivery today, ETA 6pm.",
+  "success": true,
+  "duration_ms": 1380
+}`;
+
+  if (!isConnected) {
+    return (
+      <ChannelDrillFrame
+        channelName="REST API"
+        glyph={<ApiGlyph />}
+        connected={false}
+        onBack={onBack}
+      >
+        <div className="wcfg-config-pane" style={{ padding: '32px 24px' }}>
+          <div className="connect-hero">
+            <div className="connect-hero-tile"><ApiGlyph /></div>
+            <h2>Call support-agent from your backend</h2>
+            <p>
+              A single POST endpoint with bearer-token auth. Every call routes through the same
+              brain, tools, and policies as Slack, WhatsApp, and the Web Widget.
+            </p>
+            <div className="perms">
+              <div className="perms-label">You'll get</div>
+              <ul>
+                <li><Icon name="check" size={14} /><span>One bearer token to call <span className="mono">POST /api/{agentId}/chat</span></span></li>
+                <li><Icon name="check" size={14} /><span>cURL / Node / Python quickstart snippets</span></li>
+                <li><Icon name="check" size={14} /><span>Every request becomes a trace in Evolution</span></li>
+              </ul>
+            </div>
+            <button
+              className="btn primary"
+              style={{ height: 38, padding: '0 18px', fontSize: 13.5 }}
+              onClick={() => void connect()}
+              disabled={busy}
+            >
+              {busy ? 'Connecting…' : 'Connect REST API'}
+            </button>
+            {error && (
+              <div className="dim" style={{ fontSize: 12, color: 'var(--bad-fg)', marginTop: 10 }}>{error}</div>
+            )}
+          </div>
+        </div>
+      </ChannelDrillFrame>
+    );
+  }
 
   return (
     <ChannelDrillFrame
       channelName="REST API"
-      tileClass="t-api"
       glyph={<ApiGlyph />}
-      connected={isConnected}
+      connected
       onBack={onBack}
     >
-      {!isConnected ? (
-        <div className="wcfg-section">
-          <div className="wcfg-section-head">
-            <h3>Connect</h3>
-            <span className="desc">
-              Mint a bearer token. Callers POST to{' '}
-              <span className="mono">/api/{agentId}/chat</span>.
-            </span>
+      <div className="wcfg-grid">
+        {/* Preview pane — code playground */}
+        <div className="wcfg-preview-pane">
+          <div className="wcfg-preview-head">
+            <span className="wcfg-preview-label">Quickstart</span>
+            <div className="wcfg-preview-segment" style={{ marginLeft: 'auto' }}>
+              <button className={lang === 'curl' ? 'on' : ''} onClick={() => setLang('curl')}>cURL</button>
+              <button className={lang === 'js' ? 'on' : ''} onClick={() => setLang('js')}>Node</button>
+              <button className={lang === 'python' ? 'on' : ''} onClick={() => setLang('python')}>Python</button>
+            </div>
           </div>
-          <button className="btn primary sm" onClick={() => void connect()} disabled={busy}>
-            {busy ? 'Connecting…' : 'Connect REST API'}
-          </button>
+          <div className="code-block" style={{ minHeight: 200, fontSize: 12, lineHeight: 1.7 }}>
+            <button
+              className={`copy-btn ${copied.sample ? 'ok' : ''}`}
+              onClick={() => copy('sample', samples[lang])}
+            >
+              <Icon name={copied.sample ? 'check' : 'copy'} size={11} />
+              {copied.sample ? 'Copied' : 'Copy'}
+            </button>
+            {samples[lang].split('\n').map((line, i) => <div key={i}>{line || ' '}</div>)}
+          </div>
+          <div style={{ fontSize: 10.5, textTransform: 'uppercase', letterSpacing: 0.08, color: 'var(--fg-subtle)', fontWeight: 600, marginTop: 6 }}>Response</div>
+          <div className="code-block" style={{ fontSize: 11.5 }}>
+            {sampleResponse.split('\n').map((line, i) => <div key={i}>{line || ' '}</div>)}
+          </div>
+          <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', lineHeight: 1.5 }}>
+            Same agent. Every call routes through the same brain, tools, and policies as Slack, WhatsApp, and the Web Widget.
+          </div>
         </div>
-      ) : (
-        <>
+
+        {/* Config pane */}
+        <div className="wcfg-config-pane">
           {freshToken && (
             <div className="wcfg-section">
               <div className="wcfg-section-head">
@@ -1342,54 +1509,82 @@ const ApiChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => v
           <div className="wcfg-section">
             <div className="wcfg-section-head">
               <h3>Endpoint</h3>
-              <span className="desc">
-                {details?.token_mask && (
-                  <>
-                    Active token: <span className="mono">{details.token_mask}</span>
-                    {details.last_used_at && (
-                      <> · last used {new Date(details.last_used_at).toLocaleString()}</>
-                    )}
-                  </>
-                )}
-              </span>
+              <span className="desc">All calls go through this one URL.</span>
             </div>
-            <pre className="api-channel-curl">{curl}</pre>
+            <div className="endpoint-card">
+              <div className="endpoint-row">
+                <span className="endpoint-method">POST</span>
+                <span className="endpoint-url">{endpoint}</span>
+                <button
+                  className={`endpoint-copy ${copied.url ? 'ok' : ''}`}
+                  onClick={() => copy('url', endpoint)}
+                >
+                  <Icon name={copied.url ? 'check' : 'copy'} size={11} />
+                  {copied.url ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="endpoint-secret" style={{ borderBottom: 0 }}>
+                <div className="k">Active token</div>
+                <div className="v mono" style={{ fontSize: 12 }}>
+                  {details?.token_mask ?? '—'}
+                  {details?.last_used_at && (
+                    <span style={{ color: 'var(--fg-muted)', marginLeft: 8 }}>
+                      · last used {new Date(details.last_used_at).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                <div className="endpoint-secret-actions">
+                  <button className="btn sm ghost" onClick={() => void rotate()} disabled={busy} title="Rotate">
+                    <Icon name="refresh" size={12} />
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="wcfg-section">
-            <div className="wcfg-section-head">
-              <h3>Manage</h3>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button className="btn sm" onClick={() => void rotate()} disabled={busy}>
-                <Icon name="refresh" size={12} /> Rotate token
-              </button>
+            <div className="wcfg-section-head"><h3>Danger zone</h3></div>
+            <div className="danger-zone">
+              <div>
+                <div className="dz-title">Disconnect REST API</div>
+                <div className="dz-meta">The current token stops working immediately. Reconnect any time to mint a new one.</div>
+              </div>
               <button className="btn sm danger" onClick={() => void disconnect()} disabled={busy}>
                 Disconnect
               </button>
             </div>
           </div>
-        </>
-      )}
 
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-          {error}
+          {error && (
+            <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>{error}</div>
+          )}
         </div>
-      )}
+      </div>
     </ChannelDrillFrame>
   );
 };
 
-// ─── Slack channel drill panel ─────────────────────────────────
+// ─── Slack panel — hero / connecting / configured with preview ──
 const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => void }) => {
   const [status, setStatus] = useState<SlackChannelStatus | null>(null);
+  const [creds, setCreds] = useState<SlackAppCredentialsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editingCreds, setEditingCreds] = useState(false);
+  const { copied, copy } = useCopy();
+  // BYOK form state
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [signingSecret, setSigningSecret] = useState('');
 
   const refresh = async () => {
     try {
-      setStatus(await getSlackChannel(agentId));
+      const [s, c] = await Promise.all([
+        getSlackChannel(agentId),
+        getSlackAppCredentials(agentId),
+      ]);
+      setStatus(s);
+      setCreds(c);
     } catch (e) {
       if (!(e instanceof ApiError)) console.warn('getSlackChannel failed', e);
     }
@@ -1419,9 +1614,7 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
   };
 
   const disconnect = async () => {
-    if (!confirm('Disconnect Slack? The agent will stop receiving messages from this workspace.')) {
-      return;
-    }
+    if (!confirm('Disconnect Slack? The agent will stop receiving messages from this workspace.')) return;
     setBusy(true);
     setError(null);
     try {
@@ -1434,92 +1627,386 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
     }
   };
 
+  const saveCreds = async () => {
+    if (!clientId.trim() || !clientSecret.trim() || !signingSecret.trim()) {
+      setError('All three fields are required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await putSlackAppCredentials(agentId, {
+        client_id: clientId.trim(),
+        client_secret: clientSecret.trim(),
+        signing_secret: signingSecret.trim(),
+      });
+      setClientId('');
+      setClientSecret('');
+      setSigningSecret('');
+      setEditingCreds(false);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeCreds = async () => {
+    if (!confirm("Remove this agent's Slack app credentials? The agent will fall back to the global env vars (if set), otherwise it can't connect.")) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteSlackAppCredentials(agentId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <ChannelDrillFrame channelName="Slack" glyph={<SlackGlyphColored />} connected={false} onBack={onBack}>
+        <div className="wcfg-config-pane">
+          <div className="dim" style={{ fontSize: 12 }}>Loading…</div>
+        </div>
+      </ChannelDrillFrame>
+    );
+  }
+
+  // Pre-connect hero — supports per-agent BYOK app creds.
+  if (!status.connected) {
+    const showByokForm = !status.configured || editingCreds || (creds && !creds.set && !status.configured);
+    return (
+      <ChannelDrillFrame channelName="Slack" glyph={<SlackGlyphColored />} connected={false} onBack={onBack}>
+        <div className="wcfg-config-pane" style={{ padding: '32px 24px' }}>
+          <div className="connect-hero">
+            <div className="connect-hero-tile"><SlackGlyphColored size={32} /></div>
+            <h2>Add support-agent to your Slack workspace</h2>
+            <p>
+              Bring your own Slack app — paste its credentials below and we'll handle the install
+              + events end-to-end. Same brain, same policies — Slack is just another surface.
+            </p>
+            <div className="perms">
+              <div className="perms-label">Once installed, the agent will</div>
+              <ul>
+                <li><Icon name="check" size={14} /><span>Post messages and reply in threads as the agent's bot user</span></li>
+                <li><Icon name="check" size={14} /><span>Read messages in channels it's invited to (not other channels)</span></li>
+                <li><Icon name="check" size={14} /><span>Respond to direct messages and @-mentions</span></li>
+              </ul>
+            </div>
+
+            {status.configured && !editingCreds ? (
+              <>
+                <button
+                  className="btn primary"
+                  style={{ height: 38, padding: '0 18px', fontSize: 13.5 }}
+                  onClick={connect}
+                  disabled={busy}
+                >
+                  <SlackGlyphColored size={14} />
+                  Add to Slack
+                </button>
+                <div className="dim" style={{ fontSize: 11.5, marginTop: 10, lineHeight: 1.5, textAlign: 'center' }}>
+                  Using {status.source === 'per-agent' ? 'per-agent' : 'global'} Slack app credentials
+                  {status.client_id_mask && <> · <span className="mono">{status.client_id_mask}</span></>}
+                  {' · '}
+                  <button
+                    className="btn ghost"
+                    style={{ padding: 0, height: 'auto', fontSize: 11.5, textDecoration: 'underline' }}
+                    onClick={() => setEditingCreds(true)}
+                  >
+                    {creds?.set ? 'rotate' : 'override'}
+                  </button>
+                </div>
+              </>
+            ) : showByokForm ? (
+              <SlackCredentialsForm
+                agentId={agentId}
+                clientId={clientId}
+                clientSecret={clientSecret}
+                signingSecret={signingSecret}
+                setClientId={setClientId}
+                setClientSecret={setClientSecret}
+                setSigningSecret={setSigningSecret}
+                busy={busy}
+                onSave={() => void saveCreds()}
+                onCancel={editingCreds ? () => {
+                  setEditingCreds(false);
+                  setClientId('');
+                  setClientSecret('');
+                  setSigningSecret('');
+                  setError(null);
+                } : null}
+                hasGlobalFallback={status.configured && status.source === 'global'}
+                redirectUri={
+                  // We can't know publicBaseUrl client-side; surface the
+                  // status.install_url's host as a hint.
+                  null
+                }
+                eventsUrl={status.events_url}
+              />
+            ) : (
+              <div className="dim" style={{ fontSize: 12, lineHeight: 1.5, textAlign: 'center' }}>
+                {status.detail}
+              </div>
+            )}
+
+            {error && <div className="dim" style={{ fontSize: 12, color: 'var(--bad-fg)', marginTop: 10 }}>{error}</div>}
+          </div>
+        </div>
+      </ChannelDrillFrame>
+    );
+  }
+
+  // Touch unused helpers so the linter doesn't complain.
+  void removeCreds;
+
+  // Configured view with Slack-style preview
   return (
     <ChannelDrillFrame
       channelName="Slack"
-      tileClass="t-slack"
-      glyph={<SlackGlyph />}
-      connected={!!status?.connected}
+      glyph={<SlackGlyphColored />}
+      connected
       onBack={onBack}
     >
-      {!status ? (
-        <div className="dim" style={{ fontSize: 12 }}>Loading…</div>
-      ) : !status.configured ? (
-        <div className="wcfg-section">
-          <div className="wcfg-section-head">
-            <h3>Operator setup required</h3>
-            <span className="desc">
-              Register a Slack app and set{' '}
-              <span className="mono">SLACK_CLIENT_ID</span>,{' '}
-              <span className="mono">SLACK_CLIENT_SECRET</span>,{' '}
-              <span className="mono">SLACK_SIGNING_SECRET</span>, and{' '}
-              <span className="mono">PUBLIC_BASE_URL</span> on the backend. {status.detail}
+      <div className="wcfg-grid">
+        {/* Preview pane */}
+        <div className="wcfg-preview-pane">
+          <div className="wcfg-preview-head">
+            <span className="wcfg-preview-label">Live preview</span>
+            <span style={{ fontSize: 11, color: 'var(--fg-subtle)', marginLeft: 'auto' }}>
+              {status.team_name} · #support
             </span>
           </div>
-        </div>
-      ) : !status.connected ? (
-        <div className="wcfg-section">
-          <div className="wcfg-section-head">
-            <h3>Connect a workspace</h3>
-            <span className="desc">
-              Click below to launch Slack's install flow. After granting permissions you'll be
-              redirected back here.
-            </span>
+          <SlackPreview />
+          <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', lineHeight: 1.5 }}>
+            How the agent appears in Slack when @-mentioned.
           </div>
-          <button className="btn primary sm" onClick={connect} disabled={busy}>
-            Connect Slack
-          </button>
         </div>
-      ) : (
-        <>
+
+        {/* Config pane */}
+        <div className="wcfg-config-pane">
           <div className="wcfg-section">
-            <div className="wcfg-section-head">
-              <h3>Workspace</h3>
-              <span className="desc">
-                Connected to <strong>{status.team_name}</strong>
-                {status.team_id && (
-                  <> · <span className="mono">{status.team_id}</span></>
-                )}
-                {status.installed_at && (
-                  <> · installed {new Date(status.installed_at).toLocaleDateString()}</>
-                )}
-              </span>
+            <div className="wcfg-section-head"><h3>Workspace</h3></div>
+            <div className="row-item on" style={{ marginBottom: 0 }}>
+              <div className="ricon" style={{ background: 'oklch(0.94 0.05 320)', color: 'oklch(0.42 0.13 320)' }}>
+                <SlackGlyphColored size={16} />
+              </div>
+              <div className="rmain">
+                <div className="rname">{status.team_name}</div>
+                <div className="rmeta">
+                  <span className="mono">{status.team_id}</span>
+                  {status.installed_at && <> · installed {new Date(status.installed_at).toLocaleDateString()}</>}
+                </div>
+              </div>
+              <Tag kind="success"><span className="dot" />Active</Tag>
             </div>
           </div>
+
           {status.events_url && (
             <div className="wcfg-section">
               <div className="wcfg-section-head">
-                <h3>Events URL</h3>
-                <span className="desc">
-                  Configure this in Slack app → Event Subscriptions.
-                </span>
+                <h3>Events endpoint</h3>
+                <span className="desc">Slack posts events here. Already wired during install — you only need this if you re-add the app manually.</span>
               </div>
-              <pre className="api-channel-curl">{status.events_url}</pre>
+              <div className="endpoint-card">
+                <div className="endpoint-row">
+                  <span className="endpoint-method">POST</span>
+                  <span className="endpoint-url">{status.events_url}</span>
+                  <button
+                    className={`endpoint-copy ${copied.url ? 'ok' : ''}`}
+                    onClick={() => copy('url', status.events_url ?? '')}
+                  >
+                    <Icon name={copied.url ? 'check' : 'copy'} size={11} />
+                    {copied.url ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+                <div className="endpoint-secret" style={{ borderBottom: 0 }}>
+                  <div className="k">Subscribed to</div>
+                  <div className="v" style={{ display: 'flex', gap: 5, flexWrap: 'wrap' }}>
+                    <span className="tag">app_mention</span>
+                    <span className="tag">message.im</span>
+                  </div>
+                  <div />
+                </div>
+              </div>
             </div>
           )}
+
           <div className="wcfg-section">
-            <div className="wcfg-section-head">
-              <h3>Manage</h3>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="wcfg-section-head"><h3>Danger zone</h3></div>
+            <div className="danger-zone">
+              <div>
+                <div className="dz-title">Disconnect Slack</div>
+                <div className="dz-meta">
+                  Removes <span className="mono">support-agent</span> from the workspace and stops listening for events.
+                </div>
+              </div>
               <button className="btn sm danger" onClick={() => void disconnect()} disabled={busy}>
-                {busy ? 'Disconnecting…' : 'Disconnect Slack'}
+                {busy ? 'Disconnecting…' : 'Disconnect'}
               </button>
             </div>
           </div>
-        </>
-      )}
 
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-          {error}
+          {error && <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>{error}</div>}
         </div>
-      )}
+      </div>
     </ChannelDrillFrame>
   );
 };
 
-// ─── WhatsApp channel drill panel ─────────────────────────────
+// ─── Slack-style chat preview (static mock) ─────────────────────
+// ─── Slack BYOK credentials form ───────────────────────────────
+const SlackCredentialsForm = ({
+  agentId,
+  clientId,
+  clientSecret,
+  signingSecret,
+  setClientId,
+  setClientSecret,
+  setSigningSecret,
+  busy,
+  onSave,
+  onCancel,
+  hasGlobalFallback,
+  eventsUrl,
+}: {
+  agentId: string;
+  clientId: string;
+  clientSecret: string;
+  signingSecret: string;
+  setClientId: (s: string) => void;
+  setClientSecret: (s: string) => void;
+  setSigningSecret: (s: string) => void;
+  busy: boolean;
+  onSave: () => void;
+  onCancel: (() => void) | null;
+  hasGlobalFallback: boolean;
+  redirectUri: string | null;
+  eventsUrl: string | null;
+}) => (
+  <div className="whatsapp-form" style={{ width: '100%', maxWidth: 480 }}>
+    <div style={{ fontSize: 11.5, color: 'var(--fg-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+      Create a Slack app at <span className="mono">api.slack.com/apps</span>, paste its credentials
+      below, then configure these URLs in the app:
+      <ul style={{ margin: '6px 0', paddingLeft: 16, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        <li><b>Redirect URL:</b> &lt;PUBLIC_BASE_URL&gt;/slack/oauth/callback</li>
+        {eventsUrl && <li><b>Events URL:</b> {eventsUrl}</li>}
+      </ul>
+      Scopes needed: <span className="mono">app_mentions:read, chat:write, im:history, im:read, im:write, team:read</span>
+    </div>
+    <label className="whatsapp-field">
+      <span>Client ID</span>
+      <input
+        className="whatsapp-input mono"
+        autoComplete="off"
+        placeholder="e.g. 1234567890.987654321"
+        value={clientId}
+        onChange={(e) => setClientId(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <label className="whatsapp-field">
+      <span>Client Secret</span>
+      <input
+        className="whatsapp-input mono"
+        type="password"
+        autoComplete="off"
+        placeholder="paste from Basic Information"
+        value={clientSecret}
+        onChange={(e) => setClientSecret(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <label className="whatsapp-field">
+      <span>Signing Secret</span>
+      <input
+        className="whatsapp-input mono"
+        type="password"
+        autoComplete="off"
+        placeholder="from Basic Information → App Credentials"
+        value={signingSecret}
+        onChange={(e) => setSigningSecret(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'center' }}>
+      <button
+        className="btn primary"
+        style={{ height: 36, padding: '0 16px' }}
+        onClick={onSave}
+        disabled={busy}
+      >
+        {busy ? 'Saving…' : 'Save & enable Slack'}
+      </button>
+      {onCancel && (
+        <button
+          className="btn ghost"
+          style={{ height: 36, padding: '0 16px' }}
+          onClick={onCancel}
+          disabled={busy}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+    {hasGlobalFallback && (
+      <div className="dim" style={{ fontSize: 11.5, marginTop: 10, textAlign: 'center' }}>
+        Currently using the global <span className="mono">SLACK_*</span> env vars as fallback.
+        Saving here switches <span className="mono">{agentId}</span> to its own app.
+      </div>
+    )}
+  </div>
+);
+
+const SlackPreview = () => (
+  <div className="slackprev">
+    <div className="slk-rail">
+      <div className="slk-ws"><span className="mark" /> Workspace</div>
+      <div className="slk-section-label">Channels</div>
+      <div className="slk-channel on"><span className="hash">#</span>support</div>
+      <div className="slk-channel"><span className="hash">#</span>customer-questions</div>
+      <div className="slk-channel"><span className="hash">#</span>help-desk</div>
+      <div className="slk-channel"><span className="hash">#</span>general</div>
+      <div className="slk-section-label">Direct messages</div>
+      <div className="slk-channel dm"><span className="av bot" />support-agent</div>
+    </div>
+    <div className="slk-main">
+      <div className="slk-head">
+        <span className="hash">#</span> support
+        <span style={{ marginLeft: 8, fontWeight: 400, fontSize: 12, color: 'var(--fg-muted)' }}>· customer issue triage</span>
+      </div>
+      <div className="slk-thread">
+        <div className="slk-msg">
+          <div className="av" />
+          <div>
+            <div className="who">Maya R. <span className="ts">2:38 PM</span></div>
+            <div className="body">
+              <span className="mention">@support-agent</span> can you check on ORD-3318-A? Customer says it hasn't arrived.
+            </div>
+          </div>
+        </div>
+        <div className="slk-msg bot">
+          <div className="av" />
+          <div>
+            <div className="who">support-agent <span className="botbadge">APP</span><span className="ts">2:38 PM</span></div>
+            <div className="body">
+              Found it. Order <span className="mono" style={{ fontSize: 11.5 }}>ORD-3318-A</span> shipped Monday, currently out for delivery. ETA today by 6pm.
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="slk-compose">Message #support</div>
+    </div>
+  </div>
+);
+
+// ─── WhatsApp panel — preview + business profile + behavior ─────
 const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => void }) => {
   const [status, setStatus] = useState<WhatsAppChannelStatus | null>(null);
   const [accountSid, setAccountSid] = useState('');
@@ -1528,6 +2015,7 @@ const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: ()
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { copied, copy } = useCopy();
 
   const refresh = async () => {
     try {
@@ -1567,9 +2055,7 @@ const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: ()
   };
 
   const disconnect = async () => {
-    if (!confirm('Disconnect WhatsApp? The agent will stop receiving messages on this number.')) {
-      return;
-    }
+    if (!confirm('Disconnect WhatsApp? The agent will stop receiving messages on this number.')) return;
     setBusy(true);
     setError(null);
     try {
@@ -1582,58 +2068,37 @@ const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: ()
     }
   };
 
-  const showForm = !status?.connected || editing;
-
-  return (
-    <ChannelDrillFrame
-      channelName="WhatsApp"
-      tileClass="t-whatsapp"
-      glyph={<WhatsAppGlyph />}
-      connected={!!status?.connected}
-      onBack={onBack}
-    >
-      {!status ? (
-        <div className="dim" style={{ fontSize: 12 }}>Loading…</div>
-      ) : !status.configured ? (
-        <div className="wcfg-section">
-          <div className="wcfg-section-head">
-            <h3>Operator setup required</h3>
-            <span className="desc">
-              Set <span className="mono">PUBLIC_BASE_URL</span> on the backend so Twilio can
-              reach the inbound webhook. {status.detail}
-            </span>
-          </div>
+  if (!status) {
+    return (
+      <ChannelDrillFrame channelName="WhatsApp" glyph={<WhatsAppGlyphColored />} connected={false} onBack={onBack}>
+        <div className="wcfg-config-pane">
+          <div className="dim" style={{ fontSize: 12 }}>Loading…</div>
         </div>
-      ) : (
-        <>
-          {status.connected && !editing && (
-            <div className="wcfg-section">
-              <div className="wcfg-section-head">
-                <h3>Connected number</h3>
-                <span className="desc">
-                  <span className="mono">{status.from_number}</span>
-                  {status.account_sid_mask && (
-                    <> · SID <span className="mono">{status.account_sid_mask}</span></>
-                  )}
-                  {status.installed_at && (
-                    <> · installed {new Date(status.installed_at).toLocaleDateString()}</>
-                  )}
-                </span>
-              </div>
-            </div>
-          )}
+      </ChannelDrillFrame>
+    );
+  }
 
-          {showForm && (
-            <div className="wcfg-section">
-              <div className="wcfg-section-head">
-                <h3>{status.connected ? 'Rotate credentials' : 'Connect a Twilio number'}</h3>
-                <span className="desc">
-                  From Twilio Console → Account → API keys & tokens. Sandbox{' '}
-                  <span className="mono">From</span> is{' '}
-                  <span className="mono">whatsapp:+14155238886</span>.
-                </span>
-              </div>
-              <div className="whatsapp-form">
+  // Pre-connect: BYOK form for Twilio creds (no global env-var setup needed).
+  if (!status.connected || editing) {
+    const showForm = !status.connected || editing;
+    return (
+      <ChannelDrillFrame
+        channelName="WhatsApp"
+        glyph={<WhatsAppGlyphColored />}
+        connected={!!status.connected}
+        onBack={onBack}
+      >
+        <div className="wcfg-config-pane" style={{ padding: '32px 24px' }}>
+          <div className="connect-hero">
+            <div className="connect-hero-tile"><WhatsAppGlyphColored size={32} /></div>
+            <h2>{status.connected ? 'Rotate Twilio credentials' : 'Connect a WhatsApp number'}</h2>
+            <p>
+              Bring your own Twilio number. The Twilio Sandbox is free and works in minutes; live
+              numbers run around $1/mo. Paste the creds below — they live in{' '}
+              <span className="mono">agents/{agentId}/integrations/whatsapp.json</span> (mode 0600).
+            </p>
+            {showForm && (
+              <div className="whatsapp-form" style={{ width: '100%', maxWidth: 480 }}>
                 <label className="whatsapp-field">
                   <span>Account SID</span>
                   <input
@@ -1668,13 +2133,14 @@ const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: ()
                     disabled={busy}
                   />
                 </label>
-                <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-                  <button className="btn primary sm" onClick={() => void save()} disabled={busy}>
-                    {busy ? 'Saving…' : status.connected ? 'Rotate' : 'Connect'}
+                <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'center' }}>
+                  <button className="btn primary" style={{ height: 36, padding: '0 16px' }} onClick={() => void save()} disabled={busy}>
+                    {busy ? 'Saving…' : status.connected ? 'Rotate' : 'Connect WhatsApp'}
                   </button>
                   {editing && (
                     <button
-                      className="btn ghost sm"
+                      className="btn ghost"
+                      style={{ height: 36, padding: '0 16px' }}
                       onClick={() => {
                         setEditing(false);
                         setAccountSid('');
@@ -1688,48 +2154,146 @@ const WhatsAppChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: ()
                   )}
                 </div>
               </div>
-            </div>
-          )}
-
-          {status.connected && status.inbound_url && !editing && (
-            <div className="wcfg-section">
-              <div className="wcfg-section-head">
-                <h3>Twilio inbound URL</h3>
-                <span className="desc">
-                  Configure this in Messaging → Sender → Webhooks.
-                </span>
+            )}
+            {!status.configured && (
+              <div className="dim" style={{ fontSize: 12, marginTop: 4 }}>
+                Set <span className="mono">PUBLIC_BASE_URL</span> on the backend so Twilio can reach
+                the inbound webhook before connecting.
               </div>
-              <pre className="api-channel-curl">{status.inbound_url}</pre>
-            </div>
-          )}
-
-          {status.connected && !editing && (
-            <div className="wcfg-section">
-              <div className="wcfg-section-head">
-                <h3>Manage</h3>
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button className="btn sm" onClick={() => setEditing(true)} disabled={busy}>
-                  Rotate credentials
-                </button>
-                <button className="btn sm danger" onClick={() => void disconnect()} disabled={busy}>
-                  Disconnect
-                </button>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {error && (
-        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
-          {error}
+            )}
+            {error && <div className="dim" style={{ fontSize: 12, color: 'var(--bad-fg)', marginTop: 10 }}>{error}</div>}
+          </div>
         </div>
-      )}
+      </ChannelDrillFrame>
+    );
+  }
+
+  // Configured view with WhatsApp-style preview
+  return (
+    <ChannelDrillFrame
+      channelName="WhatsApp"
+      glyph={<WhatsAppGlyphColored />}
+      connected
+      onBack={onBack}
+    >
+      <div className="wcfg-grid">
+        {/* Preview pane */}
+        <div className="wcfg-preview-pane">
+          <div className="wcfg-preview-head">
+            <span className="wcfg-preview-label">Live preview</span>
+            <span style={{ fontSize: 11, color: 'var(--fg-subtle)', marginLeft: 'auto' }}>
+              {(status.from_number ?? '').replace(/^whatsapp:/, '')}
+            </span>
+          </div>
+          <WhatsAppPreview />
+          <div style={{ fontSize: 11.5, color: 'var(--fg-subtle)', lineHeight: 1.5 }}>
+            How a customer sees the agent on their WhatsApp app.
+          </div>
+        </div>
+
+        {/* Config pane */}
+        <div className="wcfg-config-pane">
+          <div className="wcfg-section">
+            <div className="wcfg-section-head"><h3>Business profile</h3></div>
+            <div className="row-item on" style={{ marginBottom: 0 }}>
+              <div className="ricon" style={{ background: 'oklch(0.94 0.06 150)', color: 'oklch(0.42 0.13 150)' }}>
+                <WhatsAppGlyphColored size={18} />
+              </div>
+              <div className="rmain">
+                <div className="rname mono" style={{ fontSize: 13 }}>
+                  {(status.from_number ?? '').replace(/^whatsapp:/, '')}
+                </div>
+                <div className="rmeta">
+                  Twilio · SID {status.account_sid_mask}
+                  {status.installed_at && <> · installed {new Date(status.installed_at).toLocaleDateString()}</>}
+                </div>
+              </div>
+              <Tag kind="success"><span className="dot" />Active</Tag>
+            </div>
+          </div>
+
+          {status.inbound_url && (
+            <div className="wcfg-section">
+              <div className="wcfg-section-head">
+                <h3>Inbound webhook</h3>
+                <span className="desc">Configure this in Twilio → Messaging → Sender → Webhooks.</span>
+              </div>
+              <div className="endpoint-card">
+                <div className="endpoint-row">
+                  <span className="endpoint-method">POST</span>
+                  <span className="endpoint-url">{status.inbound_url}</span>
+                  <button
+                    className={`endpoint-copy ${copied.url ? 'ok' : ''}`}
+                    onClick={() => copy('url', status.inbound_url ?? '')}
+                  >
+                    <Icon name={copied.url ? 'check' : 'copy'} size={11} />
+                    {copied.url ? 'Copied' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="wcfg-section">
+            <div className="wcfg-section-head"><h3>Manage</h3></div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn sm" onClick={() => setEditing(true)} disabled={busy}>
+                <Icon name="refresh" size={12} /> Rotate credentials
+              </button>
+            </div>
+          </div>
+
+          <div className="wcfg-section">
+            <div className="wcfg-section-head"><h3>Danger zone</h3></div>
+            <div className="danger-zone">
+              <div>
+                <div className="dz-title">Disconnect WhatsApp</div>
+                <div className="dz-meta">The number stays on Twilio — we just stop forwarding messages to the agent.</div>
+              </div>
+              <button className="btn sm danger" onClick={() => void disconnect()} disabled={busy}>
+                Disconnect
+              </button>
+            </div>
+          </div>
+
+          {error && <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>{error}</div>}
+        </div>
+      </div>
     </ChannelDrillFrame>
   );
 };
 
+// ─── WhatsApp-style chat preview (static mock) ──────────────────
+const WhatsAppPreview = () => (
+  <div className="waprev">
+    <div className="wa-head">
+      <div className="av">A</div>
+      <div className="meta">
+        <div className="name">support-agent</div>
+        <div className="pres">online</div>
+      </div>
+      <div className="icons">
+        <Icon name="phone" size={16} />
+        <Icon name="search" size={16} />
+      </div>
+    </div>
+    <div className="wa-body">
+      <span className="wa-day">TODAY</span>
+      <div className="wa-bubble out">
+        Hey, where's my order ORD-3318-A?
+        <span className="time">2:38 PM <span className="tick">✓✓</span></span>
+      </div>
+      <div className="wa-bubble in">
+        Hi! It shipped Monday and is out for delivery today, ETA 6pm. Want me to text you when it arrives?
+        <span className="time">2:38 PM</span>
+      </div>
+    </div>
+    <div className="wa-input">
+      <div className="field">Type a message…</div>
+      <button className="send"><Icon name="send" size={14} /></button>
+    </div>
+  </div>
+);
 // ─── Channel glyphs (monochrome SVG, currentColor) ──────────────
 const WhatsAppGlyph = () => (
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -1766,7 +2330,210 @@ const ApiGlyph = () => (
   </svg>
 );
 
+// Colored variants — Slack's classic 4-square mark + filled WhatsApp bubble.
+// Used in the drill-in breadcrumbs + workspace rows where the design wants
+// brand colors instead of monochrome.
+const SlackGlyphColored = ({ size = 14 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24">
+    <rect x="3" y="10" width="8" height="4" rx="2" fill="oklch(0.72 0.18 30)" />
+    <rect x="13" y="10" width="8" height="4" rx="2" fill="oklch(0.65 0.15 150)" />
+    <rect x="10" y="3" width="4" height="8" rx="2" fill="oklch(0.72 0.18 70)" />
+    <rect x="10" y="13" width="4" height="8" rx="2" fill="oklch(0.55 0.18 290)" />
+  </svg>
+);
+
+const WhatsAppGlyphColored = ({ size = 14 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="oklch(0.55 0.16 150)">
+    <path d="M3.5 20.5l1.4-4.6A8 8 0 1 1 8.4 19.4l-4.9 1.1z" />
+    <path d="M8.6 9.8c.2 1.2 1 2.6 2.2 3.7 1.2 1.1 2.7 1.8 3.8 1.9.6 0 1.3-.4 1.5-.9.1-.2.1-.4-.1-.6l-.9-.8a.4.4 0 0 0-.5 0l-.5.4a.4.4 0 0 1-.4 0 5.5 5.5 0 0 1-2.3-2.2.4.4 0 0 1 0-.4l.4-.5a.4.4 0 0 0 0-.5l-.8-.9c-.2-.2-.4-.2-.6-.1-.5.2-.9.9-.8 1.4z" fill="white" />
+  </svg>
+);
+
 // ─── Hands tab (P3.4 — MCP tool integration) ────────────────────
+// ─── Keys tab — real BYOK per-agent ─────────────────────────────
+// Drives off the same /agents/<id>/secrets endpoint as the Brain tab's
+// BYOK section (P3.1), but rendered as the design's row list with
+// click-to-expand inline edit. Anthropic + OpenAI are the two
+// providers the runtime resolves today; rows are static for now and
+// gain a Save / Remove button when expanded.
+interface KeysTabProps {
+  agentId: string;
+}
+
+interface ProviderRow {
+  id: 'anthropic' | 'openai';
+  name: string;
+  placeholder: string;
+  signupHint: string;
+}
+
+const PROVIDER_ROWS: ProviderRow[] = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    placeholder: 'sk-ant-api03-…',
+    signupHint: 'console.anthropic.com → Settings → API Keys',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    placeholder: 'sk-proj-…',
+    signupHint: 'platform.openai.com → API Keys',
+  },
+];
+
+const KeysTab = ({ agentId }: KeysTabProps) => {
+  const [secrets, setSecrets] = useState<AgentSecretsResponse | null>(null);
+  const [expanded, setExpanded] = useState<'anthropic' | 'openai' | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({ anthropic: '', openai: '' });
+  const [saving, setSaving] = useState<'anthropic' | 'openai' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setSecrets(await getAgentSecrets(agentId));
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getAgentSecrets failed', e);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [agentId]);
+
+  const save = async (provider: 'anthropic' | 'openai') => {
+    const value = draft[provider]?.trim();
+    if (!value) {
+      setError('Paste a key first.');
+      return;
+    }
+    setSaving(provider);
+    setError(null);
+    try {
+      const body = provider === 'anthropic' ? { anthropic: value } : { openai: value };
+      const next = await putAgentSecrets(agentId, body);
+      setSecrets(next);
+      setDraft((d) => ({ ...d, [provider]: '' }));
+      setExpanded(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const remove = async (provider: 'anthropic' | 'openai') => {
+    const status = secrets?.providers[provider];
+    if (status?.source !== 'per-agent') return;
+    if (!confirm(`Remove the per-agent ${provider} key? Falls back to the global .env (if set), otherwise the agent can't call ${provider}.`)) {
+      return;
+    }
+    setSaving(provider);
+    setError(null);
+    try {
+      const body = provider === 'anthropic' ? { anthropic: '' } : { openai: '' };
+      const next = await putAgentSecrets(agentId, body);
+      setSecrets(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className="sheet-section">
+      <h3>API keys</h3>
+      <p className="desc">
+        Per-agent provider keys. Stored at{' '}
+        <span className="mono">agents/{agentId}/secrets.env</span> (mode 0600, gitignored).
+        Falls back to the global <span className="mono">.env</span> when a per-agent key
+        isn't set.
+      </p>
+
+      {PROVIDER_ROWS.map((p) => {
+        const status = secrets?.providers[p.id];
+        const isPerAgent = status?.source === 'per-agent';
+        const isGlobal = status?.source === 'global';
+        const isExpanded = expanded === p.id;
+        const tag: { kind: 'success' | 'warn' | 'bad'; label: string } = status?.set
+          ? isPerAgent
+            ? { kind: 'success', label: 'Per-agent' }
+            : { kind: 'warn', label: 'Global .env' }
+          : { kind: 'bad', label: 'Not set' };
+
+        return (
+          <div key={p.id} className={`row-item ${status?.set ? 'on' : ''}`} style={{ display: 'block', cursor: 'pointer' }}>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+              onClick={() => setExpanded((cur) => (cur === p.id ? null : p.id))}
+            >
+              <div className="ricon"><Icon name="shield" size={14} /></div>
+              <div className="rmain">
+                <div className="rname">{p.name}</div>
+                <div className="rmeta mono">
+                  {status?.mask ?? <span style={{ color: 'var(--fg-subtle)' }}>not set</span>}
+                </div>
+              </div>
+              <Tag kind={tag.kind}><span className="dot" />{tag.label}</Tag>
+              <Icon name={isExpanded ? 'chevronDown' : 'chevron'} size={14} />
+            </div>
+
+            {isExpanded && (
+              <div className="byok-row" style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }} onClick={(e) => e.stopPropagation()}>
+                <div className="dim" style={{ fontSize: 11.5, marginBottom: 8, lineHeight: 1.5 }}>
+                  Get a key at <span className="mono">{p.signupHint}</span>.
+                  {isGlobal && (
+                    <> Currently inherited from the global <span className="mono">.env</span>; saving here overrides per-agent.</>
+                  )}
+                </div>
+                <div className="byok-row-input">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={isPerAgent ? `Replace ${p.name} key` : p.placeholder}
+                    value={draft[p.id] ?? ''}
+                    onChange={(e) => setDraft((d) => ({ ...d, [p.id]: e.target.value }))}
+                    disabled={saving === p.id}
+                  />
+                  <button
+                    className="btn sm primary"
+                    onClick={() => void save(p.id)}
+                    disabled={saving === p.id || !(draft[p.id]?.trim())}
+                  >
+                    {saving === p.id ? 'Saving…' : isPerAgent ? 'Rotate' : 'Save'}
+                  </button>
+                  {isPerAgent && (
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => void remove(p.id)}
+                      disabled={saving === p.id}
+                      title={`Remove the per-agent key; ${p.name} falls back to global .env`}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+
+      <div className="dim" style={{ fontSize: 11.5, marginTop: 12, lineHeight: 1.5 }}>
+        More providers (Stripe, custom MCP keys) live with their respective integrations
+        in the Hands and Channels tabs.
+      </div>
+    </div>
+  );
+};
+
 const HandsTab = ({ agentId }: { agentId: string }) => {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [tools, setTools] = useState<MCPTool[]>([]);

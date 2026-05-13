@@ -41,11 +41,14 @@ const proxyPublic = async (
       headers,
       signal: controller.signal,
     })
-    const body = await res.arrayBuffer()
     const ct = res.headers.get('content-type') ?? 'application/octet-stream'
     const cors = res.headers.get('access-control-allow-origin')
     const out: Record<string, string> = { 'content-type': ct }
     if (cors) out['access-control-allow-origin'] = cors
+    // Null-body statuses (204/205/304) can't carry a body in the Fetch
+    // spec; passing one trips Undici's `Invalid response status code`.
+    const nullBody = res.status === 204 || res.status === 205 || res.status === 304
+    const body = nullBody ? null : await res.arrayBuffer()
     return new Response(body, { status: res.status, headers: out })
   } finally {
     clearTimeout(timer)

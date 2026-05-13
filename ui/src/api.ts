@@ -1300,13 +1300,22 @@ export async function disconnectApiChannel(id: string): Promise<void> {
 export interface SlackChannelStatus {
   configured: boolean;
   connected: boolean;
+  source: 'per-agent' | 'global' | null;
   team_id: string | null;
   team_name: string | null;
   installer_user_id: string | null;
   installed_at: string | null;
   install_url: string | null;
   events_url: string | null;
+  client_id_mask: string | null;
   detail: string | null;
+}
+
+export interface SlackAppCredentialsView {
+  set: boolean;
+  client_id_mask: string | null;
+  signing_secret_mask: string | null;
+  saved_at: string | null;
 }
 
 export const getSlackChannel = (id: string) =>
@@ -1316,6 +1325,41 @@ export async function disconnectSlackChannel(id: string): Promise<void> {
   const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/slack`, {
     method: 'DELETE',
   });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
+
+export const getSlackAppCredentials = (id: string) =>
+  _getJson<SlackAppCredentialsView>(
+    `/v1/agents/${encodeURIComponent(id)}/channels/slack/credentials`,
+  );
+
+export async function putSlackAppCredentials(
+  id: string,
+  body: { client_id: string; client_secret: string; signing_secret: string },
+): Promise<SlackAppCredentialsView> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/channels/slack/credentials`,
+    {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function deleteSlackAppCredentials(id: string): Promise<void> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/channels/slack/credentials`,
+    { method: 'DELETE' },
+  );
   if (!res.ok && res.status !== 204) {
     const text = await res.text().catch(() => '');
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);

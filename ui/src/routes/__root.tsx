@@ -90,7 +90,11 @@ export const RootLayout = () => {
   const navigate = useNavigate();
   const matches = useMatches();
   const matchRoute = useMatchRoute();
-  const [agentOpen, setAgentOpen] = useState(false);
+  // `sheetAgent` controls the AgentSheet drawer:
+  //   - undefined → sheet closed
+  //   - null      → open, loading the active agent (default)
+  //   - <id>      → open, peeking at that specific agent (no activation)
+  const [sheetAgent, setSheetAgent] = useState<string | null | undefined>(undefined);
   const [pendingCount, setPendingCount] = useState(0);
   // P1.11 — day-0 onboarding gate. `null` = still loading; we hold the
   // shell back until we know whether to render Onboarding or the routes.
@@ -155,7 +159,7 @@ export const RootLayout = () => {
       search: (prev: Record<string, unknown>) => ({ ...prev, view: v }),
     });
 
-  const ctx = useMemo<RootContext>(() => ({ openAgent: () => setAgentOpen(true) }), []);
+  const ctx = useMemo<RootContext>(() => ({ openAgent: () => setSheetAgent(null) }), []);
 
   // P1.11 — render Onboarding instead of the route shell on first visit.
   // We wait for the fetch to resolve (or fail) so the layout never flashes.
@@ -254,7 +258,10 @@ export const RootLayout = () => {
 
           <div className="sidebar-foot">
             <div className="persona-switch" title="Switch view">
-              <button className={view === 'simple' ? 'on' : ''} onClick={() => setView('simple')}>
+              <button
+                className={view !== 'technical' ? 'on' : ''}
+                onClick={() => setView('simple')}
+              >
                 Simple
               </button>
               <button
@@ -287,7 +294,7 @@ export const RootLayout = () => {
                 <Icon name="bell" size={14} />
               </Button>
               <AgentSwitcher
-                onOpenSheet={() => setAgentOpen(true)}
+                onOpenSheet={(id) => setSheetAgent(id ?? null)}
                 onNewAgent={() => {
                   // Force the onboarding flow to take over again so the
                   // operator can author a brand-new agent. We reset the
@@ -304,7 +311,12 @@ export const RootLayout = () => {
           <Outlet />
         </main>
 
-        {agentOpen && <AgentSheet onClose={() => setAgentOpen(false)} />}
+        {sheetAgent !== undefined && (
+          <AgentSheet
+            agentId={sheetAgent}
+            onClose={() => setSheetAgent(undefined)}
+          />
+        )}
       </div>
 
       {import.meta.env.DEV && <TanStackRouterDevtools position="bottom-right" />}

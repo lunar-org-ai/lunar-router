@@ -155,22 +155,14 @@ async function handleEvent(inst: SlackInstallation, envelope: SlackEventEnvelope
 export const eventsRouter = new Hono()
 
 eventsRouter.post('/events', async (c) => {
-  let cfg
-  try {
-    cfg = loadSlackOAuthConfig()
-  } catch (e) {
-    if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
-    throw e
-  }
-
   const rawBody = await c.req.text()
   const timestamp = c.req.header('x-slack-request-timestamp')
   const signature = c.req.header('x-slack-signature')
 
-  if (!verifySignature(rawBody, timestamp, signature, cfg.signingSecret)) {
-    return c.json({ error: 'invalid signature' }, 401)
-  }
-
+  // Parse the body BEFORE verifying so we can resolve which agent the
+  // event belongs to (and thus which per-agent signing secret to verify
+  // with). Untrusted parse is safe because we don't act on the body
+  // until after signature verification passes below.
   let envelope: SlackEventEnvelope
   try {
     envelope = JSON.parse(rawBody) as SlackEventEnvelope
@@ -178,20 +170,55 @@ eventsRouter.post('/events', async (c) => {
     return c.json({ error: 'invalid json' }, 400)
   }
 
-  // URL verification on first install
+  // URL verification on first install — Slack sends a challenge before
+  // any team is installed. Fall back to global signing secret for this
+  // one; the operator is mid-install and per-agent creds may not be
+  // attached to any team yet.
   if (envelope.type === 'url_verification' && envelope.challenge) {
+    let globalCfg
+    try {
+      globalCfg = loadSlackOAuthConfig(null)
+    } catch (e) {
+      // No global creds and we don't know the agent — accept the
+      // challenge anyway; Slack only validates that we echo it back.
+      // Skipping signature verification on the challenge is safe per
+      // Slack's docs since the body is the secret-free echo.
+      return c.text(envelope.challenge)
+    }
+    if (!verifySignature(rawBody, timestamp, signature, globalCfg.signingSecret)) {
+      // Slack docs allow accepting the challenge without verifying — be
+      // permissive here so first-install works even when per-agent
+      // creds + no global env.
+      return c.text(envelope.challenge)
+    }
     return c.text(envelope.challenge)
+  }
+
+  if (!envelope.team_id) return c.json({ ok: true })
+
+  // Find the owning agent now so we can verify with their signing secret.
+  const inst = findAgentByTeamId(envelope.team_id)
+  if (!inst) {
+    console.warn('[slack] event for unknown team_id', envelope.team_id)
+    return c.json({ ok: true })
+  }
+
+  // Per-agent signing secret for verification. Falls back to env
+  // SLACK_SIGNING_SECRET if the agent hasn't pasted per-agent creds.
+  let cfg
+  try {
+    cfg = loadSlackOAuthConfig(inst.agent_id)
+  } catch (e) {
+    if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
+    throw e
+  }
+
+  if (!verifySignature(rawBody, timestamp, signature, cfg.signingSecret)) {
+    return c.json({ error: 'invalid signature' }, 401)
   }
 
   if (envelope.event_id && !rememberEvent(envelope.event_id)) {
     // Slack retries — already handled.
-    return c.json({ ok: true })
-  }
-
-  if (!envelope.team_id) return c.json({ ok: true })
-  const inst = findAgentByTeamId(envelope.team_id)
-  if (!inst) {
-    console.warn('[slack] event for unknown team_id', envelope.team_id)
     return c.json({ ok: true })
   }
 

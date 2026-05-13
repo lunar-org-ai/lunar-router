@@ -3627,7 +3627,9 @@ def widget_embed_js_endpoint(widget_id: str, request: Request) -> Response:
         return Response(status_code=404, content="// unknown widget", media_type="application/javascript")
     cfg = load(agent_id, "web") or {}
     settings = cfg.get("settings") or {}
-    base = str(request.base_url).rstrip("/")
+    # Build message URL through _web_public_url so the snippet served
+    # from the embed JS routes through the TS gateway (PUBLIC_BASE_URL)
+    # instead of the internal runtime port.
     accent_map = {
         "green": "#22a06b",
         "blue": "#2563eb",
@@ -3641,7 +3643,7 @@ def widget_embed_js_endpoint(widget_id: str, request: Request) -> Response:
     greeting = (settings.get("greeting") or "").replace("`", "\\`")
     js = _WIDGET_JS_TEMPLATE % {
         "widget_id": widget_id,
-        "endpoint": f"{base}/widget/{widget_id}/message",
+        "endpoint": _web_public_url(request, widget_id, "message"),
         "accent": accent,
         "position": position,
         "welcome": welcome,
