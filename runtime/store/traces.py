@@ -20,8 +20,21 @@ from typing import Any, Optional
 import duckdb
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+# Back-compat aliases. RAW_DIR is computed lazily so the partition
+# reflects the currently-active agent.
 RAW_DIR = ROOT / "traces" / "raw"
 PARQUET_DIR = ROOT / "traces" / "parquet"
+
+
+def _raw_dir() -> Path:
+    """Active-agent-scoped raw dir. P2.1: ``traces/<agent_id>/raw``."""
+    from runtime.agent_context import get_active
+    return ROOT / "traces" / get_active() / "raw"
+
+
+def _parquet_dir() -> Path:
+    from runtime.agent_context import get_active
+    return ROOT / "traces" / get_active() / "parquet"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:
@@ -39,17 +52,19 @@ def _fetch_dicts(cur: duckdb.DuckDBPyConnection) -> list[dict]:
 
 
 def _parquet_dates() -> set[str]:
-    if not PARQUET_DIR.exists():
+    pq = _parquet_dir()
+    if not pq.exists():
         return set()
-    return {p.name[len("dt=") :] for p in PARQUET_DIR.glob("dt=*") if any(p.rglob("*.parquet"))}
+    return {p.name[len("dt=") :] for p in pq.glob("dt=*") if any(p.rglob("*.parquet"))}
 
 
 def _jsonl_paths_excluding(dates: set[str]) -> list[str]:
-    if not RAW_DIR.exists():
+    raw = _raw_dir()
+    if not raw.exists():
         return []
     return [
         p.as_posix()
-        for p in sorted(RAW_DIR.glob("*.jsonl"))
+        for p in sorted(raw.glob("*.jsonl"))
         if p.stem not in dates and p.stat().st_size > 0
     ]
 
@@ -59,7 +74,8 @@ def _has_parquet() -> bool:
 
 
 def _has_jsonl() -> bool:
-    return RAW_DIR.exists() and any(RAW_DIR.glob("*.jsonl"))
+    raw = _raw_dir()
+    return raw.exists() and any(raw.glob("*.jsonl"))
 
 
 _SCALAR_COLS: dict[str, str] = {
@@ -151,7 +167,7 @@ def _traces_view_sql(con: duckdb.DuckDBPyConnection) -> str | None:
     type mismatches (JSON vs VARCHAR for `error`) and missing columns
     (older traces lacking `session_id`/`history`) don't poison the read."""
     pq_dates = _parquet_dates()
-    pq_glob = str(PARQUET_DIR / "**" / "*.parquet")
+    pq_glob = str(_parquet_dir() / "**" / "*.parquet")
     jsonl_paths = _jsonl_paths_excluding(pq_dates)
 
     parts: list[str] = []
@@ -179,11 +195,13 @@ def available_dates() -> list[str]:
     """Filesystem-driven (faster than DuckDB) — covers JSONL and Parquet
     partitions. Returned newest-first."""
     dates: set[str] = set()
-    if RAW_DIR.exists():
-        for p in RAW_DIR.glob("*.jsonl"):
+    raw = _raw_dir()
+    pq = _parquet_dir()
+    if raw.exists():
+        for p in raw.glob("*.jsonl"):
             dates.add(p.stem)
-    if PARQUET_DIR.exists():
-        for p in PARQUET_DIR.glob("dt=*"):
+    if pq.exists():
+        for p in pq.glob("dt=*"):
             stem = p.name[len("dt=") :]
             dates.add(stem)
     return sorted(dates, reverse=True)

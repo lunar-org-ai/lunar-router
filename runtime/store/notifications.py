@@ -22,7 +22,21 @@ from pathlib import Path
 from typing import Optional
 
 
-_NOTIFICATIONS_ROOT = Path("ledger") / "notifications"
+_DEFAULT_NOTIFICATIONS_ROOT = Path("ledger") / "notifications"
+_NOTIFICATIONS_ROOT = _DEFAULT_NOTIFICATIONS_ROOT  # back-compat alias
+
+
+def _notifications_root_for(agent_id: Optional[str] = None) -> Path:
+    from runtime.agent_context import get_active
+    return Path("ledger") / (agent_id or get_active()) / "notifications"
+
+
+def _resolve_root(root: Optional[Path], agent_id: Optional[str] = None) -> Path:
+    if root is not None:
+        return root
+    if _NOTIFICATIONS_ROOT != _DEFAULT_NOTIFICATIONS_ROOT:
+        return _NOTIFICATIONS_ROOT
+    return _notifications_root_for(agent_id)
 
 
 def write_notification(
@@ -36,7 +50,7 @@ def write_notification(
     now_iso: Optional[str] = None,
 ) -> dict:
     """Append a notification row. Returns the row written."""
-    root = root or _NOTIFICATIONS_ROOT
+    root = _resolve_root(root)
     root.mkdir(parents=True, exist_ok=True)
 
     at = now_iso or _now_iso()
@@ -80,7 +94,7 @@ def iter_notifications(
     root: Optional[Path] = None,
 ):
     """Stream notification rows from JSONL partitions, date-filtered."""
-    root = root or _NOTIFICATIONS_ROOT
+    root = _resolve_root(root)
     if not root.exists():
         return
     since_date = (since_iso or "")[:10] if since_iso else ""

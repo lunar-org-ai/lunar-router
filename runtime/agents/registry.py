@@ -58,15 +58,29 @@ def ensure_bootstrapped(
     root: Optional[Path] = None,
     live_dir: Optional[Path] = None,
     now_iso: Optional[str] = None,
+    project_root: Optional[Path] = None,
 ) -> Registry:
     """If ``agents/registry.json`` is missing, migrate ``agent/`` to
     ``agents/_default/`` and write a registry. Idempotent.
+
+    P2.1 — also partitions storage. Flat dirs that pre-date multi-agent
+    (``ledger/{entries,lessons,decisions,notifications}/...`` +
+    ``traces/{raw,feedback,flagged}/...``) get migrated under
+    ``<root>/_default/<kind>/...``. Idempotent: if the partition dir
+    already exists, the flat path is left as-is for any operator who
+    rolled back this code.
 
     Returns the registry in its post-bootstrap state.
     """
     root = Path(root) if root is not None else _DEFAULT_ROOT
     live = Path(live_dir) if live_dir is not None else _LIVE_AGENT_DIR
+    project = Path(project_root) if project_root is not None else Path.cwd()
     root.mkdir(parents=True, exist_ok=True)
+
+    # Migrate flat storage into _default/ before / regardless of whether
+    # the registry exists, so re-running after partial install also
+    # finishes the job.
+    _migrate_flat_storage(project)
 
     registry_path = root / _REGISTRY_FILE
     if registry_path.is_file():
@@ -333,6 +347,41 @@ def _allocate_slug(seed: str, registry: Registry) -> str:
             return candidate
     # Extreme collision — fall back to a fully-random id.
     return f"agent-{secrets.token_hex(4)}"
+
+
+_PARTITIONED_KINDS = {
+    "ledger": ("entries", "lessons", "decisions", "notifications"),
+    "traces": ("raw", "feedback", "flagged"),
+}
+
+
+def _migrate_flat_storage(project_root: Path) -> None:
+    """Move pre-multi-agent flat dirs under ``<root>/_default/<kind>/``.
+
+    Idempotent and best-effort: if any move fails (perm error, mount
+    weirdness), we log + skip rather than block startup. The flat path
+    stays in place so a future run can retry.
+    """
+    for parent, kinds in _PARTITIONED_KINDS.items():
+        parent_dir = project_root / parent
+        if not parent_dir.is_dir():
+            continue
+        partition_dir = parent_dir / _DEFAULT_ID
+        for kind in kinds:
+            flat = parent_dir / kind
+            if not flat.is_dir():
+                continue
+            target = partition_dir / kind
+            if target.exists():
+                # Already partitioned previously — leave the flat dir to
+                # the operator's discretion (could be a residual mount).
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(flat), str(target))
+                logger.info("migrated %s → %s", flat, target)
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("flat-storage migration of %s failed (%s)", flat, e)
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
