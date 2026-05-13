@@ -22,8 +22,9 @@ import {
 import { TanStackRouterDevtools } from '@tanstack/router-devtools';
 import { Icon, type IconName } from '../components/Icon';
 import { AgentSheet } from '../screens/AgentSheet';
+import { Onboarding } from '../screens/Onboarding';
 import { Button } from '../components/ui/button';
-import { ApiError, listLessons } from '../api';
+import { ApiError, getOnboardingState, listLessons, type OnboardingState } from '../api';
 import { preserveSearch, type View } from '../router';
 
 interface RootContext {
@@ -90,11 +91,34 @@ export const RootLayout = () => {
   const matchRoute = useMatchRoute();
   const [agentOpen, setAgentOpen] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  // P1.11 — day-0 onboarding gate. `null` = still loading; we hold the
+  // shell back until we know whether to render Onboarding or the routes.
+  const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
+  const [onboardingLoaded, setOnboardingLoaded] = useState(false);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--primary', ACCENT.primary);
     document.documentElement.style.setProperty('--accent-soft', ACCENT.soft);
     document.documentElement.style.setProperty('--accent-fg', ACCENT.fg);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await getOnboardingState();
+        if (!cancelled) setOnboarding(state);
+      } catch (e) {
+        // Backend down or unreachable — fall through to the normal shell
+        // so the operator can still see whatever cached state the UI has.
+        if (!(e instanceof ApiError)) console.warn('getOnboardingState failed', e);
+      } finally {
+        if (!cancelled) setOnboardingLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -131,6 +155,19 @@ export const RootLayout = () => {
     });
 
   const ctx = useMemo<RootContext>(() => ({ openAgent: () => setAgentOpen(true) }), []);
+
+  // P1.11 — render Onboarding instead of the route shell on first visit.
+  // We wait for the fetch to resolve (or fail) so the layout never flashes.
+  if (onboardingLoaded && onboarding && !onboarding.completed) {
+    return (
+      <Onboarding
+        onDone={(next) => {
+          if (next) setOnboarding(next);
+          else setOnboarding({ ...(onboarding as OnboardingState), completed: true });
+        }}
+      />
+    );
+  }
 
   // Layout strategy: pull the sidebar out of normal flow with position:fixed
   // and reserve its 240px gutter on .main with margin-left. Inline styles on

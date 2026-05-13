@@ -2892,6 +2892,59 @@ async def delete_dataset_endpoint(name: str) -> None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Day-0 onboarding (P1.11)
+# ---------------------------------------------------------------------------
+
+
+class OnboardingState(BaseModel):
+    template: Optional[str] = None
+    name: str = ""
+    company: str = ""
+    prompt: str = ""
+    model: str = "claude-sonnet-4-6"
+    tools: list[str] = []
+    channels: list[str] = []
+    completed: bool = False
+    completed_at: Optional[str] = None
+    skipped: bool = False
+
+
+class OnboardingCompleteRequest(BaseModel):
+    template: Optional[str] = None
+    name: str = ""
+    company: str = ""
+    prompt: str = ""
+    model: str = "claude-sonnet-4-6"
+    tools: list[str] = []
+    channels: list[str] = []
+
+
+@app.get("/onboarding/state", response_model=OnboardingState)
+def onboarding_state() -> OnboardingState:
+    """Returns the current onboarding config. completed=False on first run."""
+    from runtime.store.onboarding import load_state
+    cfg = load_state()
+    return OnboardingState(**cfg.to_dict())
+
+
+@app.post("/onboarding/complete", response_model=OnboardingState)
+def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingState:
+    """Materialize the day-0 config: write prompt, persist onboarding.json,
+    record an ``agent_created`` Lesson."""
+    from runtime.store.onboarding import record_complete
+    cfg = record_complete(payload.model_dump())
+    return OnboardingState(**cfg.to_dict())
+
+
+@app.post("/onboarding/skip", response_model=OnboardingState)
+def onboarding_skip() -> OnboardingState:
+    """Operator skipped — mark complete without launching anything."""
+    from runtime.store.onboarding import record_skip
+    cfg = record_skip()
+    return OnboardingState(**cfg.to_dict())
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)

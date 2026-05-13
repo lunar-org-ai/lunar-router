@@ -8,6 +8,7 @@ import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
 import { lessonsRouter } from '../channels/lessons/handler'
 import { metricsRouter } from '../channels/metrics/handler'
+import { onboardingRouter } from '../channels/onboarding/handler'
 import { policyRouter } from '../channels/policy/handler'
 import { routerRouter } from '../channels/router/handler'
 import { sessionsRouter, tracesRouter } from '../channels/traces/handler'
@@ -42,6 +43,7 @@ app.route('/v1/sessions', sessionsRouter)
 app.route('/v1/evals', evalsRouter)
 app.route('/v1/router', routerRouter)
 app.route('/v1/datasets', datasetRouter)
+app.route('/v1/onboarding', onboardingRouter)
 
 // Convention: 8001 = python runtime, 8002 = ts backend.
 const port = Number(process.env.PORT ?? 8002)
