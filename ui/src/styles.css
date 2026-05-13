@@ -2471,3 +2471,36 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 }
 .day-zero .step .name { font-weight: 500; font-size: 13.5px; margin-bottom: 4px; }
 .day-zero .step .help { font-size: 12.5px; color: var(--fg-muted); line-height: 1.5; }
+
+/* P2.2 — shared empty-state card used by Traces / Datasets / Versions etc */
+.day-zero-card {
+  padding: 56px 24px !important;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.day-zero-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: var(--bg-sunken);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--fg-muted);
+  margin-bottom: 4px;
+}
+.day-zero-title { font-size: 16px; font-weight: 500; color: var(--fg); }
+.day-zero-desc {
+  font-size: 13px;
+  line-height: 1.55;
+  max-width: 460px;
+  margin: 0 auto;
+}
+.day-zero-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}

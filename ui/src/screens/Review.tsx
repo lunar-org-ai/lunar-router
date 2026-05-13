@@ -9,6 +9,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
+import { EmptyState } from '../components/EmptyState';
 import { Icon } from '../components/Icon';
 import { Tag, KindIcon, KindLabel } from '../components/Tag';
 import { Button } from '../components/ui/button';
@@ -148,13 +149,11 @@ export const Review = () => {
       )}
 
       {queue.length === 0 && (
-        <Card className="flex flex-col items-center justify-center gap-3 p-16 text-center">
-          <Icon name="check" size={32} />
-          <div className="text-base font-medium">Inbox zero.</div>
-          <div className="dim">
-            The agent will check in again when it has something new to suggest.
-          </div>
-        </Card>
+        <EmptyState
+          icon="check"
+          title="Inbox zero."
+          description="The agent will check in again when it has something new to suggest."
+        />
       )}
 
       <div className="flex flex-col gap-4">
