@@ -11,14 +11,22 @@ import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  connectApiChannel,
+  disconnectApiChannel,
+  getAgentChannels,
   getAgentImprovement,
   getAgentSecrets,
+  getApiChannel,
   listAgents,
   putAgentImprovement,
   putAgentSecrets,
+  rotateApiChannel,
   updateAgent,
+  type AgentChannelsResponse,
   type AgentSecretsResponse,
   type AgentSummary,
+  type ApiChannelConnectResponse,
+  type ApiChannelStatus,
   type ImprovementConfig,
 } from '../api';
 
@@ -339,33 +347,8 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
             </div>
           )}
 
-          {tab === 'mouths' && (
-            <div className="sheet-section">
-              <h3>Where the agent talks</h3>
-              <p className="desc">Each channel becomes a source of traces, feedback, and signal.</p>
-              {channels.map((c) => (
-                <div className={`row-item ${c.on ? 'on' : ''}`} key={c.id}>
-                  <div className="ricon">
-                    <Icon name={channelIcon(c.id)} size={14} />
-                  </div>
-                  <div className="rmain">
-                    <div className="rname">{c.name}</div>
-                    <div className="rmeta">
-                      {c.desc}
-                      {c.vol ? ` · ${c.vol}` : ''}
-                    </div>
-                  </div>
-                  <button
-                    className={`switch ${c.on ? 'on' : ''}`}
-                    onClick={() => toggleChannel(c.id)}
-                    aria-label={`Toggle ${c.name}`}
-                  />
-                </div>
-              ))}
-              <button className="add-btn" style={{ marginTop: 8 }}>
-                + Add channel
-              </button>
-            </div>
+          {tab === 'mouths' && activeAgent && (
+            <ChannelsTab agentId={activeAgent.id} />
           )}
 
           {tab === 'keys' && (
@@ -697,6 +680,194 @@ const ImprovementSection = ({ agentId }: { agentId: string }) => {
 
       {error && (
         <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Channels tab (P3.3) ────────────────────────────────────────
+// Real per-agent channel surface. Replaces the hardcoded
+// INITIAL_CHANNELS list. Each channel has its own connect/disconnect
+// flow; this tab is the dispatcher.
+const ChannelsTab = ({ agentId }: { agentId: string }) => {
+  const [status, setStatus] = useState<AgentChannelsResponse | null>(null);
+
+  const refresh = async () => {
+    try {
+      const next = await getAgentChannels(agentId);
+      setStatus(next);
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getAgentChannels failed', e);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [agentId]);
+
+  return (
+    <div className="sheet-section">
+      <h3>Where the agent talks</h3>
+      <p className="desc">
+        Each channel becomes a source of traces, feedback, and signal. Connecting one writes
+        config to <span className="mono">agents/{agentId}/integrations/</span>.
+      </p>
+
+      <ApiChannelCard agentId={agentId} status={status?.channels.api ?? null} onChange={refresh} />
+
+      <div className="channel-coming-soon">
+        <div className="row-item" style={{ opacity: 0.6 }}>
+          <div className="ricon"><Icon name="chat" size={14} /></div>
+          <div className="rmain">
+            <div className="rname">Slack</div>
+            <div className="rmeta">OAuth flow + events handler — coming next (P3.3.2)</div>
+          </div>
+          <Tag>not yet</Tag>
+        </div>
+        <div className="row-item" style={{ opacity: 0.6 }}>
+          <div className="ricon"><Icon name="chat" size={14} /></div>
+          <div className="rmain">
+            <div className="rname">WhatsApp</div>
+            <div className="rmeta">Twilio integration — coming next (P3.3.3)</div>
+          </div>
+          <Tag>not yet</Tag>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ApiChannelCard = ({
+  agentId,
+  status,
+  onChange,
+}: {
+  agentId: string;
+  status: { connected: boolean; meta: Record<string, unknown> } | null;
+  onChange: () => void | Promise<void>;
+}) => {
+  const [details, setDetails] = useState<ApiChannelStatus | null>(null);
+  const [freshToken, setFreshToken] = useState<ApiChannelConnectResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getApiChannel(agentId)
+      .then((next) => {
+        if (!cancelled) setDetails(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, status]);
+
+  const connect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await connectApiChannel(agentId);
+      setFreshToken(next);
+      setDetails({ connected: true, token_mask: next.token_mask, created_at: next.created_at });
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rotate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await rotateApiChannel(agentId);
+      setFreshToken(next);
+      setDetails({ connected: true, token_mask: next.token_mask, created_at: next.created_at });
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    if (!confirm('Disconnect the API channel? The current token will stop working.')) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await disconnectApiChannel(agentId);
+      setDetails({ connected: false });
+      setFreshToken(null);
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const isConnected = details?.connected ?? status?.connected ?? false;
+  const curlBase = freshToken?.public_url ?? window.location.origin + `/api/${agentId}/chat`;
+  const curlToken = freshToken?.token ?? '<your-token>';
+  const curl = `curl -X POST ${curlBase} \\\n  -H "Authorization: Bearer ${curlToken}" \\\n  -H "Content-Type: application/json" \\\n  -d '{"request": "Hello, agent."}'`;
+
+  return (
+    <div className={`row-item ${isConnected ? 'on' : ''}`} style={{ display: 'block' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="ricon"><Icon name="code" size={14} /></div>
+        <div className="rmain" style={{ flex: 1 }}>
+          <div className="rname">REST API</div>
+          <div className="rmeta">
+            {isConnected && details?.token_mask
+              ? <span className="mono">{details.token_mask}</span>
+              : <>Public endpoint with bearer-token auth.</>}
+            {details?.last_used_at && (
+              <> · last used {new Date(details.last_used_at).toLocaleString()}</>
+            )}
+          </div>
+        </div>
+        {!isConnected && (
+          <button className="btn primary sm" onClick={() => void connect()} disabled={busy}>
+            {busy ? 'Connecting…' : 'Connect'}
+          </button>
+        )}
+        {isConnected && (
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn sm" onClick={() => void rotate()} disabled={busy}>
+              {busy ? '…' : 'Rotate'}
+            </button>
+            <button className="btn ghost sm" onClick={() => void disconnect()} disabled={busy}>
+              Disconnect
+            </button>
+          </div>
+        )}
+      </div>
+
+      {freshToken && (
+        <div className="api-channel-token-banner">
+          <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
+            <Icon name="info" size={12} /> Save this token now — you won't see it again.
+          </div>
+          <code className="api-channel-token">{freshToken.token}</code>
+        </div>
+      )}
+
+      {isConnected && (
+        <div style={{ marginTop: 12 }}>
+          <div className="dim" style={{ fontSize: 11, fontWeight: 500, marginBottom: 6 }}>
+            ENDPOINT
+          </div>
+          <pre className="api-channel-curl">{curl}</pre>
+        </div>
+      )}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
           {error}
         </div>
       )}

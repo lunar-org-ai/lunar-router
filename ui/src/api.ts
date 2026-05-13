@@ -1242,3 +1242,55 @@ export interface AgentChannelsResponse {
 
 export const getAgentChannels = (id: string) =>
   _getJson<AgentChannelsResponse>(`/v1/agents/${encodeURIComponent(id)}/channels`);
+
+// API channel (P3.3.1)
+
+export interface ApiChannelStatus {
+  connected: boolean;
+  token_mask?: string | null;
+  created_at?: string | null;
+  last_used_at?: string | null;
+}
+
+export interface ApiChannelConnectResponse {
+  connected: true;
+  token: string;
+  token_mask: string;
+  created_at: string;
+  public_url: string;
+}
+
+export const getApiChannel = (id: string) =>
+  _getJson<ApiChannelStatus>(`/v1/agents/${encodeURIComponent(id)}/channels/api`);
+
+export async function connectApiChannel(id: string): Promise<ApiChannelConnectResponse> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/api/connect`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function rotateApiChannel(id: string): Promise<ApiChannelConnectResponse> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/api/rotate`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function disconnectApiChannel(id: string): Promise<void> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/api`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
