@@ -1123,6 +1123,28 @@ export async function createAgent(body: AgentCreateRequest): Promise<AgentSummar
   return res.json();
 }
 
+export interface AgentUpdateRequest {
+  name?: string;
+  description?: string;
+  model?: string;
+}
+
+export async function updateAgent(
+  id: string,
+  body: AgentUpdateRequest,
+): Promise<AgentSummary> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
 export async function activateAgent(id: string): Promise<{ active: string; agent_version: string }> {
   const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/activate`, {
     method: 'POST',

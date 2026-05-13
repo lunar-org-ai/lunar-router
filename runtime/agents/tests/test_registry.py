@@ -235,3 +235,74 @@ def test_update_agent_changes_metadata(workspace):
     meta = get_agent("_default", root=workspace["root"])
     assert meta.name == "My Agent"
     assert meta.description == "hello"
+
+
+# ---------------------------------------------------------------------------
+# P3.0 — model propagates into route.yaml
+# ---------------------------------------------------------------------------
+
+
+def _seed_route_yaml(agent_dir, model: str = "claude-haiku-4-5") -> None:
+    pipeline = agent_dir / "pipeline"
+    pipeline.mkdir(parents=True, exist_ok=True)
+    (pipeline / "route.yaml").write_text(
+        "stage: route\n"
+        "technique: routing\n"
+        "variant: small_first\n"
+        "knobs:\n"
+        "  confidence_threshold: 0.8\n"
+        f"  small: {model}\n"
+        "  big: claude-sonnet-4-6\n"
+        "  escalate_on_failure: true\n"
+    )
+
+
+def test_create_agent_propagates_model_to_route_yaml(workspace):
+    """The model picked during onboarding lands in the new agent's
+    route.yaml (small knob) so /run actually uses it."""
+    _seed_route_yaml(workspace["live"])
+    ensure_bootstrapped(root=workspace["root"], live_dir=workspace["live"])
+
+    meta = create_agent(
+        {
+            "name": "haiku-tester",
+            "model": "claude-sonnet-4-6",
+            "prompt": "You are a tester.",
+        },
+        root=workspace["root"],
+    )
+    route_body = (
+        workspace["root"] / meta.id / "pipeline" / "route.yaml"
+    ).read_text()
+    assert "small: claude-sonnet-4-6" in route_body
+    # Other knobs preserved
+    assert "big: claude-sonnet-4-6" in route_body  # the seed's big stays
+    assert "confidence_threshold: 0.8" in route_body
+    assert "escalate_on_failure: true" in route_body
+
+
+def test_update_agent_model_rewrites_route_yaml(workspace):
+    _seed_route_yaml(workspace["live"])
+    ensure_bootstrapped(root=workspace["root"], live_dir=workspace["live"])
+
+    update_agent("_default", model="claude-opus-4-7", root=workspace["root"])
+    route_body = (
+        workspace["root"] / "_default" / "pipeline" / "route.yaml"
+    ).read_text()
+    assert "small: claude-opus-4-7" in route_body
+    # Registry metadata also updated
+    meta = get_agent("_default", root=workspace["root"])
+    assert meta.model == "claude-opus-4-7"
+
+
+def test_set_route_yaml_no_op_when_missing(workspace, tmp_path):
+    """No route.yaml in the agent dir → we log + skip, no crash."""
+    ensure_bootstrapped(root=workspace["root"], live_dir=workspace["live"])
+    # Manually remove the seeded route.yaml from _default
+    target = workspace["root"] / "_default" / "pipeline" / "route.yaml"
+    if target.is_file():
+        target.unlink()
+    # update_agent should not raise
+    update_agent("_default", model="claude-opus-4-7", root=workspace["root"])
+    meta = get_agent("_default", root=workspace["root"])
+    assert meta.model == "claude-opus-4-7"  # metadata still updated

@@ -6,9 +6,15 @@
  * 24px section padding, 28px section gaps, 18px head padding.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
+import {
+  ApiError,
+  listAgents,
+  updateAgent,
+  type AgentSummary,
+} from '../api';
 
 type Tab = 'brain' | 'hands' | 'mouths' | 'keys';
 
@@ -43,10 +49,9 @@ const TABS: Array<{ id: Tab; label: string }> = [
 ];
 
 const MODELS: Array<{ id: string; name: string; meta: string }> = [
-  { id: 'claude-sonnet-4-5', name: 'Claude Sonnet 4.5', meta: 'Anthropic · default' },
-  { id: 'gpt-5', name: 'GPT-5', meta: 'OpenAI' },
   { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', meta: 'Anthropic · fast & cheap' },
-  { id: 'llama-4-scout', name: 'Llama 4 Scout', meta: 'Self-hosted' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', meta: 'Anthropic · default' },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', meta: 'Anthropic · strongest reasoning' },
 ];
 
 const INITIAL_PROMPT = `You are a customer support agent for an online store.
@@ -80,11 +85,48 @@ const channelIcon = (id: Channel['id']): IconName => (id === 'api' ? 'code' : 'c
 
 export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
   const [tab, setTab] = useState<Tab>('brain');
-  const [model, setModel] = useState('claude-sonnet-4-5');
+  const [model, setModel] = useState('claude-sonnet-4-6');
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
   const [tools, setTools] = useState<Tool[]>(INITIAL_TOOLS);
   const [channels, setChannels] = useState<Channel[]>(INITIAL_CHANNELS);
   const [keys] = useState<Key[]>(INITIAL_KEYS);
+  const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
+  const [savingModel, setSavingModel] = useState(false);
+
+  // Load the active agent on mount so the Brain tab reflects the
+  // operator's real configuration, not a hardcoded default.
+  useEffect(() => {
+    let cancelled = false;
+    void listAgents()
+      .then((res) => {
+        if (cancelled) return;
+        const active = res.agents.find((a) => a.id === res.active) ?? null;
+        if (active) {
+          setActiveAgent(active);
+          setModel(active.model);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const pickModel = async (next: string) => {
+    if (!activeAgent || next === model || savingModel) return;
+    const prev = model;
+    setModel(next);  // optimistic
+    setSavingModel(true);
+    try {
+      await updateAgent(activeAgent.id, { model: next });
+    } catch (e) {
+      // Revert on failure so the UI doesn't lie about saved state.
+      setModel(prev);
+      if (!(e instanceof ApiError)) console.warn('updateAgent failed', e);
+    } finally {
+      setSavingModel(false);
+    }
+  };
 
   const toggleTool = (id: string) =>
     setTools((ts) => ts.map((x) => (x.id === id ? { ...x, on: !x.on } : x)));
@@ -156,12 +198,14 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                       key={m.id}
                       className="row-item"
                       style={{
-                        cursor: 'pointer',
+                        cursor: savingModel ? 'progress' : 'pointer',
                         borderColor: model === m.id ? 'var(--foreground)' : undefined,
                         margin: 0,
                         textAlign: 'left',
+                        opacity: savingModel ? 0.7 : 1,
                       }}
-                      onClick={() => setModel(m.id)}
+                      onClick={() => void pickModel(m.id)}
+                      disabled={savingModel}
                     >
                       <div className="rmain">
                         <div className="rname">{m.name}</div>
@@ -171,6 +215,12 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                     </button>
                   ))}
                 </div>
+                {activeAgent && (
+                  <div className="dim" style={{ fontSize: 11.5, marginTop: 8 }}>
+                    Changes write to <span className="mono">agents/{activeAgent.id}/pipeline/route.yaml</span> immediately.
+                    Live <span className="mono">/run</span> picks them up on the next activate.
+                  </div>
+                )}
               </div>
 
               <div className="sheet-section">

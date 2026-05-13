@@ -322,6 +322,17 @@ function shortCwd(p: string): string {
 }
 
 // ─── Welcome ──────────────────────────────────────────────────────────────
+// Cycling examples used as the textarea's placeholder when empty.
+// Typed one phrase at a time, pause, delete, next — keeps a sense of
+// motion without distracting from the input.
+const PLACEHOLDER_PHRASES = [
+  'A customer support agent for my Shopify store',
+  'An SDR that qualifies inbound leads with BANT',
+  'A research assistant that cites sources',
+  'An internal helpdesk bot for IT & HR questions',
+  'A coding assistant for my team',
+];
+
 const Welcome = ({
   onSend,
   transport,
@@ -330,11 +341,52 @@ const Welcome = ({
   transport: OnboardingTransportInfo | null;
 }) => {
   const [text, setText] = useState('');
+  const [placeholder, setPlaceholder] = useState('');
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     taRef.current?.focus();
   }, []);
+
+  // Typewriter that cycles PLACEHOLDER_PHRASES. Pauses while the
+  // operator is typing — the empty-text guard makes sure their cursor
+  // value doesn't fight the animation.
+  useEffect(() => {
+    if (text.length > 0) return; // user is typing — leave their input alone
+    let phraseIdx = 0;
+    let charIdx = 0;
+    let deleting = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const tick = () => {
+      const full = PLACEHOLDER_PHRASES[phraseIdx];
+      if (!deleting) {
+        charIdx += 1;
+        setPlaceholder(full.slice(0, charIdx));
+        if (charIdx >= full.length) {
+          // hold the full phrase for a beat before erasing
+          deleting = true;
+          timer = setTimeout(tick, 1800);
+          return;
+        }
+        timer = setTimeout(tick, 38 + Math.random() * 30);
+      } else {
+        charIdx -= 1;
+        setPlaceholder(full.slice(0, Math.max(0, charIdx)));
+        if (charIdx <= 0) {
+          deleting = false;
+          phraseIdx = (phraseIdx + 1) % PLACEHOLDER_PHRASES.length;
+          timer = setTimeout(tick, 320);
+          return;
+        }
+        timer = setTimeout(tick, 22);
+      }
+    };
+    timer = setTimeout(tick, 600);
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [text]);
 
   const submit = () => {
     const t = text.trim();
@@ -360,7 +412,7 @@ const Welcome = ({
             ref={taRef}
             className="onbA-composer-input"
             rows={3}
-            placeholder="e.g. A support agent for our Shopify checkout. Needs order lookups, refund policy, hand off to a human on billing."
+            placeholder={placeholder || PLACEHOLDER_PHRASES[0]}
             value={text}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
@@ -368,14 +420,10 @@ const Welcome = ({
             }}
           />
           <div className="onbA-composer-foot">
-            <div className="onbA-composer-attach">
-              <button className="onbA-pill" disabled>
-                <Icon name="file" size={12} /> Paste docs
-              </button>
-              <button className="onbA-pill" disabled>
-                <Icon name="code" size={12} /> Connect repo
-              </button>
-            </div>
+            <span className="dim onbA-composer-hint">
+              <span className="onbA-composer-kbd">⌘</span>
+              <span className="onbA-composer-kbd">↵</span> to send
+            </span>
             <button
               className="onbA-send"
               onClick={submit}
