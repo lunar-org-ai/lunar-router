@@ -44,6 +44,11 @@ class _Direct:
         self.prompt_path: str = str(knobs.get("prompt", "../prompts/system.md"))
         self.max_tokens: int = int(knobs.get("max_tokens", 2048))
         self.temperature: float = float(knobs.get("temperature", 0.3))
+        # P3.4 — cap on tool-use iterations to bound runaway loops.
+        # The model can call tools and read results up to this many
+        # times in a single /run; on the (N+1)th iteration we force
+        # an end-turn by passing tool_choice=none / no tools=.
+        self.max_tool_iterations: int = int(knobs.get("max_tool_iterations", 8))
 
     def execute(self, context: Context) -> Context:
         from runtime.agent_context import get_active
@@ -69,24 +74,41 @@ class _Direct:
             )
             return context
 
+        # P3.4 — discover the agent's MCP tools (cached). Empty list when
+        # the agent has no MCP servers configured, which keeps the loop
+        # behavior identical to pre-P3.4.
+        tools: list[Any] = []
+        try:
+            from runtime.mcp.client import list_tools_for_agent
+            tools = list_tools_for_agent(agent_id)
+        except Exception as e:
+            logger.warning("mcp discovery failed for %s (%s); proceeding tool-free", agent_id, e)
+            tools = []
+
         try:
             if provider == "openai":
-                text, usage = _call_openai(
+                text, usage, tool_calls = _run_openai_loop(
                     model=model,
                     system=system,
                     user=user_msg,
                     api_key=api_key,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
+                    tools=tools,
+                    agent_id=agent_id,
+                    max_iterations=self.max_tool_iterations,
                 )
             else:
-                text, usage = _call_anthropic(
+                text, usage, tool_calls = _run_anthropic_loop(
                     model=model,
                     system=system,
                     user=user_msg,
                     api_key=api_key,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
+                    tools=tools,
+                    agent_id=agent_id,
+                    max_iterations=self.max_tool_iterations,
                 )
         except _SdkUnavailable as e:
             logger.warning("%s SDK unavailable: %s", provider, e)
@@ -106,6 +128,8 @@ class _Direct:
         context.response = text or "(empty response)"
         if usage:
             context.state["llm_usage"] = {**usage, "model": model, "provider": provider}
+        if tool_calls:
+            context.state["tool_calls"] = tool_calls
         return context
 
 
@@ -118,7 +142,7 @@ class _SdkUnavailable(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
-def _call_anthropic(
+def _run_anthropic_loop(
     *,
     model: str,
     system: str,
@@ -126,32 +150,105 @@ def _call_anthropic(
     api_key: str,
     max_tokens: int,
     temperature: float,
-) -> tuple[str, Optional[dict]]:
+    tools: list[Any],
+    agent_id: str,
+    max_iterations: int,
+) -> tuple[str, Optional[dict], list[dict[str, Any]]]:
+    """Anthropic tool-use loop. Returns (final_text, summed_usage, tool_calls).
+
+    Each iteration:
+      1. Send messages + tools to ``messages.create``
+      2. If response has ``tool_use`` blocks → invoke each via MCP and
+         append a ``tool_result`` message; loop.
+      3. If response has only ``text`` blocks → that's the final reply.
+
+    Stops on ``stop_reason='end_turn'`` or after ``max_iterations``.
+    The tool catalog comes from runtime.mcp.client.list_tools_for_agent.
+    """
     try:
         from anthropic import Anthropic
     except ImportError as e:
         raise _SdkUnavailable("anthropic") from e
+    from runtime.mcp.client import call_tool as mcp_call
 
     client = Anthropic(api_key=api_key)
-    resp = client.messages.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-    )
-    text = ""
-    if resp.content:
-        parts = [getattr(block, "text", "") for block in resp.content]
-        text = "".join(p for p in parts if p)
-    usage = getattr(resp, "usage", None)
-    usage_dict: Optional[dict] = None
-    if usage is not None:
-        usage_dict = {
-            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+    anthropic_tools = [t.to_anthropic_tool() for t in tools] if tools else None
+    messages: list[dict[str, Any]] = [{"role": "user", "content": user}]
+    total_in = 0
+    total_out = 0
+    tool_calls: list[dict[str, Any]] = []
+    final_text = ""
+
+    for it in range(max_iterations + 1):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "system": system,
+            "messages": messages,
         }
-    return text, usage_dict
+        # Force end-turn on the budget iteration: drop tools so the
+        # model can't request another one and we end on text.
+        if anthropic_tools and it < max_iterations:
+            kwargs["tools"] = anthropic_tools
+
+        resp = client.messages.create(**kwargs)
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            total_in += int(getattr(usage, "input_tokens", 0) or 0)
+            total_out += int(getattr(usage, "output_tokens", 0) or 0)
+
+        text_parts: list[str] = []
+        tool_use_blocks: list[Any] = []
+        for block in (resp.content or []):
+            btype = getattr(block, "type", None)
+            if btype == "tool_use":
+                tool_use_blocks.append(block)
+                continue
+            # Treat anything with a ``text`` attribute as a text block.
+            # The Anthropic SDK tags blocks with type="text" but test
+            # mocks + older block shapes may omit it; we accept both.
+            t = getattr(block, "text", None)
+            if isinstance(t, str) and t:
+                text_parts.append(t)
+
+        if not tool_use_blocks:
+            final_text = "".join(text_parts)
+            break
+
+        # Append the assistant's message verbatim (per Anthropic's tool
+        # protocol — the next user turn references tool_use_ids).
+        messages.append({"role": "assistant", "content": resp.content})
+
+        # Run each tool, gather tool_result blocks.
+        result_blocks: list[dict[str, Any]] = []
+        for tu in tool_use_blocks:
+            qname = getattr(tu, "name", "")
+            args = getattr(tu, "input", {}) or {}
+            tu_id = getattr(tu, "id", "")
+            tool_calls.append({"name": qname, "input": args, "id": tu_id})
+            try:
+                result_text = mcp_call(agent_id, qname, args)
+                is_error = False
+            except Exception as e:
+                logger.warning("mcp tool %s failed: %s", qname, e)
+                result_text = f"Tool error: {type(e).__name__}: {e}"
+                is_error = True
+            block: dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": tu_id,
+                "content": result_text,
+            }
+            if is_error:
+                block["is_error"] = True
+            result_blocks.append(block)
+
+        messages.append({"role": "user", "content": result_blocks})
+
+    usage_dict: Optional[dict] = None
+    if total_in or total_out:
+        usage_dict = {"input_tokens": total_in, "output_tokens": total_out}
+    return final_text, usage_dict, tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +256,7 @@ def _call_anthropic(
 # ---------------------------------------------------------------------------
 
 
-def _call_openai(
+def _run_openai_loop(
     *,
     model: str,
     system: str,
@@ -167,34 +264,101 @@ def _call_openai(
     api_key: str,
     max_tokens: int,
     temperature: float,
-) -> tuple[str, Optional[dict]]:
+    tools: list[Any],
+    agent_id: str,
+    max_iterations: int,
+) -> tuple[str, Optional[dict], list[dict[str, Any]]]:
+    """OpenAI tool-use loop. Returns (final_text, summed_usage, tool_calls).
+
+    Mirrors the Anthropic loop but uses the function-calling shape:
+    response has ``tool_calls`` on choices[0].message; we append the
+    assistant message + tool messages with matching ``tool_call_id``.
+    """
     try:
         from openai import OpenAI
     except ImportError as e:
         raise _SdkUnavailable("openai") from e
+    from runtime.mcp.client import call_tool as mcp_call
 
     client = OpenAI(api_key=api_key)
-    resp = client.chat.completions.create(
-        model=model,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    )
-    text = ""
-    if resp.choices:
-        text = (resp.choices[0].message.content or "")
-    usage_obj = getattr(resp, "usage", None)
-    usage_dict: Optional[dict] = None
-    if usage_obj is not None:
-        # OpenAI uses prompt_tokens / completion_tokens.
-        usage_dict = {
-            "input_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
-            "output_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+    openai_tools = [t.to_openai_tool() for t in tools] if tools else None
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    total_in = 0
+    total_out = 0
+    tool_calls: list[dict[str, Any]] = []
+    final_text = ""
+
+    for it in range(max_iterations + 1):
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "messages": messages,
         }
-    return text, usage_dict
+        if openai_tools and it < max_iterations:
+            kwargs["tools"] = openai_tools
+
+        resp = client.chat.completions.create(**kwargs)
+        usage_obj = getattr(resp, "usage", None)
+        if usage_obj is not None:
+            total_in += int(getattr(usage_obj, "prompt_tokens", 0) or 0)
+            total_out += int(getattr(usage_obj, "completion_tokens", 0) or 0)
+
+        if not resp.choices:
+            break
+        choice = resp.choices[0]
+        msg = choice.message
+
+        # OpenAI's tool_calls may be None or empty list.
+        calls = getattr(msg, "tool_calls", None) or []
+        if not calls:
+            final_text = msg.content or ""
+            break
+
+        # Append the assistant's tool-call message so subsequent tool
+        # results can reference its tool_call ids.
+        messages.append({
+            "role": "assistant",
+            "content": msg.content or "",
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in calls
+            ],
+        })
+
+        for tc in calls:
+            qname = tc.function.name
+            try:
+                import json as _json
+                args = _json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except Exception:
+                args = {}
+            tool_calls.append({"name": qname, "input": args, "id": tc.id})
+            try:
+                result_text = mcp_call(agent_id, qname, args)
+            except Exception as e:
+                logger.warning("mcp tool %s failed: %s", qname, e)
+                result_text = f"Tool error: {type(e).__name__}: {e}"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_text,
+            })
+
+    usage_dict: Optional[dict] = None
+    if total_in or total_out:
+        usage_dict = {"input_tokens": total_in, "output_tokens": total_out}
+    return final_text, usage_dict, tool_calls
 
 
 # ---------------------------------------------------------------------------

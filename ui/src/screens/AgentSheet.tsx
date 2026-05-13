@@ -11,11 +11,13 @@ import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  addMCPServer,
   connectApiChannel,
   connectWhatsAppChannel,
   disconnectApiChannel,
   disconnectSlackChannel,
   disconnectWhatsAppChannel,
+  discoverMCPTools,
   getAgentChannels,
   getAgentImprovement,
   getAgentSecrets,
@@ -23,16 +25,21 @@ import {
   getSlackChannel,
   getWhatsAppChannel,
   listAgents,
+  listMCPServers,
   putAgentImprovement,
   putAgentSecrets,
+  removeMCPServer,
   rotateApiChannel,
   updateAgent,
+  updateMCPServer,
   type AgentChannelsResponse,
   type AgentSecretsResponse,
   type AgentSummary,
   type ApiChannelConnectResponse,
   type ApiChannelStatus,
   type ImprovementConfig,
+  type MCPServer,
+  type MCPTool,
   type SlackChannelStatus,
   type WhatsAppChannelStatus,
 } from '../api';
@@ -320,39 +327,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
             </>
           )}
 
-          {tab === 'hands' && (
-            <div className="sheet-section">
-              <h3>Tools</h3>
-              <p className="desc">Functions, code, and MCP servers the agent can call.</p>
-              {tools.map((t) => (
-                <div className={`row-item ${t.on ? 'on' : ''}`} key={t.id}>
-                  <div className="ricon">
-                    <Icon name={toolIcon(t.src)} size={14} />
-                  </div>
-                  <div className="rmain">
-                    <div
-                      className="rname"
-                      style={{
-                        fontFamily: t.src === 'mcp' ? 'inherit' : 'var(--font-mono)',
-                        fontSize: t.src === 'mcp' ? 13.5 : 13,
-                      }}
-                    >
-                      {t.name}
-                    </div>
-                    <div className="rmeta">{t.desc}</div>
-                  </div>
-                  <button
-                    className={`switch ${t.on ? 'on' : ''}`}
-                    onClick={() => toggleTool(t.id)}
-                    aria-label={`Toggle ${t.name}`}
-                  />
-                </div>
-              ))}
-              <button className="add-btn" style={{ marginTop: 8 }}>
-                + Add tool or MCP server
-              </button>
-            </div>
-          )}
+          {tab === 'hands' && activeAgent && <HandsTab agentId={activeAgent.id} />}
 
           {tab === 'mouths' && activeAgent && (
             <ChannelsTab agentId={activeAgent.id} />
@@ -1204,6 +1179,257 @@ const WhatsAppChannelCard = ({
           {error}
         </div>
       )}
+    </div>
+  );
+};
+
+// ─── Hands tab (P3.4 — MCP tool integration) ────────────────────
+const HandsTab = ({ agentId }: { agentId: string }) => {
+  const [servers, setServers] = useState<MCPServer[]>([]);
+  const [tools, setTools] = useState<MCPTool[]>([]);
+  const [discovering, setDiscovering] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const res = await listMCPServers(agentId);
+      setServers(res.servers);
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('listMCPServers failed', e);
+    }
+  };
+
+  const discover = async () => {
+    setDiscovering(true);
+    setError(null);
+    try {
+      const res = await discoverMCPTools(agentId);
+      setTools(res.tools);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh().then(() => void discover());
+  }, [agentId]);
+
+  const onAdd = async (s: { name: string; command: string; args: string[]; env: Record<string, string>; description: string }) => {
+    setError(null);
+    try {
+      await addMCPServer(agentId, { ...s, transport: 'stdio', enabled: true });
+      setShowAdd(false);
+      await refresh();
+      await discover();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onToggle = async (name: string, enabled: boolean) => {
+    try {
+      await updateMCPServer(agentId, name, { enabled });
+      await refresh();
+      await discover();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const onRemove = async (name: string) => {
+    if (!confirm(`Remove MCP server "${name}"? This stops exposing its tools to the agent.`)) return;
+    try {
+      await removeMCPServer(agentId, name);
+      await refresh();
+      await discover();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  // Group discovered tools under their server.
+  const toolsByServer: Record<string, MCPTool[]> = {};
+  for (const t of tools) {
+    if (!toolsByServer[t.server_name]) toolsByServer[t.server_name] = [];
+    toolsByServer[t.server_name].push(t);
+  }
+
+  return (
+    <div className="sheet-section">
+      <h3>Tools</h3>
+      <p className="desc">
+        MCP servers the agent can call as tools during <span className="mono">/run</span>. Each
+        server is a local process (stdio transport) — operator provides the command and args.
+        Tool catalog refreshes on every change.
+      </p>
+
+      {servers.length === 0 && !showAdd && (
+        <div className="dim" style={{ fontSize: 12.5, lineHeight: 1.55, marginTop: 12 }}>
+          No MCP servers connected yet. Add one (e.g. <span className="mono">npx -y @modelcontextprotocol/server-filesystem /tmp</span>)
+          and the agent will be able to use its tools.
+        </div>
+      )}
+
+      {servers.map((s) => (
+        <div className={`row-item ${s.enabled ? 'on' : ''}`} key={s.name} style={{ display: 'block' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div className="ricon"><Icon name="route" size={14} /></div>
+            <div className="rmain" style={{ flex: 1 }}>
+              <div className="rname mono">{s.name}</div>
+              <div className="rmeta">
+                <span className="mono">{s.command} {s.args.join(' ')}</span>
+                {toolsByServer[s.name] && <> · {toolsByServer[s.name].length} tools</>}
+              </div>
+            </div>
+            <button
+              className={`switch ${s.enabled ? 'on' : ''}`}
+              onClick={() => void onToggle(s.name, !s.enabled)}
+              aria-label={`Toggle ${s.name}`}
+            />
+            <button className="btn ghost sm" onClick={() => void onRemove(s.name)}>
+              <Icon name="x" size={11} />
+            </button>
+          </div>
+          {toolsByServer[s.name] && toolsByServer[s.name].length > 0 && (
+            <div className="mcp-tool-list">
+              {toolsByServer[s.name].map((t) => (
+                <div className="mcp-tool" key={t.qualified_name}>
+                  <span className="mono">{t.tool_name}</span>
+                  <span className="dim" style={{ fontSize: 11.5 }}>
+                    {t.description || '(no description)'}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {showAdd ? (
+        <AddMCPForm
+          onSubmit={onAdd}
+          onCancel={() => setShowAdd(false)}
+        />
+      ) : (
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button className="btn primary sm" onClick={() => setShowAdd(true)}>
+            <Icon name="route" size={12} /> Connect MCP server
+          </button>
+          <button className="btn ghost sm" onClick={() => void discover()} disabled={discovering}>
+            {discovering ? 'Refreshing…' : 'Refresh tools'}
+          </button>
+        </div>
+      )}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 10 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const AddMCPForm = ({
+  onSubmit,
+  onCancel,
+}: {
+  onSubmit: (s: { name: string; command: string; args: string[]; env: Record<string, string>; description: string }) => void | Promise<void>;
+  onCancel: () => void;
+}) => {
+  const [name, setName] = useState('');
+  const [command, setCommand] = useState('');
+  const [argsText, setArgsText] = useState('');
+  const [envText, setEnvText] = useState('');
+  const [description, setDescription] = useState('');
+
+  const submit = () => {
+    const args = argsText.split(/\s+/).filter(Boolean);
+    const env: Record<string, string> = {};
+    for (const line of envText.split('\n')) {
+      const [k, ...rest] = line.split('=');
+      if (k && k.trim()) env[k.trim()] = rest.join('=').trim();
+    }
+    void onSubmit({
+      name: name.trim(),
+      command: command.trim(),
+      args,
+      env,
+      description: description.trim(),
+    });
+  };
+
+  return (
+    <div className="mcp-form">
+      <div className="dim" style={{ fontSize: 11.5, lineHeight: 1.5, marginBottom: 10 }}>
+        Example: filesystem server →{' '}
+        <span className="mono">command=npx</span>{' '}
+        <span className="mono">args=-y @modelcontextprotocol/server-filesystem /tmp</span>
+      </div>
+      <label className="mcp-field">
+        <span>Name</span>
+        <input
+          className="mcp-input mono"
+          placeholder="filesystem"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoComplete="off"
+        />
+      </label>
+      <label className="mcp-field">
+        <span>Command</span>
+        <input
+          className="mcp-input mono"
+          placeholder="npx"
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          autoComplete="off"
+        />
+      </label>
+      <label className="mcp-field">
+        <span>Args (space-separated)</span>
+        <input
+          className="mcp-input mono"
+          placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
+          value={argsText}
+          onChange={(e) => setArgsText(e.target.value)}
+          autoComplete="off"
+        />
+      </label>
+      <label className="mcp-field">
+        <span>Env (KEY=VAL per line, optional)</span>
+        <textarea
+          className="mcp-input mono"
+          rows={2}
+          placeholder="FOO=bar"
+          value={envText}
+          onChange={(e) => setEnvText(e.target.value)}
+        />
+      </label>
+      <label className="mcp-field">
+        <span>Description (optional)</span>
+        <input
+          className="mcp-input"
+          placeholder="What does this server expose?"
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
+      </label>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <button
+          className="btn primary sm"
+          onClick={submit}
+          disabled={!name.trim() || !command.trim()}
+        >
+          Connect
+        </button>
+        <button className="btn ghost sm" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
     </div>
   );
 };

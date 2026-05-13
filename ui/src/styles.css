@@ -2729,3 +2729,32 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 .whatsapp-input:focus { border-color: var(--fg); }
 .whatsapp-input:disabled { opacity: 0.6; }
 .whatsapp-input.mono { font-family: var(--font-mono); font-size: 11.5px; }
+
+/* P3.4 — MCP / Hands tab */
+.mcp-tool-list { margin-top: 8px; padding: 10px 12px; background: var(--bg-muted); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 4px; }
+.mcp-tool { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.mcp-tool .mono { color: var(--fg); font-weight: 500; min-width: 140px; }
+.mcp-form {
+  margin-top: 12px;
+  padding: 12px 14px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.mcp-field { display: flex; flex-direction: column; gap: 4px; }
+.mcp-field > span { font-size: 11.5px; font-weight: 500; color: var(--fg-muted); }
+.mcp-input {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+}
+.mcp-input:focus { border-color: var(--fg); }
+.mcp-input.mono { font-family: var(--font-mono); font-size: 11.5px; }

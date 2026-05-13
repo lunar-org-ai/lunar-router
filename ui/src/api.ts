@@ -1369,3 +1369,88 @@ export async function disconnectWhatsAppChannel(id: string): Promise<void> {
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// MCP / Hands (P3.4)
+
+export interface MCPServer {
+  name: string;
+  transport: 'stdio' | 'sse';
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  url?: string | null;
+  enabled: boolean;
+  description: string;
+}
+
+export interface MCPServersResponse {
+  agent_id: string;
+  servers: MCPServer[];
+}
+
+export interface MCPTool {
+  server_name: string;
+  tool_name: string;
+  qualified_name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+}
+
+export interface MCPToolsResponse {
+  agent_id: string;
+  tools: MCPTool[];
+  discovery_errors: string[];
+}
+
+export const listMCPServers = (id: string) =>
+  _getJson<MCPServersResponse>(`/v1/agents/${encodeURIComponent(id)}/mcp`);
+
+export const discoverMCPTools = (id: string) =>
+  _getJson<MCPToolsResponse>(`/v1/agents/${encodeURIComponent(id)}/mcp/tools`);
+
+export async function addMCPServer(
+  id: string,
+  body: Partial<MCPServer> & { name: string },
+): Promise<MCPServersResponse> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function updateMCPServer(
+  id: string,
+  serverName: string,
+  body: Partial<MCPServer>,
+): Promise<MCPServersResponse> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/mcp/${encodeURIComponent(serverName)}`,
+    {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function removeMCPServer(id: string, serverName: string): Promise<void> {
+  const res = await fetch(
+    `/v1/agents/${encodeURIComponent(id)}/mcp/${encodeURIComponent(serverName)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
