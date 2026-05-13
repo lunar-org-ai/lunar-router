@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { apiKeyAuth } from '../auth/api_key'
 import { agentRouter } from '../channels/agent/handler'
+import { agentsRouter } from '../channels/agents/handler'
 import { datasetRouter } from '../channels/dataset/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
@@ -38,6 +39,7 @@ app.route('/v1/lessons', lessonsRouter)
 app.route('/v1/metrics', metricsRouter)
 app.route('/v1/policy', policyRouter)
 app.route('/v1/agent', agentRouter)
+app.route('/v1/agents', agentsRouter)
 app.route('/v1/traces', tracesRouter)
 app.route('/v1/sessions', sessionsRouter)
 app.route('/v1/evals', evalsRouter)

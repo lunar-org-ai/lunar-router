@@ -1074,3 +1074,72 @@ export interface OnboardingTransportInfo {
 
 export const getOnboardingTransport = () =>
   _getJson<OnboardingTransportInfo>('/v1/onboarding/transport');
+
+// ─── Multi-agent (P2.0) ─────────────────────────────────────────
+
+export interface AgentSummary {
+  id: string;
+  name: string;
+  template: string | null;
+  model: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  onboarding_completed_at: string | null;
+  is_active: boolean;
+}
+
+export interface AgentListResponse {
+  agents: AgentSummary[];
+  active: string | null;
+}
+
+export interface AgentCreateRequest {
+  name: string;
+  prompt: string;
+  model?: string;
+  template?: string | null;
+  company?: string;
+  tools?: string[];
+  channels?: string[];
+  activate?: boolean;
+}
+
+export const listAgents = () => _getJson<AgentListResponse>('/v1/agents');
+
+export const getAgentById = (id: string) =>
+  _getJson<AgentSummary>(`/v1/agents/${encodeURIComponent(id)}`);
+
+export async function createAgent(body: AgentCreateRequest): Promise<AgentSummary> {
+  const res = await fetch('/v1/agents', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function activateAgent(id: string): Promise<{ active: string; agent_version: string }> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/activate`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export async function deleteAgentById(id: string): Promise<void> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}

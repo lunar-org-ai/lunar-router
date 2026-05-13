@@ -125,6 +125,12 @@ async def lifespan(app: FastAPI):
     if loaded:
         logger.info(".env loaded: %d key(s)", len(loaded))
 
+    # P2.0 — ensure multi-agent registry exists. On first run this
+    # migrates the legacy ``agent/`` dir to ``agents/_default/`` and
+    # writes ``agents/registry.json`` pointing at it. Idempotent.
+    from runtime.agents.registry import ensure_bootstrapped
+    ensure_bootstrapped()
+
     cfg = load_agent("agent/agent.yaml")
     pipeline = compile_agent(cfg)
     executor = PipelineExecutor(pipeline)
@@ -2930,10 +2936,32 @@ def onboarding_state() -> OnboardingState:
 
 @app.post("/onboarding/complete", response_model=OnboardingState)
 def onboarding_complete(payload: OnboardingCompleteRequest) -> OnboardingState:
-    """Materialize the day-0 config: write prompt, persist onboarding.json,
-    record an ``agent_created`` Lesson."""
+    """Materialize the day-0 config. P2.0+ creates a NEW agent in the
+    registry (``agents/<id>/``) and activates it instead of overwriting
+    the legacy global ``agent/`` dir. Backwards-compat: also bumps
+    the legacy onboarding.json so the gate logic in the UI keeps
+    working without further changes."""
+    from runtime.agents.registry import activate as activate_agent
+    from runtime.agents.registry import create_agent
     from runtime.store.onboarding import record_complete
-    cfg = record_complete(payload.model_dump())
+
+    body = payload.model_dump()
+
+    # Create the agent entry + activate it. The activate hook recompiles
+    # the pipeline so /run starts using the new prompt/model immediately.
+    try:
+        meta = create_agent(body)
+        activate_agent(meta.id, on_activate=lambda _m: _reload_live_pipeline())
+    except Exception as e:
+        logger.warning(
+            "agent registry create+activate failed (%s) — falling back to legacy "
+            "single-agent record_complete()", e,
+        )
+
+    # Keep the legacy state file in sync so /onboarding/state returns
+    # completed=True; this also writes the agent_created Lesson via the
+    # existing hook so Evolution still surfaces the birth.
+    cfg = record_complete(body)
     return OnboardingState(**cfg.to_dict())
 
 
@@ -3006,6 +3034,128 @@ def onboarding_transport() -> OnboardingTransportInfo:
     sees what's powering the chat — and whether it has filesystem access."""
     from runtime.store.onboarding_chat import detect_transport
     return OnboardingTransportInfo(**detect_transport())
+
+
+# ---------------------------------------------------------------------------
+# Multi-agent (P2.0)
+# ---------------------------------------------------------------------------
+
+
+class AgentSummary(BaseModel):
+    id: str
+    name: str
+    template: Optional[str] = None
+    model: str
+    description: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    onboarding_completed_at: Optional[str] = None
+    is_active: bool = False
+
+
+class AgentListResponse(BaseModel):
+    agents: list[AgentSummary]
+    active: Optional[str] = None
+
+
+class AgentCreateRequest(BaseModel):
+    name: str
+    prompt: str
+    model: str = "claude-sonnet-4-6"
+    template: Optional[str] = None
+    company: str = ""
+    tools: list[str] = []
+    channels: list[str] = []
+    activate: bool = False  # if True, switch to this agent immediately
+
+
+def _summarize(meta, *, active_id: Optional[str]) -> AgentSummary:
+    return AgentSummary(
+        id=meta.id,
+        name=meta.name,
+        template=meta.template,
+        model=meta.model,
+        description=meta.description,
+        created_at=meta.created_at,
+        updated_at=meta.updated_at,
+        onboarding_completed_at=meta.onboarding_completed_at,
+        is_active=(meta.id == active_id),
+    )
+
+
+def _reload_live_pipeline() -> None:
+    """Recompile the pipeline from the live ``agent/`` dir and swap into
+    the running executor. Called after activate()."""
+    cfg = load_agent("agent/agent.yaml")
+    pipeline = compile_agent(cfg)
+    executor = PipelineExecutor(pipeline)
+    _state["cfg"] = cfg
+    _state["executor"] = executor
+    logger.info("agent %s re-compiled after activate (%d stages)", cfg.version, len(pipeline.stages))
+
+
+@app.get("/agents", response_model=AgentListResponse)
+def list_agents_endpoint() -> AgentListResponse:
+    from runtime.agents.registry import get_registry
+    reg = get_registry()
+    return AgentListResponse(
+        agents=[_summarize(a, active_id=reg.active) for a in reg.agents],
+        active=reg.active,
+    )
+
+
+@app.get("/agents/{agent_id}", response_model=AgentSummary)
+def get_agent_endpoint(agent_id: str) -> AgentSummary:
+    from runtime.agents.registry import get_agent, get_registry
+    meta = get_agent(agent_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    return _summarize(meta, active_id=get_registry().active)
+
+
+@app.post("/agents", response_model=AgentSummary, status_code=201)
+def create_agent_endpoint(payload: AgentCreateRequest) -> AgentSummary:
+    """Create a new agent from the onboarding payload. If ``activate``
+    is true, swap the live ``agent/`` dir + recompile the pipeline."""
+    from runtime.agents.registry import activate as activate_agent
+    from runtime.agents.registry import create_agent, get_registry
+
+    meta = create_agent(payload.model_dump())
+    if payload.activate:
+        activate_agent(meta.id, on_activate=lambda _m: _reload_live_pipeline())
+    return _summarize(meta, active_id=get_registry().active)
+
+
+class AgentActivateResponse(BaseModel):
+    active: str
+    agent_version: str
+
+
+@app.post("/agents/{agent_id}/activate", response_model=AgentActivateResponse)
+def activate_agent_endpoint(agent_id: str) -> AgentActivateResponse:
+    from runtime.agents.registry import activate as activate_agent
+    try:
+        activate_agent(agent_id, on_activate=lambda _m: _reload_live_pipeline())
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    except (FileNotFoundError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return AgentActivateResponse(
+        active=agent_id,
+        agent_version=_state["cfg"].version,
+    )
+
+
+@app.delete("/agents/{agent_id}", status_code=204)
+def delete_agent_endpoint(agent_id: str) -> None:
+    from runtime.agents.registry import delete_agent
+    try:
+        delete_agent(agent_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return None
 
 
 def main() -> None:

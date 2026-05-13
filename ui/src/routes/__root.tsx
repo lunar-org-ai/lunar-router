@@ -22,6 +22,7 @@ import {
 import { TanStackRouterDevtools } from '@tanstack/router-devtools';
 import { Icon, type IconName } from '../components/Icon';
 import { AgentSheet } from '../screens/AgentSheet';
+import { AgentSwitcher } from '../components/AgentSwitcher';
 import { Onboarding } from '../screens/Onboarding';
 import { Button } from '../components/ui/button';
 import { ApiError, getOnboardingState, listLessons, type OnboardingState } from '../api';
@@ -285,12 +286,19 @@ export const RootLayout = () => {
               <Button variant="ghost" size="sm">
                 <Icon name="bell" size={14} />
               </Button>
-              <button className="agent-pill" onClick={() => setAgentOpen(true)}>
-                <span className="dot" />
-                <span>support-agent</span>
-                <span className="ver">v0.40 · live</span>
-                <Icon name="chevronDown" size={12} />
-              </button>
+              <AgentSwitcher
+                onOpenSheet={() => setAgentOpen(true)}
+                onNewAgent={() => {
+                  // Force the onboarding flow to take over again so the
+                  // operator can author a brand-new agent. We reset the
+                  // local onboarding gate; the server's onboarding/state
+                  // doesn't need to change because the new agent will
+                  // get its own onboarding.json once created.
+                  setOnboarding((prev) =>
+                    prev ? { ...prev, completed: false } : prev,
+                  );
+                }}
+              />
             </div>
           </div>
           <Outlet />
