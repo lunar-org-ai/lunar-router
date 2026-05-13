@@ -53,11 +53,27 @@ def select_transport() -> str:
     """Pick a transport. Returns 'anthropic_api' | 'claude_code_cli' | 'none'.
 
     Resolution order:
-      1. ``BRAIN_TRANSPORT`` env var if set to a known value.
-      2. ``anthropic_api`` if ``ANTHROPIC_API_KEY`` is set.
-      3. ``claude_code_cli`` if ``claude`` is on PATH.
-      4. ``none``.
+      1. **P3.2** — Active agent's ``improvement.yaml`` setting, when
+         explicit (``anthropic_api`` | ``claude_code_cli`` | ``disabled``).
+      2. ``BRAIN_TRANSPORT`` env var if set to a known value.
+      3. ``anthropic_api`` if ``ANTHROPIC_API_KEY`` is set.
+      4. ``claude_code_cli`` if ``claude`` is on PATH.
+      5. ``none``.
     """
+    # Per-agent override wins. ``auto`` falls through to the global
+    # resolution; ``disabled`` returns 'none' so callers bail.
+    try:
+        from runtime.agents.improvement import resolve_for_active_agent
+        cfg = resolve_for_active_agent()
+        if cfg.transport == "disabled" or not cfg.enabled:
+            return "none"
+        if cfg.transport in ("anthropic_api", "claude_code_cli"):
+            return cfg.transport
+    except Exception:
+        # Defensive — never let agent-config plumbing kill the brain
+        # selection. Falls through to the global path.
+        pass
+
     forced = os.getenv("BRAIN_TRANSPORT", "").strip()
     if forced in ("anthropic_api", "claude_code_cli"):
         return forced
@@ -103,6 +119,14 @@ def complete(
         raise BrainNotAvailableError(
             "no brain transport — set ANTHROPIC_API_KEY or install `claude` CLI"
         )
+    # P3.2 — pick up the active agent's preferred improvement model
+    # when the caller didn't pin one. CLI ignores model anyway.
+    if not model:
+        try:
+            from runtime.agents.improvement import resolve_for_active_agent
+            model = resolve_for_active_agent().model
+        except Exception:
+            model = None
     if chosen == "anthropic_api":
         return _complete_via_api(
             prompt,

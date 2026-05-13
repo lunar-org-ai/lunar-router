@@ -3176,6 +3176,63 @@ class AgentUpdateRequest(BaseModel):
     model: Optional[str] = None
 
 
+class ImprovementConfigView(BaseModel):
+    enabled: bool = True
+    transport: str = "auto"
+    model: str = "claude-sonnet-4-6"
+    cadence_minutes: int = 30
+    notes: str = ""
+
+
+class ImprovementUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    transport: Optional[str] = None
+    model: Optional[str] = None
+    cadence_minutes: Optional[int] = None
+    notes: Optional[str] = None
+
+
+@app.get("/agents/{agent_id}/improvement", response_model=ImprovementConfigView)
+def get_improvement_endpoint(agent_id: str) -> ImprovementConfigView:
+    """Per-agent self-improvement brain config (P3.2)."""
+    from runtime.agents.improvement import load
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    cfg = load(agent_id)
+    return ImprovementConfigView(**cfg.to_dict())
+
+
+@app.put("/agents/{agent_id}/improvement", response_model=ImprovementConfigView)
+def put_improvement_endpoint(
+    agent_id: str, payload: ImprovementUpdateRequest,
+) -> ImprovementConfigView:
+    """Update the per-agent improvement config. Partial body merges
+    over existing values."""
+    from runtime.agents.improvement import ImprovementConfig, load, save
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+
+    cfg = load(agent_id)
+    body = payload.model_dump(exclude_unset=True)
+    if "enabled" in body:
+        cfg.enabled = bool(body["enabled"])
+    if "transport" in body:
+        cfg.transport = str(body["transport"] or "auto")
+    if "model" in body and body["model"]:
+        cfg.model = str(body["model"])
+    if "cadence_minutes" in body and body["cadence_minutes"] is not None:
+        cfg.cadence_minutes = max(0, int(body["cadence_minutes"]))
+    if "notes" in body:
+        cfg.notes = str(body["notes"] or "")
+
+    # Re-validate via from_dict so the transport normalizes
+    cfg = ImprovementConfig.from_dict(cfg.to_dict())
+    save(agent_id, cfg)
+    return ImprovementConfigView(**cfg.to_dict())
+
+
 class AgentSecretsStatus(BaseModel):
     """Per-provider key status — never carries the raw key.
 
