@@ -22,8 +22,14 @@ import {
 import { Icon } from './Icon';
 
 interface AgentSwitcherProps {
-  /** Open the AgentSheet drawer when the operator clicks the active row. */
-  onOpenSheet: () => void;
+  /**
+   * Open the AgentSheet drawer. Called with `null` when the operator
+   * clicks the active row in the dropdown (loads the active agent), or
+   * with a specific agent ID when they click the gear icon next to any
+   * row — that lets them peek at another agent's config without
+   * activating it.
+   */
+  onOpenSheet: (agentId: string | null) => void;
   /** Called when the operator picks "+ New agent" — UI swaps to onboarding. */
   onNewAgent: () => void;
 }
@@ -62,7 +68,7 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
   const handlePick = async (a: AgentSummary) => {
     if (a.is_active) {
       setOpen(false);
-      onOpenSheet();
+      onOpenSheet(null);
       return;
     }
     setSwitching(a.id);
@@ -79,6 +85,14 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
     } finally {
       setSwitching(null);
     }
+  };
+
+  const handlePeek = (e: React.MouseEvent, a: AgentSummary) => {
+    // Open the sheet for THIS agent without activating. Stops propagation
+    // so the row's outer click (which activates) doesn't fire.
+    e.stopPropagation();
+    setOpen(false);
+    onOpenSheet(a.id);
   };
 
   return (
@@ -103,24 +117,38 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
           {state.agents.map((a) => {
             const isSwitching = switching === a.id;
             return (
-              <button
+              <div
                 key={a.id}
                 className={`agent-switcher-row ${a.is_active ? 'on' : ''}`}
-                onClick={() => void handlePick(a)}
-                disabled={isSwitching}
               >
-                <div className="agent-switcher-row-main">
-                  <span className="agent-switcher-row-name mono">{a.id}</span>
-                  <span className="agent-switcher-row-sub dim">
-                    {a.name} · {shortModel(a.model)}
-                  </span>
-                </div>
-                {a.is_active ? (
-                  <Icon name="check" size={13} />
-                ) : isSwitching ? (
-                  <span className="agent-switcher-spinner" />
-                ) : null}
-              </button>
+                <button
+                  className="agent-switcher-row-pick"
+                  onClick={() => void handlePick(a)}
+                  disabled={isSwitching}
+                  title={a.is_active ? 'Open this agent' : `Switch to ${a.name}`}
+                >
+                  <div className="agent-switcher-row-main">
+                    <span className="agent-switcher-row-name mono">{a.id}</span>
+                    <span className="agent-switcher-row-sub dim">
+                      {a.name} · {shortModel(a.model)}
+                    </span>
+                  </div>
+                  {a.is_active ? (
+                    <Icon name="check" size={13} />
+                  ) : isSwitching ? (
+                    <span className="agent-switcher-spinner" />
+                  ) : null}
+                </button>
+                <button
+                  className="agent-switcher-row-peek"
+                  onClick={(e) => handlePeek(e, a)}
+                  disabled={isSwitching}
+                  title={a.is_active ? 'Open settings' : 'Peek at this agent without activating'}
+                  aria-label={`Open ${a.name} settings`}
+                >
+                  <Icon name="settings" size={13} />
+                </button>
+              </div>
             );
           })}
           <button

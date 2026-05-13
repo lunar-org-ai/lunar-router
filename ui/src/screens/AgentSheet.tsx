@@ -14,6 +14,7 @@ import {
   addMCPServer,
   connectApiChannel,
   connectWebChannel,
+  getOnboardingTransport,
   connectWhatsAppChannel,
   deleteSlackAppCredentials,
   disconnectApiChannel,
@@ -108,6 +109,13 @@ const INITIAL_CHANNELS: Channel[] = [
   { id: 'slack', name: 'Slack', desc: 'Not connected', on: false, vol: null },
 ];
 
+function shortModel(id: string | undefined | null): string {
+  if (!id) return '—';
+  const m = /^claude-(haiku|sonnet|opus)-(\d+)-(\d+)/i.exec(id);
+  if (m) return `${m[1]} ${m[2]}.${m[3]}`;
+  return id;
+}
+
 const toolIcon = (src: Tool['src']): IconName =>
   src === 'mcp' ? 'route' : src === 'builtin' ? 'sparkles' : 'code';
 
@@ -115,7 +123,21 @@ const channelIcon = (id: Channel['id']): IconName => (id === 'api' ? 'code' : 'c
 
 type Drill = null | 'widget' | 'slack' | 'whatsapp' | 'api';
 
-export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
+/**
+ * AgentSheet — the four-tab drawer (Brain / Hands / Channels / Keys).
+ *
+ * When `agentId` is provided, the sheet loads that specific agent's
+ * config without activating it — useful for peeking at another agent's
+ * brain from the AgentSwitcher dropdown. When omitted, it loads
+ * whichever agent the registry says is active.
+ */
+export const AgentSheet = ({
+  onClose,
+  agentId,
+}: {
+  onClose: () => void;
+  agentId?: string | null;
+}) => {
   const [tab, setTab] = useState<Tab>('brain');
   const [model, setModel] = useState('claude-sonnet-4-6');
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
@@ -139,25 +161,28 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
     }
   };
 
-  // Load the active agent on mount so the Brain tab reflects the
-  // operator's real configuration, not a hardcoded default.
+  // Load the target agent on mount. If the caller passed `agentId`, we
+  // load THAT agent's config (peek mode); otherwise we resolve to
+  // whichever agent the registry says is active.
   useEffect(() => {
     let cancelled = false;
     void listAgents()
       .then(async (res) => {
         if (cancelled) return;
-        const active = res.agents.find((a) => a.id === res.active) ?? null;
-        if (active) {
-          setActiveAgent(active);
-          setModel(active.model);
-          await loadSecrets(active.id);
+        const target = agentId
+          ? res.agents.find((a) => a.id === agentId) ?? null
+          : res.agents.find((a) => a.id === res.active) ?? null;
+        if (target) {
+          setActiveAgent(target);
+          setModel(target.model);
+          await loadSecrets(target.id);
         }
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [agentId]);
 
   const pickModel = async (next: string) => {
     if (!activeAgent || next === model || savingModel) return;
@@ -189,10 +214,21 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
         <div className="sheet-head">
           <div className="sidebar-mark" style={{ width: 26, height: 26, borderRadius: 8 }} />
           <div style={{ flex: 1 }}>
-            <h2>support-agent</h2>
+            <h2>{activeAgent?.name ?? activeAgent?.id ?? 'agent'}</h2>
             <div className="dim" style={{ fontSize: 12, marginTop: 2 }}>
-              <span className="mono">v0.40</span> · live ·{' '}
-              <span style={{ color: 'var(--accent-fg)' }}>● healthy</span>
+              <span className="mono">{activeAgent?.id ?? '—'}</span>
+              {' · '}
+              {activeAgent?.is_active ? (
+                <span style={{ color: 'var(--accent-fg)' }}>● live</span>
+              ) : (
+                <span style={{ color: 'var(--fg-muted)' }}>○ inactive (peeking)</span>
+              )}
+              {activeAgent?.model && (
+                <>
+                  {' · '}
+                  <span className="mono">{shortModel(activeAgent.model)}</span>
+                </>
+              )}
             </div>
           </div>
           <button className="btn ghost sm" onClick={onClose} aria-label="Close">
@@ -286,60 +322,13 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                 )}
               </div>
 
-              {activeAgent && (
-                <BYOKSection
-                  agent={activeAgent}
-                  secrets={secrets}
-                  anthropicDraft={anthropicDraft}
-                  openaiDraft={openaiDraft}
-                  setAnthropicDraft={setAnthropicDraft}
-                  setOpenaiDraft={setOpenaiDraft}
-                  saving={savingKey}
-                  error={keyError}
-                  onSave={async (provider) => {
-                    setSavingKey(provider);
-                    setKeyError(null);
-                    try {
-                      const body = provider === 'anthropic'
-                        ? { anthropic: anthropicDraft }
-                        : { openai: openaiDraft };
-                      const next = await putAgentSecrets(activeAgent.id, body);
-                      setSecrets(next);
-                      if (provider === 'anthropic') setAnthropicDraft('');
-                      else setOpenaiDraft('');
-                    } catch (e) {
-                      setKeyError(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setSavingKey(null);
-                    }
-                  }}
-                  onRemove={async (provider) => {
-                    setSavingKey(provider);
-                    setKeyError(null);
-                    try {
-                      const body = provider === 'anthropic'
-                        ? { anthropic: '' }
-                        : { openai: '' };
-                      const next = await putAgentSecrets(activeAgent.id, body);
-                      setSecrets(next);
-                    } catch (e) {
-                      setKeyError(e instanceof Error ? e.message : String(e));
-                    } finally {
-                      setSavingKey(null);
-                    }
-                  }}
-                />
-              )}
-
               <div className="sheet-section">
                 <h3>Self-improvement engineer</h3>
                 <p className="desc">
-                  The brain that reads traces, drafts changes, runs evals, and opens proposals.
-                  Pick which transport powers it + which model it uses.
+                  Claude Code reads traces, drafts changes, runs evals, opens proposals.
+                  Uses your Claude Code subscription — no separate API key needed.
                 </p>
-                {activeAgent && (
-                  <ImprovementSection agentId={activeAgent.id} />
-                )}
+                {activeAgent && <ClaudeCodeStatusRow agentId={activeAgent.id} />}
               </div>
             </>
           )}
@@ -508,6 +497,100 @@ const KeyRow = ({
         <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
           Inherited from the global <span className="mono">.env</span>. Save a key here to
           override per-agent.
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─── Claude Code status row (simplified Brain → Self-improvement) ──
+// Single row + tag. Matches the design's minimal "Claude Code is connected
+// via your subscription" affordance. The detailed transport/cadence
+// controls live in ImprovementSection below (still mounted by Policies),
+// but the Brain tab keeps it terse on purpose: 90% of operators just want
+// to know "is it on?".
+const ClaudeCodeStatusRow = ({ agentId }: { agentId: string }) => {
+  const [transport, setTransport] = useState<'claude_code_cli' | 'anthropic_api' | 'none' | 'loading'>('loading');
+  const [cfg, setCfg] = useState<ImprovementConfig | null>(null);
+  const [version, setVersion] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getOnboardingTransport()
+      .then((t) => {
+        if (cancelled) return;
+        setTransport(t.transport);
+        setVersion(t.claude_version);
+      })
+      .catch(() => !cancelled && setTransport('none'));
+    void getAgentImprovement(agentId)
+      .then((c) => !cancelled && setCfg(c))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+
+  const toggle = async () => {
+    if (!cfg || saving) return;
+    setSaving(true);
+    try {
+      const next = await putAgentImprovement(agentId, { enabled: !cfg.enabled });
+      setCfg(next);
+    } catch (e) {
+      console.warn('toggle improvement failed', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const isOn = cfg ? cfg.enabled && cfg.transport !== 'disabled' : false;
+  const hasCli = transport === 'claude_code_cli';
+
+  return (
+    <div className={`row-item ${isOn ? 'on' : ''}`} style={{ display: 'block' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="ricon"><Icon name="code" size={16} /></div>
+        <div className="rmain">
+          <div className="rname">Claude Code</div>
+          <div className="rmeta">
+            {transport === 'loading' ? (
+              'Checking local installation…'
+            ) : hasCli ? (
+              <>
+                CLI detected{version && <> · <span className="mono">{version}</span></>}
+                {' · '}uses your Claude Code subscription
+              </>
+            ) : transport === 'anthropic_api' ? (
+              <>No local <span className="mono">claude</span> CLI · falling back to Anthropic API key</>
+            ) : (
+              <>Not installed locally — <a href="https://claude.com/claude-code" target="_blank" rel="noreferrer">install Claude Code</a> to enable</>
+            )}
+          </div>
+        </div>
+        {hasCli ? (
+          <Tag kind="success"><span className="dot" />Connected</Tag>
+        ) : transport === 'anthropic_api' ? (
+          <Tag kind="warn"><span className="dot" />API fallback</Tag>
+        ) : (
+          <Tag kind="bad"><span className="dot" />Not installed</Tag>
+        )}
+      </div>
+      {cfg && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12.5, color: 'var(--fg)' }}>
+            <button
+              className={`switch ${isOn ? 'on' : ''}`}
+              onClick={() => void toggle()}
+              disabled={saving || transport === 'none'}
+              aria-label="Toggle autonomous improvement"
+            />
+            Autonomous improvement
+          </label>
+          <span className="dim" style={{ fontSize: 11.5, marginLeft: 'auto' }}>
+            {isOn ? `runs every ${cfg.cadence_minutes}m` : 'paused'}
+          </span>
         </div>
       )}
     </div>
