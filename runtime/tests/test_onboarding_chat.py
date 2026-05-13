@@ -60,8 +60,8 @@ def test_run_turn_scripted_fallback_when_transport_none():
         [{"role": "user", "content": "build a support agent"}],
         transport="none",
     )
-    assert "refund" in out1["reply"].lower()
-    assert out1["config"]["tools"] == ["lookup_order", "search_kb"]
+    assert out1["reply"]
+    assert out1["config"]["tools"] == []   # P1.13: never propose phantom tools
     assert out1["ready"] is False
 
     history = []
@@ -173,13 +173,16 @@ def test_run_turn_parses_valid_json(monkeypatch):
     assert out["ready"] is False
 
 
-def test_run_turn_falls_back_when_json_malformed(monkeypatch):
+def test_run_turn_surfaces_error_when_json_malformed(monkeypatch):
+    """Malformed brain output → operator sees an honest error reply
+    (not a canned script disguised as Claude)."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-fake")
     _inject_anthropic(monkeypatch, "I'm not returning JSON, I'm just chatting!")
     from runtime.store.onboarding_chat import run_turn
     out = run_turn([{"role": "user", "content": "hi"}], transport="anthropic_api")
-    # Falls back to SCRIPT[0]
-    assert "refund" in out["reply"].lower()
+    assert "unparseable" in out["reply"].lower()
+    assert out["config"]["tools"] == []
+    assert out["ready"] is False
 
 
 def test_run_turn_falls_back_when_anthropic_raises(monkeypatch):
@@ -306,27 +309,27 @@ def test_run_turn_via_claude_cli(monkeypatch):
     assert "Build me something useful" in captured["args"][-1]
 
 
-def test_run_turn_cli_subprocess_failure_falls_back(monkeypatch):
-    """CLI returns non-zero → scripted fallback."""
+def test_run_turn_cli_subprocess_failure_surfaces_error(monkeypatch):
+    """CLI returns non-zero → operator sees an honest error reply."""
     import subprocess as _sp
     from runtime.store.onboarding_chat import run_turn
 
     class _Bad:
         returncode = 2
         stdout = ""
-        stderr = "claude crashed"
+        stderr = "claude crashed: rate limited"
 
     monkeypatch.setattr(_sp, "run", lambda *a, **kw: _Bad())
     out = run_turn(
         [{"role": "user", "content": "test"}], transport="claude_code_cli",
     )
-    # Got scripted SCRIPT[0]
-    assert out["reply"]
-    assert out["config"]
+    assert "claude code" in out["reply"].lower()
+    assert "rate limited" in out["reply"].lower()
+    assert out["config"]["tools"] == []
 
 
 def test_run_turn_cli_handles_garbage_output(monkeypatch):
-    """CLI outputs prose instead of JSON → scripted fallback."""
+    """CLI outputs prose instead of JSON → operator sees an honest error."""
     import subprocess as _sp
     from runtime.store.onboarding_chat import run_turn
 
@@ -339,8 +342,28 @@ def test_run_turn_cli_handles_garbage_output(monkeypatch):
     out = run_turn(
         [{"role": "user", "content": "hi"}], transport="claude_code_cli",
     )
-    # Falls back to script
-    assert "refund" in out["reply"].lower()
+    assert "claude code" in out["reply"].lower()
+    assert "unparseable" in out["reply"].lower()
+
+
+def test_run_turn_cli_credit_error_gets_friendly_hint(monkeypatch):
+    """The 'Credit balance is too low' string triggers a help-with-fix
+    reply instead of a generic error blob."""
+    import subprocess as _sp
+    from runtime.store.onboarding_chat import run_turn
+
+    class _Bad:
+        returncode = 1
+        stdout = "Credit balance is too low"
+        stderr = ""
+
+    monkeypatch.setattr(_sp, "run", lambda *a, **kw: _Bad())
+    out = run_turn(
+        [{"role": "user", "content": "hi"}], transport="claude_code_cli",
+    )
+    assert "credit balance" in out["reply"].lower()
+    assert "billing" in out["reply"].lower()
+    assert out["config"]["tools"] == []
 
 
 def test_get_onboarding_transport_endpoint(monkeypatch):

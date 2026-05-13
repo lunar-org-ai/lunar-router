@@ -51,12 +51,24 @@ Your job each turn:
 1) Read the conversation. Update the agent config based on what you've learned.
 2) Either ask ONE more clarifying question that materially shapes the config, OR if you have enough, signal you're ready to confirm.
 
+CONFIG SCOPE — what you CAN propose:
+- ``name`` — short kebab-case slug.
+- ``model`` — pick from {claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7} based on volume + accuracy needs.
+- ``prompt`` — the full system prompt for the agent. Write it well, like briefing a teammate.
+- ``channels`` — where it lives, pick from {web, whatsapp, slack, email, api}.
+
+TOOLS — leave ``tools: []`` EMPTY by default. The OpenTracy runtime does not auto-implement tools; proposing tool names that don't exist in the user's project is dishonest. Two exceptions:
+  1) You ran a tool that lets you read the operator's repo (e.g., Bash, Read, Glob) and found a real handler — only THEN list it, with the source file in the prompt so it's clear where the implementation lives.
+  2) The operator explicitly says "I have these tools" or pastes an MCP endpoint. In that case echo back exactly what they mention.
+
+Never invent tools like ``lookup_order``, ``search_kb``, ``create_ticket`` unless you've verified they exist. Tools added later via the "Connect MCP" flow.
+
 Questions worth asking (pick what matters most for THIS agent — not all):
 - Brand/tone if support-facing
 - Edge cases or guardrails (auto-actions vs always escalate)
 - Roughly what volume → recommend model
 - Where it lives (channels)
-- What tools/data it needs access to
+- What knowledge sources to ground in (docs, KB URLs — you'll suggest the user paste/ingest them later)
 
 Stop asking after 3-4 substantive turns. Don't drag it out.
 
@@ -68,10 +80,10 @@ Always output VALID JSON with this exact shape, no prose outside JSON:
     "name":     "agent-slug (kebab-case)",
     "model":    "claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-7",
     "prompt":   "Full system prompt for the agent. Write it well — like briefing a teammate.",
-    "tools":    ["snake_case_tool", ...],
+    "tools":    [],
     "channels": ["web" | "whatsapp" | "slack" | "email" | "api", ...]
   },
-  "justAdded": { "tool": "...", "model": "...", "channel": "..." },
+  "justAdded": { "model": "...", "channel": "..." },
   "ready": false
 }
 
@@ -79,54 +91,61 @@ Set "ready": true only when you have enough to confirm. When ready, your reply s
 
 
 # ---------------------------------------------------------------------------
-# Scripted fallback — used when no API key or the model misbehaves.
-# Five turns, support-agent flavor, mirrors the design's SCRIPT.
+# Scripted fallback — used ONLY when ``transport='none'`` (no brain at
+# all). For CLI / API failures the operator gets an honest error so they
+# can fix the upstream problem (top up credits, restart, etc.) instead
+# of silently watching a canned demo run.
+#
+# These turns capture purpose + model + prompt + channels — tools stay
+# empty intentionally. Onboarding doesn't fabricate tools that don't
+# exist in the operator's codebase; tools come in a later "Connect MCP"
+# flow once we know what they actually have.
 # ---------------------------------------------------------------------------
 
 _SCRIPT: list[dict[str, Any]] = [
     {
-        "reply": "Got it. A couple things to lock in: when a customer asks for a refund, should the agent ever auto-issue, or always create a ticket for a human?",
+        "reply": "Got it. Two quick questions to shape this right — what's the brand voice, anything beyond \"professional\"? And what's the #1 thing customers contact you about?",
         "config": {
-            "name": "checkout-support",
+            "name": "support-agent",
             "model": "claude-sonnet-4-6",
-            "prompt": "You are a customer support agent for {{company}}.\nBe warm but direct. Acknowledge frustration once, then move to action.\nUse lookup_order before guessing about order state.",
-            "tools": ["lookup_order", "search_kb"],
+            "prompt": "You are a customer support agent. Be warm but direct. Acknowledge frustration once, then move to action. Never make claims about specific orders or accounts without verifying — escalate to a human teammate when you cannot confirm a fact.",
+            "tools": [],
             "channels": ["web"],
         },
-        "justAdded": {"tool": "lookup_order"},
+        "justAdded": None,
         "ready": False,
     },
     {
-        "reply": "Perfect. And how many conversations per day are you handling now? Affects which model I'd recommend.",
+        "reply": "How many conversations per day are you handling, roughly? That tells me which model to recommend.",
         "config": {
-            "name": "checkout-support",
+            "name": "support-agent",
             "model": "claude-sonnet-4-6",
-            "prompt": "You are a customer support agent for {{company}}.\nBe warm but direct. Acknowledge frustration once, then move to action.\nNever auto-issue refunds — always open a ticket via create_refund_ticket.\nUse lookup_order before guessing about order state.",
-            "tools": ["lookup_order", "search_kb", "create_refund_ticket"],
+            "prompt": "You are a customer support agent. Be warm but direct. Acknowledge frustration once, then move to action. Never make claims about specific orders or accounts without verifying — escalate to a human teammate when you cannot confirm a fact.",
+            "tools": [],
             "channels": ["web"],
         },
-        "justAdded": {"tool": "create_refund_ticket"},
+        "justAdded": None,
         "ready": False,
     },
     {
-        "reply": "At ~400/day, Haiku will be plenty and a lot cheaper. What's the brand voice? Anything past \"professional\"?",
+        "reply": "At that volume Haiku is plenty and a lot cheaper. Where should this agent live — just the web widget, or also Slack/WhatsApp/email?",
         "config": {
-            "name": "checkout-support",
+            "name": "support-agent",
             "model": "claude-haiku-4-5",
-            "prompt": "You are a customer support agent for {{company}}.\nBe warm but direct. Acknowledge frustration once, then move to action.\nNever auto-issue refunds — always open a ticket via create_refund_ticket.\nUse lookup_order before guessing about order state.",
-            "tools": ["lookup_order", "search_kb", "create_refund_ticket"],
+            "prompt": "You are a customer support agent. Be warm but direct. Acknowledge frustration once, then move to action. Never make claims about specific orders or accounts without verifying — escalate to a human teammate when you cannot confirm a fact.",
+            "tools": [],
             "channels": ["web"],
         },
         "justAdded": {"model": "claude-haiku-4-5"},
         "ready": False,
     },
     {
-        "reply": "Where should this agent live — web widget, WhatsApp, both?",
+        "reply": "Good. Last one — any specific guardrails? E.g. \"never quote a price\" or \"always offer a callback after 3 turns\".",
         "config": {
-            "name": "checkout-support",
+            "name": "support-agent",
             "model": "claude-haiku-4-5",
-            "prompt": "You are a customer support agent for {{company}}.\nBe warm but concise — say \"hey\", not \"dear customer\". One sentence acknowledging frustration is enough.\nNever auto-issue refunds — always open a ticket via create_refund_ticket.\nUse lookup_order before guessing about order state.",
-            "tools": ["lookup_order", "search_kb", "create_refund_ticket"],
+            "prompt": "You are a customer support agent. Be warm but concise — say \"hey\", not \"dear customer\". One sentence acknowledging frustration is enough.\nNever make claims about specific orders or accounts without verifying — escalate to a human teammate when you cannot confirm a fact.",
+            "tools": [],
             "channels": ["web"],
         },
         "justAdded": None,
@@ -135,13 +154,13 @@ _SCRIPT: list[dict[str, Any]] = [
     {
         "reply": "I think I've got it — want to review?",
         "config": {
-            "name": "checkout-support",
+            "name": "support-agent",
             "model": "claude-haiku-4-5",
-            "prompt": "You are a customer support agent for {{company}}.\nBe warm but concise — say \"hey\", not \"dear customer\". One sentence acknowledging frustration is enough.\nNever auto-issue refunds — always open a ticket via create_refund_ticket.\nUse lookup_order before guessing about order state.",
-            "tools": ["lookup_order", "search_kb", "create_refund_ticket"],
-            "channels": ["web", "whatsapp"],
+            "prompt": "You are a customer support agent. Be warm but concise — say \"hey\", not \"dear customer\". One sentence acknowledging frustration is enough.\nNever make claims about specific orders or accounts without verifying — escalate to a human teammate when you cannot confirm a fact.",
+            "tools": [],
+            "channels": ["web"],
         },
-        "justAdded": {"channel": "whatsapp"},
+        "justAdded": None,
         "ready": True,
     },
 ]
@@ -209,9 +228,14 @@ def run_turn(
     ``detect_transport()`` (preferring claude_code_cli for richer
     behavior, see module docstring).
 
-    On any failure (no brain, network blip, malformed JSON) we fall
-    through to the SCRIPT. The UI never deadlocks because of a hiccup
-    during day-0 setup.
+    Behavior on failure:
+      - ``transport='none'`` → scripted SCRIPT turn (true offline UX).
+      - CLI/API errors → return an honest error reply so the operator
+        sees what's wrong instead of a canned demo masquerading as
+        Claude. The UI renders this as a normal Claude turn with the
+        diagnostic in the reply text.
+      - Brain produced JSON we can't parse → also surfaces an error;
+        SCRIPT is reserved for the genuinely-offline case.
     """
     chosen = transport or detect_transport()["transport"]
     if chosen == "none":
@@ -223,17 +247,55 @@ def run_turn(
         else:
             text = _call_anthropic_api(messages, model=model)
     except Exception as e:
-        logger.warning("onboarding turn (%s) failed (%s) — falling back to script", chosen, e)
-        return _scripted_turn(_user_turn_count(messages))
+        logger.warning("onboarding turn (%s) failed (%s)", chosen, e)
+        return _error_turn(chosen, str(e))
 
     parsed = extract_json(text)
     if not _is_valid_turn(parsed):
         logger.warning(
-            "onboarding turn (%s) produced unparseable JSON — falling back. Raw: %r",
+            "onboarding turn (%s) produced unparseable JSON: %r",
             chosen, (text or "")[:200],
         )
-        return _scripted_turn(_user_turn_count(messages))
+        return _error_turn(
+            chosen,
+            f"Got an unparseable reply from {chosen}. First 120 chars: {(text or '')[:120]!r}",
+        )
     return _normalize_turn(parsed)
+
+
+def _error_turn(transport: str, detail: str) -> dict[str, Any]:
+    """Honest failure surface — operator sees what went wrong + a hint."""
+    if "Credit balance is too low" in detail:
+        reply = (
+            "Claude Code can't run right now — your credit balance is too low. "
+            "Top up at console.anthropic.com/settings/billing and refresh this page. "
+            "(You can also remove BRAIN_TRANSPORT=claude_code_cli from .env to use "
+            "the ANTHROPIC_API_KEY instead — that one is per-token.)"
+        )
+    elif transport == "claude_code_cli":
+        reply = (
+            f"Claude Code ran into a problem: {detail[:200]}. "
+            "Check `claude --version` works in your terminal, then refresh."
+        )
+    elif transport == "anthropic_api":
+        reply = (
+            f"The Anthropic API call failed: {detail[:200]}. "
+            "Check your ANTHROPIC_API_KEY in .env and try again."
+        )
+    else:
+        reply = f"Something went wrong: {detail[:200]}"
+    return {
+        "reply": reply,
+        "config": {
+            "name": "",
+            "model": DEFAULT_TURN_MODEL,
+            "prompt": "",
+            "tools": [],
+            "channels": [],
+        },
+        "justAdded": None,
+        "ready": False,
+    }
 
 
 def _call_anthropic_api(
@@ -298,8 +360,10 @@ def _call_claude_cli(messages: list[dict[str, str]]) -> str:
         raise RuntimeError("claude CLI not on PATH") from e
 
     if proc.returncode != 0:
+        # Some claude versions write errors to stdout, not stderr.
+        detail = (proc.stderr or proc.stdout or "").strip()[:400] or "(no output)"
         raise RuntimeError(
-            f"claude --print exited {proc.returncode}: {(proc.stderr or '')[:300]}"
+            f"claude --print exited {proc.returncode}: {detail}"
         )
     return (proc.stdout or "").strip()
 
