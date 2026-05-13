@@ -1,78 +1,33 @@
 /**
- * P1.11 — Day-0 onboarding (full-viewport wizard).
+ * P1.12 — Conversational onboarding (Claude-led, Direction A).
  *
- * 4 steps: Identity → Brain → Hands → Channels → Launch animation.
+ * 4 stages: Welcome → Chat → Confirm → Launching.
  *
- * Translated from claude-design/screens/Onboarding.jsx 1:1 in markup
- * structure + class names so the design CSS in styles.css renders the
- * same shapes. Behavior added on top:
- *   - launch() POSTs /v1/onboarding/complete and waits for the real
- *     state from the backend instead of setTimeout-ing for 2.4s.
- *   - Skip POSTs /v1/onboarding/skip so the rest of the UI knows to
- *     stop showing onboarding without the operator finishing it.
+ * Translated from claude-design/screens/Onboarding.jsx (chat variant) —
+ * markup + class names preserved so the design CSS in styles.css
+ * renders the same shapes. Wired to the real backend:
+ *
+ *   - POST /v1/onboarding/turn → drives the chat; returns reply +
+ *     materialized config + justAdded badge + ready flag. Server
+ *     falls back to a scripted 5-turn flow when no ANTHROPIC_API_KEY,
+ *     so the UI never deadlocks.
+ *   - POST /v1/onboarding/complete → persists the confirmed config
+ *     (writes agent/prompts/system.md, records an agent_created Lesson).
+ *   - POST /v1/onboarding/skip → escape hatch from header.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   completeOnboarding,
+  onboardingTurn,
   skipOnboarding,
-  type OnboardingCompleteRequest,
+  type OnboardingChatMessage,
+  type OnboardingJustAdded,
   type OnboardingState,
+  type OnboardingTurnConfig,
 } from '../api';
-import { Icon, type IconName } from '../components/Icon';
-
-interface Template {
-  id: string;
-  name: string;
-  desc: string;
-  icon: IconName;
-  prompt: string;
-  tools: string[];
-  channels: string[];
-}
-
-const TEMPLATES: Template[] = [
-  {
-    id: 'support',
-    name: 'Customer support',
-    desc: 'Answer questions, look up orders, hand off when needed.',
-    icon: 'chat',
-    prompt:
-      "You are a customer support agent for {{company}}.\nBe warm, direct, and honest. Acknowledge frustration once, then move to action.\nUse tools to look up real data — never guess. If you can't help, offer to hand off to a human.",
-    tools: ['lookup_order', 'search_kb', 'create_ticket'],
-    channels: ['web', 'whatsapp'],
-  },
-  {
-    id: 'sales',
-    name: 'Sales / SDR',
-    desc: 'Qualify leads, schedule meetings, follow up with context.',
-    icon: 'bolt',
-    prompt:
-      "You are an SDR for {{company}}.\nYour job is to qualify leads using BANT, not to pitch.\nAsk one question at a time. Book a meeting when the lead is qualified. Be concise.",
-    tools: ['lookup_account', 'check_calendar', 'book_meeting'],
-    channels: ['email', 'web'],
-  },
-  {
-    id: 'research',
-    name: 'Research assistant',
-    desc: 'Search, summarize, cite sources, surface what matters.',
-    icon: 'flask',
-    prompt:
-      "You are a research assistant.\nAlways cite sources. Distinguish between what you know and what you've looked up.\nFlag uncertainty explicitly. Prefer recent, primary sources.",
-    tools: ['web_search', 'fetch_url', 'save_note'],
-    channels: ['web', 'slack'],
-  },
-  {
-    id: 'blank',
-    name: 'Start blank',
-    desc: 'Describe your own agent. Best when you know what you want.',
-    icon: 'sparkles',
-    prompt: '',
-    tools: [],
-    channels: ['web'],
-  },
-];
+import { Icon } from '../components/Icon';
 
 interface Model {
   id: string;
@@ -82,47 +37,60 @@ interface Model {
 }
 
 const MODELS: Model[] = [
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Smart, fast, good default for most agents', recommended: true },
   { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', desc: 'Fastest and cheapest. Good for high volume.' },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Strongest reasoning. Use when accuracy matters most.' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Smart, fast default for most agents.', recommended: true },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Strongest reasoning. Use when accuracy matters.' },
 ];
 
-interface Channel {
-  id: string;
-  name: string;
-  desc: string;
-  icon: IconName;
-}
+const CHANNEL_LABELS: Record<string, string> = {
+  web: 'Web chat widget',
+  whatsapp: 'WhatsApp',
+  slack: 'Slack',
+  email: 'Email',
+  api: 'API only',
+};
 
-const CHANNELS: Channel[] = [
-  { id: 'web', name: 'Web chat widget', desc: 'Embed in your site.', icon: 'chat' },
-  { id: 'whatsapp', name: 'WhatsApp', desc: 'Twilio or Meta Cloud API.', icon: 'chat' },
-  { id: 'slack', name: 'Slack', desc: 'Bot in your workspace.', icon: 'chat' },
-  { id: 'email', name: 'Email', desc: 'Inbound + outbound.', icon: 'inbox' },
-  { id: 'api', name: 'API only', desc: 'Call it from your own code.', icon: 'code' },
+const STARTERS = [
+  {
+    title: 'Customer support',
+    hint: 'Refunds, order lookups, ticket handoff.',
+    seed:
+      'A customer support agent for our Shopify store. Needs to handle order lookups, refund questions, and hand off to a human on anything billing-related.',
+  },
+  {
+    title: 'SDR / sales',
+    hint: 'Qualify inbound leads, book meetings.',
+    seed:
+      'An SDR that qualifies inbound demo requests with BANT, then books a meeting on my calendar. Should never pitch — just qualify.',
+  },
+  {
+    title: 'Research assistant',
+    hint: 'Search, cite sources, distinguish fact from inference.',
+    seed:
+      'A research assistant that summarizes papers and articles I drop in. Must cite sources and flag uncertainty.',
+  },
+  {
+    title: 'Internal helpdesk',
+    hint: 'Slack bot for IT/HR questions.',
+    seed:
+      "An internal helpdesk bot for our Slack workspace. Should answer IT and HR questions from our notion docs and open a ticket if it can't.",
+  },
 ];
 
-interface Step {
-  id: string;
-  label: string;
-  sub: string;
-}
+const DEFAULT_CONFIG: OnboardingTurnConfig = {
+  name: '',
+  model: 'claude-sonnet-4-6',
+  prompt: '',
+  tools: [],
+  channels: [],
+};
 
-const STEPS: Step[] = [
-  { id: 'identity', label: 'Identity', sub: 'Who is this agent?' },
-  { id: 'brain', label: 'Brain', sub: 'How should it think?' },
-  { id: 'hands', label: 'Hands', sub: 'What can it do?' },
-  { id: 'channels', label: 'Channels', sub: 'Where does it live?' },
-];
+type Stage = 'welcome' | 'chat' | 'confirm' | 'launching';
 
-interface OnboardConfig {
-  template: string | null;
-  name: string;
-  company: string;
-  prompt: string;
-  model: string;
-  tools: string[];
-  channels: string[];
+interface ChatMsg {
+  role: 'user' | 'assistant';
+  text: string;
+  justAdded?: OnboardingJustAdded | null;
 }
 
 interface OnboardingProps {
@@ -130,66 +98,68 @@ interface OnboardingProps {
 }
 
 export const Onboarding = ({ onDone }: OnboardingProps) => {
-  const [stepIdx, setStepIdx] = useState(0);
-  const [config, setConfig] = useState<OnboardConfig>({
-    template: null,
-    name: '',
-    company: '',
-    prompt: '',
-    model: 'claude-sonnet-4-6',
-    tools: [],
-    channels: [],
-  });
-  const [launching, setLaunching] = useState(false);
-  const [launchError, setLaunchError] = useState<string | null>(null);
+  const [stage, setStage] = useState<Stage>('welcome');
+  const [config, setConfig] = useState<OnboardingTurnConfig>(DEFAULT_CONFIG);
+  const [messages, setMessages] = useState<ChatMsg[]>([]);
+  const [thinking, setThinking] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const set = <K extends keyof OnboardConfig>(k: K, v: OnboardConfig[K]) =>
-    setConfig((c) => ({ ...c, [k]: v }));
-
-  const pickTemplate = (t: Template) => {
-    setConfig((c) => ({
-      ...c,
-      template: t.id,
-      prompt: t.prompt,
-      tools: t.tools,
-      channels: t.channels,
-      name:
-        c.name ||
-        (t.id === 'support' ? 'support-agent'
-          : t.id === 'sales' ? 'sdr-agent'
-          : t.id === 'research' ? 'research-assistant'
-          : ''),
-    }));
-  };
-
-  const canAdvance = (() => {
-    if (stepIdx === 0) return !!config.template && config.name.trim().length > 0;
-    if (stepIdx === 1) return config.prompt.trim().length > 10 && !!config.model;
-    if (stepIdx === 2) return true;
-    if (stepIdx === 3) return config.channels.length > 0;
-    return false;
-  })();
-
-  const back = () => stepIdx > 0 && setStepIdx(stepIdx - 1);
-
-  const launch = async () => {
-    setLaunching(true);
-    setLaunchError(null);
+  const callTurn = async (history: ChatMsg[]) => {
+    setThinking(true);
+    setError(null);
     try {
-      const body: OnboardingCompleteRequest = { ...config };
-      const next = await completeOnboarding(body);
-      // Hold the launch animation for a beat so it doesn't flash by.
-      await new Promise((r) => setTimeout(r, 1800));
-      onDone(next);
+      const apiMessages: OnboardingChatMessage[] = history.map((m) => ({
+        role: m.role,
+        content: m.text,
+      }));
+      const out = await onboardingTurn(apiMessages);
+      setConfig((c) => ({ ...c, ...out.config }));
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', text: out.reply, justAdded: out.justAdded ?? null },
+      ]);
+      if (out.ready) setReady(true);
     } catch (e) {
-      setLaunching(false);
-      setLaunchError(e instanceof Error ? e.message : String(e));
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setThinking(false);
     }
   };
 
-  const next = () => {
-    if (stepIdx < STEPS.length - 1) setStepIdx(stepIdx + 1);
-    else void launch();
+  const handleFirstSend = async (text: string) => {
+    setStage('chat');
+    const next: ChatMsg[] = [{ role: 'user', text }];
+    setMessages(next);
+    await callTurn(next);
+  };
+
+  const handleReply = async (text: string) => {
+    const next = [...messages, { role: 'user' as const, text }];
+    setMessages(next);
+    await callTurn(next);
+  };
+
+  const startConfirm = () => setStage('confirm');
+
+  const launch = async () => {
+    setStage('launching');
+    try {
+      const next = await completeOnboarding({
+        template: null,
+        name: config.name,
+        company: '',
+        prompt: config.prompt,
+        model: config.model,
+        tools: config.tools,
+        channels: config.channels,
+      });
+      await new Promise((r) => setTimeout(r, 1800));
+      onDone(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setStage('confirm');
+    }
   };
 
   const skip = async () => {
@@ -201,441 +171,663 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
     }
   };
 
-  if (launching) return <OnboardLaunching name={config.name} />;
+  if (stage === 'launching') return <Launching name={config.name} />;
 
   return (
-    <div className="onb">
-      <div className="onb-head">
-        <div className="onb-brand">
-          <div className="sidebar-mark" />
-          <span>
-            OpenTracy <span className="dim">Evolution</span>
-          </span>
-        </div>
-        <button className="btn ghost sm" onClick={skip}>Skip setup</button>
-      </div>
-
-      <div className="onb-body">
-        <aside className="onb-rail">
-          <div className="onb-rail-title">Set up your first agent</div>
-          <div className="onb-rail-sub dim">
-            About 2 minutes. You can change everything later — that's the whole point.
-          </div>
-          <ol className="onb-steps">
-            {STEPS.map((s, i) => {
-              const state = i < stepIdx ? 'done' : i === stepIdx ? 'on' : 'idle';
-              return (
-                <li key={s.id} className={`onb-step ${state}`}>
-                  <span className="onb-step-num">
-                    {state === 'done' ? <Icon name="check" size={12} /> : <span>{i + 1}</span>}
-                  </span>
-                  <div className="onb-step-text">
-                    <div className="onb-step-label">{s.label}</div>
-                    <div className="onb-step-sub dim">{s.sub}</div>
-                  </div>
-                </li>
-              );
-            })}
-          </ol>
-        </aside>
-
-        <main className="onb-main">
-          <div className="onb-content">
-            {stepIdx === 0 && (
-              <StepIdentity config={config} set={set} pickTemplate={pickTemplate} />
-            )}
-            {stepIdx === 1 && <StepBrain config={config} set={set} />}
-            {stepIdx === 2 && <StepHands config={config} set={set} />}
-            {stepIdx === 3 && <StepChannels config={config} set={set} />}
-            {launchError && (
-              <div
-                className="onb-launch-note"
-                style={{ marginTop: 24, background: 'var(--bad-soft)', color: 'var(--bad-fg)' }}
-              >
-                <Icon name="info" size={14} />
-                <span>Couldn't save onboarding: {launchError}</span>
-              </div>
-            )}
-          </div>
-
-          <div className="onb-foot">
-            <button className="btn ghost" onClick={back} disabled={stepIdx === 0}>
-              ← Back
-            </button>
-            <span className="dim" style={{ fontSize: 12.5 }}>
-              Step {stepIdx + 1} of {STEPS.length}
-            </span>
-            <button className="btn primary" onClick={next} disabled={!canAdvance}>
-              {stepIdx === STEPS.length - 1 ? 'Launch agent' : 'Continue'}{' '}
-              <Icon name="chevron" size={14} />
-            </button>
-          </div>
-        </main>
-
-        <aside className="onb-preview">
-          <div className="onb-preview-label dim">PREVIEW</div>
-          <AgentPreviewCard config={config} />
-        </aside>
-      </div>
+    <div className="onbA">
+      <Header
+        stage={stage}
+        onSkip={skip}
+        onBack={stage === 'confirm' ? () => setStage('chat') : null}
+      />
+      {stage === 'welcome' && <Welcome onSend={handleFirstSend} />}
+      {stage === 'chat' && (
+        <ChatStage
+          messages={messages}
+          thinking={thinking}
+          config={config}
+          ready={ready}
+          error={error}
+          onReply={handleReply}
+          onConfirm={startConfirm}
+        />
+      )}
+      {stage === 'confirm' && (
+        <Confirm
+          config={config}
+          onChangeConfig={setConfig}
+          onAsk={(text) => {
+            setStage('chat');
+            setReady(false);
+            void handleReply(text);
+          }}
+          onLaunch={() => void launch()}
+          error={error}
+        />
+      )}
     </div>
   );
 };
 
-// ─── Step 1: Identity + template ────────────────────────────────
-interface StepProps {
-  config: OnboardConfig;
-  set: <K extends keyof OnboardConfig>(k: K, v: OnboardConfig[K]) => void;
-}
-
-const StepIdentity = ({
-  config,
-  set,
-  pickTemplate,
-}: StepProps & { pickTemplate: (t: Template) => void }) => (
-  <>
-    <h1 className="onb-title">What kind of agent are you building?</h1>
-    <p className="onb-sub">
-      Pick the closest match. We'll fill in sensible defaults — you can change anything
-      in the next steps.
-    </p>
-
-    <div className="onb-templates">
-      {TEMPLATES.map((t) => (
-        <button
-          key={t.id}
-          className={`onb-template ${config.template === t.id ? 'on' : ''}`}
-          onClick={() => pickTemplate(t)}
-        >
-          <div className="onb-tpl-icon">
-            <Icon name={t.icon} size={18} />
-          </div>
-          <div className="onb-tpl-name">{t.name}</div>
-          <div className="onb-tpl-desc dim">{t.desc}</div>
-          {config.template === t.id && (
-            <div className="onb-tpl-check">
-              <Icon name="check" size={14} />
-            </div>
-          )}
-        </button>
-      ))}
+// ─── Shared chrome ────────────────────────────────────────────────────────
+const Header = ({
+  stage,
+  onSkip,
+  onBack,
+}: {
+  stage: Stage;
+  onSkip: () => void;
+  onBack: (() => void) | null;
+}) => (
+  <header className="onbA-head">
+    <div className="onbA-brand">
+      <div className="sidebar-mark" />
+      <span>
+        OpenTracy <span className="dim">Evolution</span>
+      </span>
     </div>
-
-    {config.template && (
-      <div className="onb-fields">
-        <label className="onb-field">
-          <span className="onb-field-label">Agent name</span>
-          <input
-            className="onb-input"
-            placeholder="e.g. support-agent"
-            value={config.name}
-            onChange={(e) => set('name', e.target.value)}
-          />
-          <span className="onb-field-help dim">
-            Lowercase, no spaces. This shows up in logs and the top bar.
-          </span>
-        </label>
-        <label className="onb-field">
-          <span className="onb-field-label">
-            Company or product <span className="dim">(optional)</span>
-          </span>
-          <input
-            className="onb-input"
-            placeholder="e.g. Acme"
-            value={config.company}
-            onChange={(e) => set('company', e.target.value)}
-          />
-          <span className="onb-field-help dim">
-            We'll weave it into the system prompt for you.
-          </span>
-        </label>
-      </div>
-    )}
-  </>
+    <div className="onbA-head-right">
+      {stage === 'chat' && (
+        <span className="onbA-stagetag">
+          <span className="onbA-stagetag-dot" /> Building agent
+        </span>
+      )}
+      {onBack && (
+        <button className="btn ghost sm" onClick={onBack}>
+          ← Back to chat
+        </button>
+      )}
+      <button className="btn ghost sm" onClick={onSkip}>
+        Skip and use the wizard
+      </button>
+    </div>
+  </header>
 );
 
-// ─── Step 2: Brain ─────────────────────────────────────────────
-const StepBrain = ({ config, set }: StepProps) => {
-  const filled = config.prompt.replace(/\{\{company\}\}/g, config.company || 'your company');
-  return (
-    <>
-      <h1 className="onb-title">Give it a brain.</h1>
-      <p className="onb-sub">
-        The system prompt is the agent's job description. Plus the model that powers it.
-      </p>
+const ClaudeAvatar = ({ size = 28, thinking = false }: { size?: number; thinking?: boolean }) => (
+  <div
+    className={`onbA-avatar onbA-avatar-c ${thinking ? 'onbA-avatar-thinking' : ''}`}
+    style={{ width: size, height: size, fontSize: size * 0.45 }}
+  >
+    C
+  </div>
+);
 
-      <div className="onb-field" style={{ marginBottom: 24 }}>
-        <span className="onb-field-label">System prompt</span>
-        <textarea
-          className="onb-textarea"
-          rows={9}
-          value={filled}
-          onChange={(e) => set('prompt', e.target.value)}
-          placeholder="You are a helpful agent that…"
-        />
-        <span className="onb-field-help dim">
-          Write it like you'd brief a new teammate. Keep it under ~300 words. Don't worry
-          about perfection — your agent will rewrite this as it learns.
-        </span>
-      </div>
+const UserAvatar = ({ size = 28, label = 'You' }: { size?: number; label?: string }) => (
+  <div
+    className="onbA-avatar onbA-avatar-u"
+    style={{ width: size, height: size, fontSize: size * 0.36 }}
+  >
+    {label.slice(0, 2).toUpperCase()}
+  </div>
+);
 
-      <div className="onb-field">
-        <span className="onb-field-label">Model</span>
-        <div className="onb-models">
-          {MODELS.map((m) => (
-            <button
-              key={m.id}
-              className={`onb-model ${config.model === m.id ? 'on' : ''}`}
-              onClick={() => set('model', m.id)}
-            >
-              <div className="onb-model-radio">
-                <span />
-              </div>
-              <div style={{ flex: 1, textAlign: 'left' }}>
-                <div className="onb-model-name">
-                  {m.name}
-                  {m.recommended && <span className="onb-model-rec">Recommended</span>}
-                </div>
-                <div className="onb-model-desc dim">{m.desc}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-        <span className="onb-field-help dim" style={{ marginTop: 10 }}>
-          You can add cheaper fallbacks per intent later — the router learns which model
-          to pick.
-        </span>
-      </div>
-    </>
-  );
-};
+// ─── Welcome ──────────────────────────────────────────────────────────────
+const Welcome = ({ onSend }: { onSend: (text: string) => void }) => {
+  const [text, setText] = useState('');
+  const taRef = useRef<HTMLTextAreaElement>(null);
 
-// ─── Step 3: Hands ─────────────────────────────────────────────
-const SUGGESTED_TOOLS: { id: string; name: string; desc: string }[] = [
-  { id: 'lookup_order', name: 'lookup_order', desc: 'Find an order by ID.' },
-  { id: 'search_kb', name: 'search_kb', desc: 'Search your knowledge base.' },
-  { id: 'create_ticket', name: 'create_ticket', desc: 'Open a ticket for a human.' },
-  { id: 'lookup_account', name: 'lookup_account', desc: 'Look up a customer account.' },
-  { id: 'check_calendar', name: 'check_calendar', desc: 'See available meeting slots.' },
-  { id: 'book_meeting', name: 'book_meeting', desc: 'Schedule a meeting.' },
-  { id: 'web_search', name: 'web_search', desc: 'Search the public web.' },
-  { id: 'fetch_url', name: 'fetch_url', desc: 'Read a URL.' },
-  { id: 'save_note', name: 'save_note', desc: 'Save a note to your store.' },
-];
+  useEffect(() => {
+    taRef.current?.focus();
+  }, []);
 
-const StepHands = ({ config, set }: StepProps) => {
-  const toggle = (id: string) => {
-    set(
-      'tools',
-      config.tools.includes(id) ? config.tools.filter((t) => t !== id) : [...config.tools, id],
-    );
+  const submit = () => {
+    const t = text.trim();
+    if (t.length < 8) return;
+    onSend(t);
   };
+
   return (
-    <>
-      <h1 className="onb-title">Give it hands.</h1>
-      <p className="onb-sub">
-        Tools the agent can call. Skip this if you just want to chat — you can add them
-        anytime.
-      </p>
+    <div className="onbA-welcome">
+      <div className="onbA-welcome-inner">
+        <div className="onbA-welcome-greet">
+          <ClaudeAvatar size={52} />
+          <h1 className="onbA-h1">Let's build your first agent.</h1>
+          <p className="onbA-sub">
+            Tell me what it should do and who it's for. I'll set up the prompt, model, tools,
+            and channels — you can review and tweak everything before launch.
+          </p>
+        </div>
 
-      <div className="onb-tools">
-        {SUGGESTED_TOOLS.map((t) => (
-          <button
-            key={t.id}
-            className={`onb-tool ${config.tools.includes(t.id) ? 'on' : ''}`}
-            onClick={() => toggle(t.id)}
-          >
-            <div className="onb-tool-check">
-              <Icon name="check" size={12} />
+        <div className="onbA-composer">
+          <textarea
+            ref={taRef}
+            className="onbA-composer-input"
+            rows={3}
+            placeholder="e.g. A support agent for our Shopify checkout. Needs order lookups, refund policy, hand off to a human on billing."
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+            }}
+          />
+          <div className="onbA-composer-foot">
+            <div className="onbA-composer-attach">
+              <button className="onbA-pill" disabled>
+                <Icon name="file" size={12} /> Paste docs
+              </button>
+              <button className="onbA-pill" disabled>
+                <Icon name="code" size={12} /> Connect repo
+              </button>
             </div>
-            <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
-              <div className="onb-tool-name mono">{t.name}</div>
-              <div className="onb-tool-desc dim">{t.desc}</div>
-            </div>
-          </button>
-        ))}
-      </div>
-
-      <div className="onb-mcp">
-        <div style={{ flex: 1 }}>
-          <div style={{ fontWeight: 500, fontSize: 13.5 }}>Or connect an MCP server</div>
-          <div className="dim" style={{ fontSize: 12.5, marginTop: 2 }}>
-            Already have your tools defined? Paste an MCP endpoint and they'll show up
-            automatically.
+            <button
+              className="onbA-send"
+              onClick={submit}
+              disabled={text.trim().length < 8}
+              title="Send (⌘↵)"
+            >
+              <Icon name="arrowUp" size={14} />
+            </button>
           </div>
         </div>
-        <button className="btn" disabled>
-          Connect MCP
-        </button>
-      </div>
-    </>
-  );
-};
 
-// ─── Step 4: Channels ──────────────────────────────────────────
-const StepChannels = ({ config, set }: StepProps) => {
-  const toggle = (id: string) => {
-    set(
-      'channels',
-      config.channels.includes(id)
-        ? config.channels.filter((c) => c !== id)
-        : [...config.channels, id],
-    );
-  };
-  return (
-    <>
-      <h1 className="onb-title">Where does it live?</h1>
-      <p className="onb-sub">
-        Pick at least one channel. Connections are configured after launch — for now we
-        just stub them.
-      </p>
-
-      <div className="onb-channels">
-        {CHANNELS.map((c) => (
-          <button
-            key={c.id}
-            className={`onb-channel ${config.channels.includes(c.id) ? 'on' : ''}`}
-            onClick={() => toggle(c.id)}
-          >
-            <div className="onb-channel-icon">
-              <Icon name={c.icon} size={18} />
-            </div>
-            <div style={{ flex: 1, textAlign: 'left' }}>
-              <div className="onb-channel-name">{c.name}</div>
-              <div className="onb-channel-desc dim">{c.desc}</div>
-            </div>
-            <div className="onb-channel-check">
-              <Icon name="check" size={14} />
-            </div>
-          </button>
-        ))}
-      </div>
-
-      <div className="onb-launch-note">
-        <Icon name="sparkles" size={14} />
-        <span>
-          On launch, we'll start collecting traces and look for things to improve. Your
-          first lesson usually shows up within 24h.
-        </span>
-      </div>
-    </>
-  );
-};
-
-// ─── Live preview card ──────────────────────────────────────────
-const AgentPreviewCard = ({ config }: { config: OnboardConfig }) => {
-  const tpl = TEMPLATES.find((t) => t.id === config.template);
-  const model = MODELS.find((m) => m.id === config.model);
-  return (
-    <div className="onb-preview-card">
-      <div className="onb-preview-row">
-        <div className="onb-preview-pill">
-          <span className="dot pending" />
-          <span className="mono">{config.name || 'unnamed-agent'}</span>
-          <span className="ver">v0.1 · draft</span>
-        </div>
-      </div>
-
-      <div className="onb-preview-block">
-        <div className="onb-preview-label dim">PURPOSE</div>
-        <div className="onb-preview-value">
-          {tpl ? tpl.name : <span className="dim">Not chosen yet.</span>}
-        </div>
-      </div>
-
-      <div className="onb-preview-block">
-        <div className="onb-preview-label dim">SYSTEM PROMPT</div>
-        <div className="onb-preview-prompt">
-          {config.prompt ? (
-            <span>
-              {config.prompt
-                .replace(/\{\{company\}\}/g, config.company || 'your company')
-                .slice(0, 200)}
-              {config.prompt.length > 200 ? '…' : ''}
-            </span>
-          ) : (
-            <span className="dim">Empty.</span>
-          )}
-        </div>
-      </div>
-
-      <div className="onb-preview-block">
-        <div className="onb-preview-label dim">MODEL</div>
-        <div className="onb-preview-value">
-          {model ? model.name : <span className="dim">—</span>}
-        </div>
-      </div>
-
-      <div className="onb-preview-block">
-        <div className="onb-preview-label dim">TOOLS · {config.tools.length}</div>
-        <div className="onb-preview-chips">
-          {config.tools.length === 0 ? (
-            <span className="dim" style={{ fontSize: 12.5 }}>
-              None yet.
-            </span>
-          ) : (
-            config.tools.map((t) => (
-              <span key={t} className="onb-chip mono">
-                {t}
-              </span>
-            ))
-          )}
-        </div>
-      </div>
-
-      <div className="onb-preview-block">
-        <div className="onb-preview-label dim">CHANNELS · {config.channels.length}</div>
-        <div className="onb-preview-chips">
-          {config.channels.length === 0 ? (
-            <span className="dim" style={{ fontSize: 12.5 }}>
-              None yet.
-            </span>
-          ) : (
-            config.channels.map((c) => {
-              const ch = CHANNELS.find((x) => x.id === c);
-              return (
-                <span key={c} className="onb-chip">
-                  {ch?.name || c}
-                </span>
-              );
-            })
-          )}
+        <div className="onbA-starters">
+          <div className="onbA-starters-label">Or start from a recipe</div>
+          <div className="onbA-starters-grid">
+            {STARTERS.map((s) => (
+              <button
+                key={s.title}
+                className="onbA-starter"
+                onClick={() => onSend(s.seed)}
+              >
+                <div className="onbA-starter-title">{s.title}</div>
+                <div className="onbA-starter-hint dim">{s.hint}</div>
+              </button>
+            ))}
+          </div>
         </div>
       </div>
     </div>
   );
 };
 
-// ─── Launch animation ───────────────────────────────────────────
+// ─── Chat stage (split: messages + live config) ─────────────────────────
+const ChatStage = ({
+  messages,
+  thinking,
+  config,
+  ready,
+  error,
+  onReply,
+  onConfirm,
+}: {
+  messages: ChatMsg[];
+  thinking: boolean;
+  config: OnboardingTurnConfig;
+  ready: boolean;
+  error: string | null;
+  onReply: (text: string) => void;
+  onConfirm: () => void;
+}) => {
+  const [draft, setDraft] = useState('');
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    taRef.current?.focus();
+  }, [thinking]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages, thinking]);
+
+  const submit = () => {
+    const t = draft.trim();
+    if (!t || thinking) return;
+    onReply(t);
+    setDraft('');
+  };
+
+  return (
+    <div className="onbA-split">
+      <section className="onbA-chat-pane">
+        <div className="onbA-chat-scroll" ref={scrollRef}>
+          {messages.map((m, i) => (
+            <Message key={i} role={m.role} text={m.text} justAdded={m.justAdded ?? undefined} />
+          ))}
+          {thinking && (
+            <div className="onbA-msg onbA-msg-c">
+              <ClaudeAvatar thinking />
+              <div className="onbA-bubble onbA-bubble-thinking">
+                <span className="onbA-typing">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+              </div>
+            </div>
+          )}
+          {error && !thinking && (
+            <div className="onbA-msg onbA-msg-c">
+              <ClaudeAvatar />
+              <div
+                className="onbA-bubble"
+                style={{ background: 'var(--bad-soft)', color: 'var(--bad-fg)', border: '1px solid var(--bad-fg)' }}
+              >
+                Sorry — something went wrong sending that. Try again? <br />
+                <span className="dim" style={{ fontSize: 11 }}>{error}</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {ready && !thinking && (
+          <div className="onbA-readybar">
+            <div>
+              <div className="onbA-readybar-title">Ready when you are.</div>
+              <div className="onbA-readybar-sub dim">
+                Or keep chatting to refine — I'll update the config live.
+              </div>
+            </div>
+            <button className="btn primary" onClick={onConfirm}>
+              Review and launch <Icon name="chevron" size={13} />
+            </button>
+          </div>
+        )}
+
+        <div className="onbA-replybar">
+          <textarea
+            ref={taRef}
+            className="onbA-reply-input"
+            rows={1}
+            placeholder={thinking ? 'Claude is thinking…' : 'Reply…'}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            disabled={thinking}
+          />
+          <button
+            className="onbA-send onbA-send-sm"
+            onClick={submit}
+            disabled={!draft.trim() || thinking}
+          >
+            <Icon name="arrowUp" size={13} />
+          </button>
+        </div>
+      </section>
+
+      <aside className="onbA-config-pane">
+        <LiveConfig config={config} />
+      </aside>
+    </div>
+  );
+};
+
+const Message = ({
+  role,
+  text,
+  justAdded,
+}: {
+  role: 'user' | 'assistant';
+  text: string;
+  justAdded?: OnboardingJustAdded;
+}) => {
+  if (role === 'user') {
+    return (
+      <div className="onbA-msg onbA-msg-u">
+        <div className="onbA-bubble onbA-bubble-u">{text}</div>
+        <UserAvatar />
+      </div>
+    );
+  }
+  return (
+    <div className="onbA-msg onbA-msg-c">
+      <ClaudeAvatar />
+      <div className="onbA-msg-body">
+        <div className="onbA-bubble">{text}</div>
+        {justAdded && <JustAdded {...justAdded} />}
+      </div>
+    </div>
+  );
+};
+
+const JustAdded = ({
+  tool,
+  model,
+  channel,
+}: {
+  tool?: string | null;
+  model?: string | null;
+  channel?: string | null;
+}) => (
+  <div className="onbA-justadded">
+    {tool && (
+      <span className="onbA-justadded-row">
+        <span className="dim">added tool</span>
+        <span className="onbA-mono-chip">{tool}</span>
+      </span>
+    )}
+    {model && (
+      <span className="onbA-justadded-row">
+        <span className="dim">switched model</span>
+        <span className="onbA-chip-soft">{MODELS.find((m) => m.id === model)?.name || model}</span>
+      </span>
+    )}
+    {channel && (
+      <span className="onbA-justadded-row">
+        <span className="dim">added channel</span>
+        <span className="onbA-chip">{CHANNEL_LABELS[channel] || channel}</span>
+      </span>
+    )}
+  </div>
+);
+
+// ─── Live config card (right pane) ──────────────────────────────────────
+const LiveConfig = ({ config }: { config: OnboardingTurnConfig }) => {
+  const model = MODELS.find((m) => m.id === config.model);
+  const completeness = computeCompleteness(config);
+
+  return (
+    <div className="onbA-lc">
+      <div className="onbA-lc-head">
+        <div className="onbA-lc-label">BUILDING</div>
+        <div className="onbA-lc-pct">{completeness}%</div>
+      </div>
+      <div className="onbA-lc-progress">
+        <span style={{ width: `${completeness}%` }} />
+      </div>
+
+      <div className="onbA-lc-row">
+        <div className="onbA-lc-k">name</div>
+        <div className="onbA-lc-v mono">
+          {config.name || <em className="onbA-empty">unnamed-agent</em>}
+        </div>
+      </div>
+      <div className="onbA-lc-row">
+        <div className="onbA-lc-k">model</div>
+        <div className="onbA-lc-v">
+          {model ? (
+            <span className="onbA-chip-soft">{model.name}</span>
+          ) : (
+            <em className="onbA-empty">—</em>
+          )}
+        </div>
+      </div>
+
+      <div className="onbA-lc-row onbA-lc-row-block">
+        <div className="onbA-lc-k">prompt</div>
+        {config.prompt ? (
+          <div className="onbA-lc-prompt">{config.prompt}</div>
+        ) : (
+          <div className="onbA-lc-empty">
+            <em>Empty — Claude will fill this as you chat.</em>
+          </div>
+        )}
+      </div>
+
+      <div className="onbA-lc-row onbA-lc-row-block">
+        <div className="onbA-lc-k">tools · {config.tools.length}</div>
+        {config.tools.length === 0 ? (
+          <div className="onbA-lc-empty">
+            <em>None yet.</em>
+          </div>
+        ) : (
+          <div className="onbA-lc-chips">
+            {config.tools.map((t) => (
+              <span key={t} className="onbA-mono-chip">
+                {t}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="onbA-lc-row onbA-lc-row-block">
+        <div className="onbA-lc-k">channels · {config.channels.length}</div>
+        {config.channels.length === 0 ? (
+          <div className="onbA-lc-empty">
+            <em>Not decided yet.</em>
+          </div>
+        ) : (
+          <div className="onbA-lc-chips">
+            {config.channels.map((c) => (
+              <span key={c} className="onbA-chip">
+                {CHANNEL_LABELS[c] || c}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="onbA-lc-foot">
+        <Icon name="info" size={12} />
+        <span>Everything here is editable in the next step — and changeable forever after.</span>
+      </div>
+    </div>
+  );
+};
+
+function computeCompleteness(c: OnboardingTurnConfig): number {
+  let n = 0;
+  if (c.name) n += 20;
+  if (c.model) n += 15;
+  if (c.prompt && c.prompt.length > 40) n += 30;
+  if (c.tools.length > 0) n += 15;
+  if (c.channels.length > 0) n += 20;
+  return Math.min(100, n);
+}
+
+// ─── Confirm ────────────────────────────────────────────────────────────
+const Confirm = ({
+  config,
+  onChangeConfig,
+  onAsk,
+  onLaunch,
+  error,
+}: {
+  config: OnboardingTurnConfig;
+  onChangeConfig: (c: OnboardingTurnConfig) => void;
+  onAsk: (text: string) => void;
+  onLaunch: () => void;
+  error: string | null;
+}) => {
+  const [askText, setAskText] = useState('');
+  const [editingPrompt, setEditingPrompt] = useState(false);
+  const [promptDraft, setPromptDraft] = useState(config.prompt);
+  const model = MODELS.find((m) => m.id === config.model) || MODELS[1];
+
+  const sendAsk = () => {
+    const t = askText.trim();
+    if (!t) return;
+    onAsk(t);
+  };
+
+  const savePrompt = () => {
+    onChangeConfig({ ...config, prompt: promptDraft });
+    setEditingPrompt(false);
+  };
+
+  return (
+    <div className="onbA-confirm">
+      <div className="onbA-confirm-inner">
+        <div className="onbA-confirm-head">
+          <ClaudeAvatar size={32} />
+          <div>
+            <h2 className="onbA-confirm-h">Here's what I built. Look right?</h2>
+            <p className="onbA-confirm-sub dim">
+              Anything you can click below, you can edit. Or ask me to change something.
+            </p>
+          </div>
+        </div>
+
+        <div className="onbA-spec">
+          <div className="onbA-spec-top">
+            <div>
+              <span className="onbA-spec-name mono">{config.name || 'unnamed-agent'}</span>
+              <span className="onbA-spec-ver dim"> v0.1 · draft</span>
+            </div>
+            <button className="btn ghost sm" disabled>
+              Rename
+            </button>
+          </div>
+
+          <div className="onbA-spec-row">
+            <div className="onbA-spec-k">model</div>
+            <div className="onbA-spec-v">
+              <span className="onbA-chip-soft">{model.name}</span>
+              <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>
+                fallback Sonnet · router learns later
+              </span>
+            </div>
+          </div>
+
+          <div className="onbA-spec-row">
+            <div className="onbA-spec-k">tools</div>
+            <div className="onbA-spec-v onbA-spec-chips">
+              {config.tools.length === 0 ? (
+                <em className="dim">None</em>
+              ) : (
+                config.tools.map((t) => (
+                  <span key={t} className="onbA-mono-chip">
+                    {t}
+                  </span>
+                ))
+              )}
+              <button className="onbA-add-chip" disabled>
+                + tool
+              </button>
+            </div>
+          </div>
+
+          <div className="onbA-spec-row">
+            <div className="onbA-spec-k">channels</div>
+            <div className="onbA-spec-v onbA-spec-chips">
+              {config.channels.length === 0 ? (
+                <em className="dim">None</em>
+              ) : (
+                config.channels.map((c) => (
+                  <span key={c} className="onbA-chip">
+                    {CHANNEL_LABELS[c] || c}
+                  </span>
+                ))
+              )}
+              <button className="onbA-add-chip" disabled>
+                + channel
+              </button>
+            </div>
+          </div>
+
+          <div className="onbA-spec-row onbA-spec-row-block">
+            <div className="onbA-spec-k-row">
+              <div className="onbA-spec-k">prompt</div>
+              {!editingPrompt && (
+                <button
+                  className="btn ghost sm"
+                  onClick={() => {
+                    setPromptDraft(config.prompt);
+                    setEditingPrompt(true);
+                  }}
+                >
+                  Edit
+                </button>
+              )}
+              {editingPrompt && (
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn ghost sm" onClick={() => setEditingPrompt(false)}>
+                    Cancel
+                  </button>
+                  <button className="btn sm" onClick={savePrompt}>
+                    Save
+                  </button>
+                </div>
+              )}
+            </div>
+            {editingPrompt ? (
+              <textarea
+                className="onbA-spec-prompt-edit"
+                value={promptDraft}
+                onChange={(e) => setPromptDraft(e.target.value)}
+                rows={8}
+              />
+            ) : (
+              <pre className="onbA-spec-prompt">
+                {config.prompt || <em className="dim">No prompt yet.</em>}
+              </pre>
+            )}
+          </div>
+        </div>
+
+        {error && (
+          <div
+            className="onbA-confirm-caveat"
+            style={{ color: 'var(--bad-fg)' }}
+          >
+            <Icon name="info" size={13} />
+            <span>Couldn't save: {error}</span>
+          </div>
+        )}
+
+        <div className="onbA-confirm-actions">
+          <div className="onbA-ask">
+            <ClaudeAvatar size={20} />
+            <input
+              className="onbA-ask-input"
+              placeholder="Ask Claude to change something…"
+              value={askText}
+              onChange={(e) => setAskText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') sendAsk();
+              }}
+            />
+            <button
+              className="onbA-send onbA-send-xs"
+              onClick={sendAsk}
+              disabled={!askText.trim()}
+            >
+              <Icon name="arrowUp" size={11} />
+            </button>
+          </div>
+          <button className="btn primary lg" onClick={onLaunch}>
+            Launch agent <Icon name="chevron" size={14} />
+          </button>
+        </div>
+
+        <div className="onbA-confirm-caveat">
+          <Icon name="info" size={13} />
+          <span>The first conversation will be traced. You'll see suggestions to improve once a few have run.</span>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─── Launching animation ────────────────────────────────────────────────
 const LAUNCH_STEPS = [
-  'Building agent…',
+  'Compiling agent…',
   'Wiring tools…',
   'Connecting channels…',
   'Watching for the first conversation.',
 ];
 
-const OnboardLaunching = ({ name }: { name: string }) => {
+const Launching = ({ name }: { name: string }) => {
   const [step, setStep] = useState(0);
   useEffect(() => {
     const t = setInterval(
       () => setStep((s) => Math.min(s + 1, LAUNCH_STEPS.length - 1)),
-      500,
+      520,
     );
     return () => clearInterval(t);
   }, []);
   return (
-    <div className="onb onb-launching">
-      <div className="onb-launch-inner">
-        <div className="onb-launch-mark" />
-        <div className="onb-launch-name mono">{name || 'unnamed-agent'}</div>
-        <ul className="onb-launch-list">
+    <div className="onbA onbA-launching">
+      <div className="onbA-launch-inner">
+        <div className="onbA-launch-mark" />
+        <div className="onbA-launch-name mono">{name || 'unnamed-agent'}</div>
+        <ul className="onbA-launch-list">
           {LAUNCH_STEPS.map((s, i) => (
             <li key={i} className={i < step ? 'done' : i === step ? 'on' : 'idle'}>
               {i < step ? (
                 <Icon name="check" size={12} />
               ) : i === step ? (
-                <span className="onb-launch-dot" />
+                <span className="onbA-launch-dot" />
               ) : (
-                <span className="onb-launch-tick" />
+                <span className="onbA-launch-tick" />
               )}
               <span>{s}</span>
             </li>

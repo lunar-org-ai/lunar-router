@@ -2945,6 +2945,54 @@ def onboarding_skip() -> OnboardingState:
     return OnboardingState(**cfg.to_dict())
 
 
+# Conversational onboarding turn (P1.12)
+
+
+class OnboardingChatMessage(BaseModel):
+    role: str  # "user" | "assistant"
+    content: str
+
+
+class OnboardingTurnRequest(BaseModel):
+    messages: list[OnboardingChatMessage]
+    model: Optional[str] = None  # override (default: claude-sonnet-4-6)
+
+
+class OnboardingTurnConfig(BaseModel):
+    name: str
+    model: str
+    prompt: str
+    tools: list[str]
+    channels: list[str]
+
+
+class OnboardingJustAdded(BaseModel):
+    tool: Optional[str] = None
+    model: Optional[str] = None
+    channel: Optional[str] = None
+
+
+class OnboardingTurnResponse(BaseModel):
+    reply: str
+    config: OnboardingTurnConfig
+    justAdded: Optional[OnboardingJustAdded] = None
+    ready: bool = False
+
+
+@app.post("/onboarding/turn", response_model=OnboardingTurnResponse)
+def onboarding_turn(payload: OnboardingTurnRequest) -> OnboardingTurnResponse:
+    """One conversational turn during day-0 setup. Claude reads the
+    running history and returns the next reply + the agent config it
+    has built so far. Offline-safe via the scripted fallback."""
+    from runtime.store.onboarding_chat import run_turn
+
+    out = run_turn(
+        [m.model_dump() for m in payload.messages],
+        model=payload.model,
+    )
+    return OnboardingTurnResponse(**out)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)
