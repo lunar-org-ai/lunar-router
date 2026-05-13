@@ -3,6 +3,8 @@ stage: rerank
 technique: reranking
 variant: cross_encoder
 knobs:
-  model: bge-reranker-v2
+  model: cross-encoder/ms-marco-MiniLM-L-6-v2
   top_n: 4
-  score_threshold: 0.3
+  # ms-marco produces raw logits — typically in [-10, +10], not 0-1.
+  # Set low to keep most retrieve hits; calibrate per-corpus later.
+  score_threshold: -10.0
