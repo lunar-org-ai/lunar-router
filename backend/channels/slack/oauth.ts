@@ -59,7 +59,7 @@ oauthRouter.get('/install', (c) => {
 
   let cfg
   try {
-    cfg = loadSlackOAuthConfig()
+    cfg = loadSlackOAuthConfig(agentId)
   } catch (e) {
     if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
     throw e
@@ -77,14 +77,6 @@ oauthRouter.get('/install', (c) => {
 })
 
 oauthRouter.get('/oauth/callback', async (c) => {
-  let cfg
-  try {
-    cfg = loadSlackOAuthConfig()
-  } catch (e) {
-    if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
-    throw e
-  }
-
   const code = c.req.query('code')
   const state = c.req.query('state')
   const err = c.req.query('error')
@@ -98,6 +90,20 @@ oauthRouter.get('/oauth/callback', async (c) => {
   const agentId = consumeState(state)
   if (!agentId) {
     return c.html(callbackHtml({ ok: false, message: 'Invalid or expired state' }), 400)
+  }
+
+  // Resolve config using THIS agent's creds (per-agent if available).
+  // The install link itself was minted using the same creds, so they
+  // should still resolve here unless they were deleted between install
+  // and callback.
+  let cfg
+  try {
+    cfg = loadSlackOAuthConfig(agentId)
+  } catch (e) {
+    if (e instanceof SlackConfigError) {
+      return c.html(callbackHtml({ ok: false, message: e.message }), 503)
+    }
+    throw e
   }
 
   const redirect = `${cfg.publicBaseUrl}/slack/oauth/callback`

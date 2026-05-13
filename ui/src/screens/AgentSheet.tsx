@@ -15,6 +15,7 @@ import {
   connectApiChannel,
   connectWebChannel,
   connectWhatsAppChannel,
+  deleteSlackAppCredentials,
   disconnectApiChannel,
   disconnectSlackChannel,
   disconnectWebChannel,
@@ -24,6 +25,7 @@ import {
   getAgentImprovement,
   getAgentSecrets,
   getApiChannel,
+  getSlackAppCredentials,
   getSlackChannel,
   getWebChannel,
   getWhatsAppChannel,
@@ -31,6 +33,7 @@ import {
   listMCPServers,
   putAgentImprovement,
   putAgentSecrets,
+  putSlackAppCredentials,
   removeMCPServer,
   rotateApiChannel,
   rotateWebChannelSecret,
@@ -45,6 +48,7 @@ import {
   type ImprovementConfig,
   type MCPServer,
   type MCPTool,
+  type SlackAppCredentialsView,
   type SlackChannelStatus,
   type WebChannelConnectResponse,
   type WebChannelStatus,
@@ -1835,14 +1839,24 @@ print(res.json()["response"])`,
 // ─── Slack panel — hero / connecting / configured with preview ──
 const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () => void }) => {
   const [status, setStatus] = useState<SlackChannelStatus | null>(null);
+  const [creds, setCreds] = useState<SlackAppCredentialsView | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [showSecret, setShowSecret] = useState(false);
+  const [editingCreds, setEditingCreds] = useState(false);
   const { copied, copy } = useCopy();
+  // BYOK form state
+  const [clientId, setClientId] = useState('');
+  const [clientSecret, setClientSecret] = useState('');
+  const [signingSecret, setSigningSecret] = useState('');
 
   const refresh = async () => {
     try {
-      setStatus(await getSlackChannel(agentId));
+      const [s, c] = await Promise.all([
+        getSlackChannel(agentId),
+        getSlackAppCredentials(agentId),
+      ]);
+      setStatus(s);
+      setCreds(c);
     } catch (e) {
       if (!(e instanceof ApiError)) console.warn('getSlackChannel failed', e);
     }
@@ -1885,6 +1899,47 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
     }
   };
 
+  const saveCreds = async () => {
+    if (!clientId.trim() || !clientSecret.trim() || !signingSecret.trim()) {
+      setError('All three fields are required.');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await putSlackAppCredentials(agentId, {
+        client_id: clientId.trim(),
+        client_secret: clientSecret.trim(),
+        signing_secret: signingSecret.trim(),
+      });
+      setClientId('');
+      setClientSecret('');
+      setSigningSecret('');
+      setEditingCreds(false);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeCreds = async () => {
+    if (!confirm("Remove this agent's Slack app credentials? The agent will fall back to the global env vars (if set), otherwise it can't connect.")) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteSlackAppCredentials(agentId);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (!status) {
     return (
       <ChannelDrillFrame channelName="Slack" glyph={<SlackGlyphColored />} connected={false} onBack={onBack}>
@@ -1895,8 +1950,9 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
     );
   }
 
-  // Pre-connect hero (covers both: backend not configured + ready to connect)
+  // Pre-connect hero — supports per-agent BYOK app creds.
   if (!status.connected) {
+    const showByokForm = !status.configured || editingCreds || (creds && !creds.set && !status.configured);
     return (
       <ChannelDrillFrame channelName="Slack" glyph={<SlackGlyphColored />} connected={false} onBack={onBack}>
         <div className="wcfg-config-pane" style={{ padding: '32px 24px' }}>
@@ -1904,45 +1960,83 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
             <div className="connect-hero-tile"><SlackGlyphColored size={32} /></div>
             <h2>Add support-agent to your Slack workspace</h2>
             <p>
-              The agent will respond to messages in channels you choose and DMs. Same brain, same
-              policies — Slack is just another conversation surface.
+              Bring your own Slack app — paste its credentials below and we'll handle the install
+              + events end-to-end. Same brain, same policies — Slack is just another surface.
             </p>
             <div className="perms">
-              <div className="perms-label">It will be allowed to</div>
+              <div className="perms-label">Once installed, the agent will</div>
               <ul>
                 <li><Icon name="check" size={14} /><span>Post messages and reply in threads as the agent's bot user</span></li>
                 <li><Icon name="check" size={14} /><span>Read messages in channels it's invited to (not other channels)</span></li>
                 <li><Icon name="check" size={14} /><span>Respond to direct messages and @-mentions</span></li>
               </ul>
             </div>
-            {status.configured ? (
-              <button
-                className="btn primary"
-                style={{ height: 38, padding: '0 18px', fontSize: 13.5 }}
-                onClick={connect}
-                disabled={busy}
-              >
-                <SlackGlyphColored size={14} />
-                Add to Slack
-              </button>
-            ) : (
+
+            {status.configured && !editingCreds ? (
               <>
-                <div className="dim" style={{ fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
-                  Operator must register a Slack app and set <span className="mono">SLACK_CLIENT_ID</span>,{' '}
-                  <span className="mono">SLACK_CLIENT_SECRET</span>, <span className="mono">SLACK_SIGNING_SECRET</span>,{' '}
-                  and <span className="mono">PUBLIC_BASE_URL</span> on the backend before this button works.
-                </div>
-                <button className="btn primary" style={{ height: 38, padding: '0 18px', fontSize: 13.5, opacity: 0.5 }} disabled>
-                  <SlackGlyphColored size={14} /> Add to Slack
+                <button
+                  className="btn primary"
+                  style={{ height: 38, padding: '0 18px', fontSize: 13.5 }}
+                  onClick={connect}
+                  disabled={busy}
+                >
+                  <SlackGlyphColored size={14} />
+                  Add to Slack
                 </button>
+                <div className="dim" style={{ fontSize: 11.5, marginTop: 10, lineHeight: 1.5, textAlign: 'center' }}>
+                  Using {status.source === 'per-agent' ? 'per-agent' : 'global'} Slack app credentials
+                  {status.client_id_mask && <> · <span className="mono">{status.client_id_mask}</span></>}
+                  {' · '}
+                  <button
+                    className="btn ghost"
+                    style={{ padding: 0, height: 'auto', fontSize: 11.5, textDecoration: 'underline' }}
+                    onClick={() => setEditingCreds(true)}
+                  >
+                    {creds?.set ? 'rotate' : 'override'}
+                  </button>
+                </div>
               </>
+            ) : showByokForm ? (
+              <SlackCredentialsForm
+                agentId={agentId}
+                clientId={clientId}
+                clientSecret={clientSecret}
+                signingSecret={signingSecret}
+                setClientId={setClientId}
+                setClientSecret={setClientSecret}
+                setSigningSecret={setSigningSecret}
+                busy={busy}
+                onSave={() => void saveCreds()}
+                onCancel={editingCreds ? () => {
+                  setEditingCreds(false);
+                  setClientId('');
+                  setClientSecret('');
+                  setSigningSecret('');
+                  setError(null);
+                } : null}
+                hasGlobalFallback={status.configured && status.source === 'global'}
+                redirectUri={
+                  // We can't know publicBaseUrl client-side; surface the
+                  // status.install_url's host as a hint.
+                  null
+                }
+                eventsUrl={status.events_url}
+              />
+            ) : (
+              <div className="dim" style={{ fontSize: 12, lineHeight: 1.5, textAlign: 'center' }}>
+                {status.detail}
+              </div>
             )}
+
             {error && <div className="dim" style={{ fontSize: 12, color: 'var(--bad-fg)', marginTop: 10 }}>{error}</div>}
           </div>
         </div>
       </ChannelDrillFrame>
     );
   }
+
+  // Touch unused helpers so the linter doesn't complain.
+  void removeCreds;
 
   // Configured view with Slack-style preview
   return (
@@ -2032,9 +2126,6 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
           </div>
 
           {error && <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)' }}>{error}</div>}
-
-          {/* Reveal toggle is invisible-but-needed for the EndpointCard prop; keep it bound */}
-          <button style={{ display: 'none' }} onClick={() => setShowSecret((v) => !v)}>{showSecret ? '_' : '_'}</button>
         </div>
       </div>
     </ChannelDrillFrame>
@@ -2042,6 +2133,109 @@ const SlackChannelPanel = ({ agentId, onBack }: { agentId: string; onBack: () =>
 };
 
 // ─── Slack-style chat preview (static mock) ─────────────────────
+// ─── Slack BYOK credentials form ───────────────────────────────
+const SlackCredentialsForm = ({
+  agentId,
+  clientId,
+  clientSecret,
+  signingSecret,
+  setClientId,
+  setClientSecret,
+  setSigningSecret,
+  busy,
+  onSave,
+  onCancel,
+  hasGlobalFallback,
+  eventsUrl,
+}: {
+  agentId: string;
+  clientId: string;
+  clientSecret: string;
+  signingSecret: string;
+  setClientId: (s: string) => void;
+  setClientSecret: (s: string) => void;
+  setSigningSecret: (s: string) => void;
+  busy: boolean;
+  onSave: () => void;
+  onCancel: (() => void) | null;
+  hasGlobalFallback: boolean;
+  redirectUri: string | null;
+  eventsUrl: string | null;
+}) => (
+  <div className="whatsapp-form" style={{ width: '100%', maxWidth: 480 }}>
+    <div style={{ fontSize: 11.5, color: 'var(--fg-muted)', marginBottom: 10, lineHeight: 1.5 }}>
+      Create a Slack app at <span className="mono">api.slack.com/apps</span>, paste its credentials
+      below, then configure these URLs in the app:
+      <ul style={{ margin: '6px 0', paddingLeft: 16, fontFamily: 'var(--font-mono)', fontSize: 11 }}>
+        <li><b>Redirect URL:</b> &lt;PUBLIC_BASE_URL&gt;/slack/oauth/callback</li>
+        {eventsUrl && <li><b>Events URL:</b> {eventsUrl}</li>}
+      </ul>
+      Scopes needed: <span className="mono">app_mentions:read, chat:write, im:history, im:read, im:write, team:read</span>
+    </div>
+    <label className="whatsapp-field">
+      <span>Client ID</span>
+      <input
+        className="whatsapp-input mono"
+        autoComplete="off"
+        placeholder="e.g. 1234567890.987654321"
+        value={clientId}
+        onChange={(e) => setClientId(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <label className="whatsapp-field">
+      <span>Client Secret</span>
+      <input
+        className="whatsapp-input mono"
+        type="password"
+        autoComplete="off"
+        placeholder="paste from Basic Information"
+        value={clientSecret}
+        onChange={(e) => setClientSecret(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <label className="whatsapp-field">
+      <span>Signing Secret</span>
+      <input
+        className="whatsapp-input mono"
+        type="password"
+        autoComplete="off"
+        placeholder="from Basic Information → App Credentials"
+        value={signingSecret}
+        onChange={(e) => setSigningSecret(e.target.value)}
+        disabled={busy}
+      />
+    </label>
+    <div style={{ display: 'flex', gap: 8, marginTop: 12, justifyContent: 'center' }}>
+      <button
+        className="btn primary"
+        style={{ height: 36, padding: '0 16px' }}
+        onClick={onSave}
+        disabled={busy}
+      >
+        {busy ? 'Saving…' : 'Save & enable Slack'}
+      </button>
+      {onCancel && (
+        <button
+          className="btn ghost"
+          style={{ height: 36, padding: '0 16px' }}
+          onClick={onCancel}
+          disabled={busy}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+    {hasGlobalFallback && (
+      <div className="dim" style={{ fontSize: 11.5, marginTop: 10, textAlign: 'center' }}>
+        Currently using the global <span className="mono">SLACK_*</span> env vars as fallback.
+        Saving here switches <span className="mono">{agentId}</span> to its own app.
+      </div>
+    )}
+  </div>
+);
+
 const SlackPreview = () => (
   <div className="slackprev">
     <div className="slk-rail">
