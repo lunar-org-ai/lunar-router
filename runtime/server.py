@@ -2993,6 +2993,21 @@ def onboarding_turn(payload: OnboardingTurnRequest) -> OnboardingTurnResponse:
     return OnboardingTurnResponse(**out)
 
 
+class OnboardingTransportInfo(BaseModel):
+    transport: str           # "claude_code_cli" | "anthropic_api" | "none"
+    cwd: str
+    claude_version: Optional[str] = None
+
+
+@app.get("/onboarding/transport", response_model=OnboardingTransportInfo)
+def onboarding_transport() -> OnboardingTransportInfo:
+    """Which brain is connected (Claude Code CLI vs Anthropic API vs none).
+    UI surfaces this as a badge on the welcome screen so the operator
+    sees what's powering the chat — and whether it has filesystem access."""
+    from runtime.store.onboarding_chat import detect_transport
+    return OnboardingTransportInfo(**detect_transport())
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)

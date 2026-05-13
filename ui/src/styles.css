@@ -2347,3 +2347,23 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   .onbA-split { grid-template-columns: 1fr; }
   .onbA-config-pane { display: none; }
 }
+
+/* P1.13 — onboarding transport badge */
+.onbA-transport-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 5px 11px;
+  border-radius: 99px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--fg-muted);
+  margin-top: 8px;
+}
+.onbA-transport-badge code { font-size: 11px; padding: 1px 5px; background: var(--bg-muted); border-radius: 3px; color: var(--fg); }
+.onbA-transport-badge strong { font-weight: 600; color: var(--fg); }
+.onbA-transport-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--fg-subtle); }
+.onbA-transport-cli .onbA-transport-dot { background: oklch(0.55 0.14 150); box-shadow: 0 0 0 3px oklch(0.55 0.14 150 / 0.2); }
+.onbA-transport-cli { border-color: oklch(0.55 0.14 150 / 0.3); }
+.onbA-transport-offline .onbA-transport-dot { background: var(--warn); }

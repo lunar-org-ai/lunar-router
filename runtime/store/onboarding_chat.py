@@ -1,9 +1,9 @@
-"""Conversational onboarding turn — Claude-led interview (P1.12).
+"""Conversational onboarding turn — brain-aware (P1.13).
 
 The browser POSTs the running message history to ``/onboarding/turn``;
-this module composes the interview SYSTEM prompt, calls Anthropic, and
-returns a parsed JSON object the UI uses to render the next message +
-materialize the agent config live:
+this module composes the interview SYSTEM prompt, sends it to whichever
+brain transport is available, and returns a parsed JSON object the UI
+uses to render the next message + materialize the agent config live:
 
   {
     "reply":      "<Claude's text to the user>",
@@ -12,15 +12,20 @@ materialize the agent config live:
     "ready":      bool
   }
 
-Tolerant JSON extraction: strips code fences, finds the outermost
-``{...}`` block, ignores leading/trailing prose. If the LLM ever
-produces something that doesn't parse, we fall back to the
-hard-coded SCRIPT path so the wizard always advances.
+Transport selection (auto):
 
-Offline-safe: if ``ANTHROPIC_API_KEY`` is missing, every turn comes
-from the scripted fallback. The UI still functions; the conversation
-just feels canned. This mirrors the runtime stage's offline behavior
-(P1.9).
+  - ``claude_code_cli`` — preferred when ``claude`` is on PATH. Each
+    turn invokes ``claude --print`` headless, which means Claude Code
+    runs in the SAME directory as the runtime server and has access
+    to the filesystem + any ``.mcp.json`` in cwd. The onboarding chat
+    can read the operator's repo and propose tools backed by real
+    code (P1.13). Stateless calls — full history goes in every prompt.
+  - ``anthropic_api`` — when only ``ANTHROPIC_API_KEY`` is set.
+  - ``none`` — scripted fallback so the UI never deadlocks (P1.12).
+
+Tolerant JSON extraction: strips code fences, finds the outermost
+``{...}`` block, ignores leading/trailing prose. If the brain ever
+produces something that doesn't parse, we fall back to the SCRIPT.
 """
 
 from __future__ import annotations
@@ -147,53 +152,169 @@ _SCRIPT: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+def detect_transport() -> dict[str, Any]:
+    """Which brain will drive the next turn? UI badge consumes this.
+
+    Returns ``{"transport": "claude_code_cli" | "anthropic_api" | "none",
+    "cwd": str, "claude_version": str|None}``. We prefer the CLI when
+    available — it has filesystem access + the operator's MCP servers,
+    which makes the onboarding interview materially richer.
+    """
+    import shutil
+
+    forced = os.environ.get("BRAIN_TRANSPORT", "").strip()
+    if forced in ("claude_code_cli", "anthropic_api"):
+        chosen = forced
+    elif shutil.which("claude"):
+        chosen = "claude_code_cli"
+    elif os.environ.get("ANTHROPIC_API_KEY"):
+        chosen = "anthropic_api"
+    else:
+        chosen = "none"
+
+    claude_version: Optional[str] = None
+    if chosen == "claude_code_cli":
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["claude", "--version"], capture_output=True, text=True, timeout=3,
+            )
+            if out.returncode == 0:
+                # "2.1.140 (Claude Code)" → "2.1.140"
+                claude_version = (out.stdout or "").strip().split()[0]
+        except Exception:
+            pass
+
+    return {
+        "transport": chosen,
+        "cwd": os.getcwd(),
+        "claude_version": claude_version,
+    }
+
+
 def run_turn(
     messages: list[dict[str, str]],
     *,
     model: Optional[str] = None,
+    transport: Optional[str] = None,
 ) -> dict[str, Any]:
     """Compose + send one interview turn. Returns the parsed JSON shape.
 
     ``messages`` is the running conversation: a list of dicts with
     ``role`` ('user' | 'assistant') and ``content`` (str). We never
-    trust the model to keep state — the full history goes on every
+    trust the brain to keep state — the full history goes on every
     request.
 
-    On any failure (no key, network blip, malformed JSON) we fall
-    through to the SCRIPT. The UI shouldn't crash because of a model
-    hiccup during day-0 setup.
+    ``transport`` forces a specific path; ``None`` auto-selects via
+    ``detect_transport()`` (preferring claude_code_cli for richer
+    behavior, see module docstring).
+
+    On any failure (no brain, network blip, malformed JSON) we fall
+    through to the SCRIPT. The UI never deadlocks because of a hiccup
+    during day-0 setup.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
+    chosen = transport or detect_transport()["transport"]
+    if chosen == "none":
         return _scripted_turn(_user_turn_count(messages))
 
     try:
-        from anthropic import Anthropic
-    except ImportError:
-        logger.warning("anthropic SDK not installed — onboarding falls back to script")
-        return _scripted_turn(_user_turn_count(messages))
-
-    chosen_model = model or DEFAULT_TURN_MODEL
-    client = Anthropic(api_key=api_key)
-    api_messages = _format_for_anthropic(messages)
-    try:
-        resp = client.messages.create(
-            model=chosen_model,
-            max_tokens=1024,
-            temperature=0.4,
-            system=SYSTEM_PROMPT,
-            messages=api_messages,
-        )
+        if chosen == "claude_code_cli":
+            text = _call_claude_cli(messages)
+        else:
+            text = _call_anthropic_api(messages, model=model)
     except Exception as e:
-        logger.warning("onboarding turn Anthropic call failed (%s) — falling back", e)
+        logger.warning("onboarding turn (%s) failed (%s) — falling back to script", chosen, e)
         return _scripted_turn(_user_turn_count(messages))
 
-    text = "".join(getattr(b, "text", "") or "" for b in (resp.content or []))
     parsed = extract_json(text)
     if not _is_valid_turn(parsed):
-        logger.warning("onboarding turn produced unparseable JSON — falling back. Raw: %r", text[:200])
+        logger.warning(
+            "onboarding turn (%s) produced unparseable JSON — falling back. Raw: %r",
+            chosen, (text or "")[:200],
+        )
         return _scripted_turn(_user_turn_count(messages))
     return _normalize_turn(parsed)
+
+
+def _call_anthropic_api(
+    messages: list[dict[str, str]],
+    *,
+    model: Optional[str] = None,
+) -> str:
+    """Direct SDK call (P1.12 path). Stateful messages array — system
+    prompt is the API's top-level arg."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    try:
+        from anthropic import Anthropic
+    except ImportError as e:
+        raise RuntimeError("anthropic SDK not installed") from e
+
+    client = Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=model or DEFAULT_TURN_MODEL,
+        max_tokens=1024,
+        temperature=0.4,
+        system=SYSTEM_PROMPT,
+        messages=_format_for_anthropic(messages),
+    )
+    return "".join(getattr(b, "text", "") or "" for b in (resp.content or []))
+
+
+def _call_claude_cli(messages: list[dict[str, str]]) -> str:
+    """Stateless ``claude --print`` call (P1.13 path). The conversation
+    history is rendered into the user prompt because each subprocess
+    invocation has no memory of prior turns. Claude Code runs in the
+    server's cwd, so it can read the operator's project files."""
+    import subprocess
+
+    convo = _render_history(messages)
+    user_prompt = (
+        "You are mid-conversation with the operator. Here is the full thread "
+        "so far:\n\n"
+        f"{convo}\n\n"
+        "Reply ONLY with the JSON object specified in the system prompt — no "
+        "prose, no code fences."
+    )
+
+    args = [
+        "claude",
+        "--print",
+        "--permission-mode", "bypassPermissions",
+        "--append-system-prompt", SYSTEM_PROMPT,
+        user_prompt,
+    ]
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=int(os.environ.get("ONBOARDING_TURN_TIMEOUT_S", "120")),
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"claude --print timed out: {e}") from e
+    except FileNotFoundError as e:
+        raise RuntimeError("claude CLI not on PATH") from e
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude --print exited {proc.returncode}: {(proc.stderr or '')[:300]}"
+        )
+    return (proc.stdout or "").strip()
+
+
+def _render_history(messages: list[dict[str, str]]) -> str:
+    """Flatten the history into a transcript Claude Code can read."""
+    lines: list[str] = []
+    for m in messages:
+        role = m.get("role")
+        content = (m.get("content") or m.get("text") or "").strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        tag = "USER" if role == "user" else "YOU (assistant)"
+        lines.append(f"[{tag}]:\n{content}")
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
