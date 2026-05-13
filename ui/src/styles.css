@@ -2600,3 +2600,34 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 .onbA-composer-input:placeholder-shown {
   caret-color: transparent;
 }
+
+/* P3.1 — BYOK section */
+.byok-row {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev);
+}
+.byok-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.byok-label { font-size: 13px; font-weight: 500; }
+.byok-row-input { display: flex; gap: 8px; align-items: center; }
+.byok-row-input input {
+  flex: 1;
+  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--fg);
+  outline: none;
+}
+.byok-row-input input:focus { border-color: var(--fg); }
+.byok-row-input input:disabled { opacity: 0.6; }

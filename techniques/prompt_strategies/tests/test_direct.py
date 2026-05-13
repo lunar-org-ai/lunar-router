@@ -85,10 +85,13 @@ def test_real_call_populates_response_and_usage(monkeypatch):
     )
 
     assert ctx.response == "The answer is 4."
+    # P3.1 — usage now also carries the provider (anthropic | openai)
+    # because the generate stage routes across SDKs.
     assert ctx.state["llm_usage"] == {
         "input_tokens": 12,
         "output_tokens": 5,
         "model": "claude-sonnet-4-6",
+        "provider": "anthropic",
     }
     # Model came from the routing decision, not the default
     assert captured["model"] == "claude-sonnet-4-6"

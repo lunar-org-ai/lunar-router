@@ -11,8 +11,11 @@ import { Icon, type IconName } from '../components/Icon';
 import { Tag } from '../components/Tag';
 import {
   ApiError,
+  getAgentSecrets,
   listAgents,
+  putAgentSecrets,
   updateAgent,
+  type AgentSecretsResponse,
   type AgentSummary,
 } from '../api';
 
@@ -49,9 +52,12 @@ const TABS: Array<{ id: Tab; label: string }> = [
 ];
 
 const MODELS: Array<{ id: string; name: string; meta: string }> = [
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', meta: 'Anthropic · fast & cheap' },
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', meta: 'Anthropic · fast + cheap' },
   { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', meta: 'Anthropic · default' },
   { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', meta: 'Anthropic · strongest reasoning' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o mini', meta: 'OpenAI · cheap + capable' },
+  { id: 'gpt-4o', name: 'GPT-4o', meta: 'OpenAI · multimodal default' },
+  { id: 'gpt-5', name: 'GPT-5', meta: 'OpenAI · frontier' },
 ];
 
 const INITIAL_PROMPT = `You are a customer support agent for an online store.
@@ -92,18 +98,33 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
   const [keys] = useState<Key[]>(INITIAL_KEYS);
   const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
   const [savingModel, setSavingModel] = useState(false);
+  const [secrets, setSecrets] = useState<AgentSecretsResponse | null>(null);
+  const [anthropicDraft, setAnthropicDraft] = useState('');
+  const [openaiDraft, setOpenaiDraft] = useState('');
+  const [savingKey, setSavingKey] = useState<'anthropic' | 'openai' | null>(null);
+  const [keyError, setKeyError] = useState<string | null>(null);
+
+  const loadSecrets = async (id: string) => {
+    try {
+      const next = await getAgentSecrets(id);
+      setSecrets(next);
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getAgentSecrets failed', e);
+    }
+  };
 
   // Load the active agent on mount so the Brain tab reflects the
   // operator's real configuration, not a hardcoded default.
   useEffect(() => {
     let cancelled = false;
     void listAgents()
-      .then((res) => {
+      .then(async (res) => {
         if (cancelled) return;
         const active = res.agents.find((a) => a.id === res.active) ?? null;
         if (active) {
           setActiveAgent(active);
           setModel(active.model);
+          await loadSecrets(active.id);
         }
       })
       .catch(() => {});
@@ -222,6 +243,51 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
                   </div>
                 )}
               </div>
+
+              {activeAgent && (
+                <BYOKSection
+                  agent={activeAgent}
+                  secrets={secrets}
+                  anthropicDraft={anthropicDraft}
+                  openaiDraft={openaiDraft}
+                  setAnthropicDraft={setAnthropicDraft}
+                  setOpenaiDraft={setOpenaiDraft}
+                  saving={savingKey}
+                  error={keyError}
+                  onSave={async (provider) => {
+                    setSavingKey(provider);
+                    setKeyError(null);
+                    try {
+                      const body = provider === 'anthropic'
+                        ? { anthropic: anthropicDraft }
+                        : { openai: openaiDraft };
+                      const next = await putAgentSecrets(activeAgent.id, body);
+                      setSecrets(next);
+                      if (provider === 'anthropic') setAnthropicDraft('');
+                      else setOpenaiDraft('');
+                    } catch (e) {
+                      setKeyError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setSavingKey(null);
+                    }
+                  }}
+                  onRemove={async (provider) => {
+                    setSavingKey(provider);
+                    setKeyError(null);
+                    try {
+                      const body = provider === 'anthropic'
+                        ? { anthropic: '' }
+                        : { openai: '' };
+                      const next = await putAgentSecrets(activeAgent.id, body);
+                      setSecrets(next);
+                    } catch (e) {
+                      setKeyError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setSavingKey(null);
+                    }
+                  }}
+                />
+              )}
 
               <div className="sheet-section">
                 <h3>Self-improvement engineer</h3>
@@ -345,5 +411,155 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
         </div>
       </div>
     </>
+  );
+};
+
+// ─── BYOK section (P3.1) ────────────────────────────────────────
+// Per-agent Anthropic + OpenAI keys. Resolution status comes from the
+// server (per-agent | global | unset) so the operator sees which keys
+// are wired and where they live before they overwrite.
+interface BYOKSectionProps {
+  agent: AgentSummary;
+  secrets: AgentSecretsResponse | null;
+  anthropicDraft: string;
+  openaiDraft: string;
+  setAnthropicDraft: (s: string) => void;
+  setOpenaiDraft: (s: string) => void;
+  saving: 'anthropic' | 'openai' | null;
+  error: string | null;
+  onSave: (provider: 'anthropic' | 'openai') => Promise<void>;
+  onRemove: (provider: 'anthropic' | 'openai') => Promise<void>;
+}
+
+const BYOKSection = ({
+  agent,
+  secrets,
+  anthropicDraft,
+  openaiDraft,
+  setAnthropicDraft,
+  setOpenaiDraft,
+  saving,
+  error,
+  onSave,
+  onRemove,
+}: BYOKSectionProps) => {
+  const anthropic = secrets?.providers.anthropic;
+  const openai = secrets?.providers.openai;
+  return (
+    <div className="sheet-section">
+      <h3>Provider keys (BYOK)</h3>
+      <p className="desc">
+        Per-agent API keys for <span className="mono">{agent.id}</span>. Files live in{' '}
+        <span className="mono">agents/{agent.id}/secrets.env</span> (gitignored, mode 0600).
+        When unset, the server falls back to the global <span className="mono">.env</span>.
+      </p>
+
+      <KeyRow
+        label="Anthropic"
+        status={anthropic}
+        draft={anthropicDraft}
+        setDraft={setAnthropicDraft}
+        saving={saving === 'anthropic'}
+        placeholder="sk-ant-api03-…"
+        onSave={() => void onSave('anthropic')}
+        onRemove={() => void onRemove('anthropic')}
+      />
+
+      <KeyRow
+        label="OpenAI"
+        status={openai}
+        draft={openaiDraft}
+        setDraft={setOpenaiDraft}
+        saving={saving === 'openai'}
+        placeholder="sk-proj-…"
+        onSave={() => void onSave('openai')}
+        onRemove={() => void onRemove('openai')}
+      />
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const KeyRow = ({
+  label,
+  status,
+  draft,
+  setDraft,
+  saving,
+  placeholder,
+  onSave,
+  onRemove,
+}: {
+  label: string;
+  status: { set: boolean; source: string; mask: string | null; var: string } | undefined;
+  draft: string;
+  setDraft: (s: string) => void;
+  saving: boolean;
+  placeholder: string;
+  onSave: () => void;
+  onRemove: () => void;
+}) => {
+  const isPerAgent = status?.source === 'per-agent';
+  const isGlobal = status?.source === 'global';
+  return (
+    <div className="byok-row">
+      <div className="byok-row-head">
+        <span className="byok-label">{label}</span>
+        {status?.set ? (
+          <Tag kind={isPerAgent ? 'success' : 'warn'}>
+            <span className="dot" />
+            {isPerAgent ? 'per-agent' : 'global .env'}
+          </Tag>
+        ) : (
+          <Tag kind="bad">
+            <span className="dot" />
+            unset
+          </Tag>
+        )}
+        {status?.mask && (
+          <span className="mono dim" style={{ fontSize: 11.5, marginLeft: 'auto' }}>
+            {status.mask}
+          </span>
+        )}
+      </div>
+      <div className="byok-row-input">
+        <input
+          type="password"
+          autoComplete="off"
+          placeholder={isPerAgent ? `Replace ${label} key` : placeholder}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          disabled={saving}
+        />
+        <button
+          className="btn sm primary"
+          onClick={onSave}
+          disabled={saving || !draft.trim()}
+        >
+          {saving ? 'Saving…' : isPerAgent ? 'Rotate' : 'Save'}
+        </button>
+        {isPerAgent && (
+          <button
+            className="btn sm ghost"
+            onClick={onRemove}
+            disabled={saving}
+            title={`Remove the per-agent key; ${label} falls back to global .env`}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+      {isGlobal && (
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 6 }}>
+          Inherited from the global <span className="mono">.env</span>. Save a key here to
+          override per-agent.
+        </div>
+      )}
+    </div>
   );
 };

@@ -3176,6 +3176,68 @@ class AgentUpdateRequest(BaseModel):
     model: Optional[str] = None
 
 
+class AgentSecretsStatus(BaseModel):
+    """Per-provider key status — never carries the raw key.
+
+    ``source`` is one of ``per-agent`` | ``global`` | ``unset``.
+    """
+    set: bool
+    source: str
+    mask: Optional[str] = None
+    var: str
+
+
+class AgentSecretsResponse(BaseModel):
+    agent_id: str
+    providers: dict[str, AgentSecretsStatus]
+
+
+class AgentSecretsUpdateRequest(BaseModel):
+    """Pass an empty string as the value to remove a key. Omitted
+    providers stay unchanged. Only the raw key value is accepted; the
+    server picks the canonical env var name per provider."""
+    anthropic: Optional[str] = None
+    openai: Optional[str] = None
+
+
+@app.get("/agents/{agent_id}/secrets", response_model=AgentSecretsResponse)
+def get_agent_secrets_endpoint(agent_id: str) -> AgentSecretsResponse:
+    from runtime.agents.registry import get_agent
+    from runtime.agents.secrets import status
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    providers = {k: AgentSecretsStatus(**v) for k, v in status(agent_id).items()}
+    return AgentSecretsResponse(agent_id=agent_id, providers=providers)
+
+
+@app.put("/agents/{agent_id}/secrets", response_model=AgentSecretsResponse)
+def put_agent_secrets_endpoint(
+    agent_id: str, payload: AgentSecretsUpdateRequest,
+) -> AgentSecretsResponse:
+    """Rotate per-agent keys. Empty string removes the key (falls back
+    to global). Omitted providers stay untouched.
+    """
+    from runtime.agents.registry import get_agent
+    from runtime.agents.secrets import PROVIDERS, save_secrets, status
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+
+    to_write: dict[str, str] = {}
+    body = payload.model_dump(exclude_unset=True)
+    for provider, value in body.items():
+        if provider not in PROVIDERS:
+            raise HTTPException(status_code=400, detail=f"unknown_provider: {provider}")
+        if value is None:
+            continue
+        canonical = PROVIDERS[provider][0]
+        to_write[canonical] = value
+    if to_write:
+        save_secrets(agent_id, to_write)
+
+    providers = {k: AgentSecretsStatus(**v) for k, v in status(agent_id).items()}
+    return AgentSecretsResponse(agent_id=agent_id, providers=providers)
+
+
 @app.patch("/agents/{agent_id}", response_model=AgentSummary)
 def update_agent_endpoint(agent_id: str, payload: AgentUpdateRequest) -> AgentSummary:
     """Mutate an agent's metadata. When ``model`` is provided, propagates

@@ -39,9 +39,12 @@ interface Model {
 }
 
 const MODELS: Model[] = [
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', desc: 'Fastest and cheapest. Good for high volume.' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Smart, fast default for most agents.', recommended: true },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Strongest reasoning. Use when accuracy matters.' },
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', desc: 'Anthropic · fastest + cheapest.' },
+  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Anthropic · smart default.', recommended: true },
+  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Anthropic · strongest reasoning.' },
+  { id: 'gpt-4o-mini', name: 'GPT-4o mini', desc: 'OpenAI · cheap + capable.' },
+  { id: 'gpt-4o', name: 'GPT-4o', desc: 'OpenAI · multimodal default.' },
+  { id: 'gpt-5', name: 'GPT-5', desc: 'OpenAI · frontier.' },
 ];
 
 const CHANNEL_LABELS: Record<string, string> = {
