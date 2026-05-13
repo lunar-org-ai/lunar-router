@@ -2504,3 +2504,70 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   gap: 8px;
   margin-top: 16px;
 }
+
+/* P2.2.2 — Talk welcome / empty state */
+.talk-welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 16px 32px;
+  gap: 8px;
+  text-align: center;
+}
+.talk-welcome-avatar {
+  transform: scale(1.6);
+  margin-bottom: 14px;
+}
+.talk-welcome-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0;
+}
+.talk-welcome-name {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--accent-fg);
+  padding: 2px 9px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  margin-left: 4px;
+  vertical-align: 2px;
+}
+.talk-welcome-sub {
+  font-size: 13.5px;
+  line-height: 1.55;
+  max-width: 440px;
+  margin: 0 0 22px;
+}
+.talk-welcome-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  width: 100%;
+  max-width: 560px;
+}
+.talk-welcome-card {
+  font: inherit;
+  text-align: left;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  cursor: pointer;
+  transition: border-color 0.12s ease, transform 0.12s ease;
+}
+.talk-welcome-card:hover {
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+.talk-welcome-card:disabled { cursor: not-allowed; opacity: 0.55; }
+.talk-welcome-card-q { font-size: 13.5px; font-weight: 500; margin-bottom: 4px; }
+.talk-welcome-card-hint { font-size: 12px; line-height: 1.45; }
+
+@media (max-width: 640px) {
+  .talk-welcome-grid { grid-template-columns: 1fr; }
+}
