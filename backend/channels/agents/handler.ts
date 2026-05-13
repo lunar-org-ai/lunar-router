@@ -93,6 +93,32 @@ agentsRouter.get(
   '/:id/channels',
   proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels`),
 )
+
+// MCP / Hands — per-agent tool servers (P3.4)
+agentsRouter.get(
+  '/:id/mcp',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/mcp`),
+)
+agentsRouter.post(
+  '/:id/mcp',
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/mcp`),
+)
+agentsRouter.patch(
+  '/:id/mcp/:server',
+  proxy('PATCH', (c) =>
+    `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/mcp/${encodeURIComponent(c.req.param('server') ?? '')}`,
+  ),
+)
+agentsRouter.delete(
+  '/:id/mcp/:server',
+  proxy('DELETE', (c) =>
+    `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/mcp/${encodeURIComponent(c.req.param('server') ?? '')}`,
+  ),
+)
+agentsRouter.get(
+  '/:id/mcp/tools',
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/mcp/tools`),
+)
 agentsRouter.get(
   '/:id/channels/api',
   proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api`),

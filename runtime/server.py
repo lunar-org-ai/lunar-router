@@ -3410,6 +3410,150 @@ def internal_run_endpoint(
     )
 
 
+class MCPServerView(BaseModel):
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: Optional[str] = None
+    enabled: bool = True
+    description: str = ""
+
+
+class MCPServersResponse(BaseModel):
+    agent_id: str
+    servers: list[MCPServerView]
+
+
+class MCPToolView(BaseModel):
+    server_name: str
+    tool_name: str
+    qualified_name: str
+    description: str
+    input_schema: dict
+
+
+class MCPToolsResponse(BaseModel):
+    agent_id: str
+    tools: list[MCPToolView]
+    discovery_errors: list[str] = []
+
+
+@app.get("/agents/{agent_id}/mcp", response_model=MCPServersResponse)
+def list_mcp_servers_endpoint(agent_id: str) -> MCPServersResponse:
+    from runtime.agents.mcp import load
+    from runtime.agents.registry import get_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    servers = load(agent_id)
+    return MCPServersResponse(
+        agent_id=agent_id,
+        servers=[MCPServerView(**s.to_dict()) for s in servers],
+    )
+
+
+class MCPServerCreateRequest(BaseModel):
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}
+    url: Optional[str] = None
+    enabled: bool = True
+    description: str = ""
+
+
+@app.post("/agents/{agent_id}/mcp", response_model=MCPServersResponse, status_code=201)
+def add_mcp_server_endpoint(
+    agent_id: str, payload: MCPServerCreateRequest,
+) -> MCPServersResponse:
+    from runtime.agents.mcp import MCPServer, add_server
+    from runtime.agents.registry import get_agent
+    from runtime.mcp.client import invalidate_cache
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    if not payload.name.strip():
+        raise HTTPException(status_code=400, detail="missing_name")
+    try:
+        servers = add_server(agent_id, MCPServer(**payload.model_dump()))
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    invalidate_cache(agent_id)
+    return MCPServersResponse(
+        agent_id=agent_id,
+        servers=[MCPServerView(**s.to_dict()) for s in servers],
+    )
+
+
+class MCPServerUpdateRequest(BaseModel):
+    transport: Optional[str] = None
+    command: Optional[str] = None
+    args: Optional[list[str]] = None
+    env: Optional[dict[str, str]] = None
+    url: Optional[str] = None
+    enabled: Optional[bool] = None
+    description: Optional[str] = None
+
+
+@app.patch("/agents/{agent_id}/mcp/{server_name}", response_model=MCPServersResponse)
+def update_mcp_server_endpoint(
+    agent_id: str, server_name: str, payload: MCPServerUpdateRequest,
+) -> MCPServersResponse:
+    from runtime.agents.mcp import update_server
+    from runtime.agents.registry import get_agent
+    from runtime.mcp.client import invalidate_cache
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    try:
+        servers = update_server(
+            agent_id, server_name, **payload.model_dump(exclude_unset=True),
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"server_not_found: {server_name}")
+    invalidate_cache(agent_id)
+    return MCPServersResponse(
+        agent_id=agent_id,
+        servers=[MCPServerView(**s.to_dict()) for s in servers],
+    )
+
+
+@app.delete("/agents/{agent_id}/mcp/{server_name}", status_code=204)
+def remove_mcp_server_endpoint(agent_id: str, server_name: str) -> None:
+    from runtime.agents.mcp import remove_server
+    from runtime.agents.registry import get_agent
+    from runtime.mcp.client import invalidate_cache
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    remove_server(agent_id, server_name)
+    invalidate_cache(agent_id)
+    return None
+
+
+@app.get("/agents/{agent_id}/mcp/tools", response_model=MCPToolsResponse)
+def discover_mcp_tools_endpoint(agent_id: str) -> MCPToolsResponse:
+    """Live discovery: spawns each enabled server, calls listTools,
+    returns the combined catalog. Cache invalidated on every mutation."""
+    from runtime.agents.registry import get_agent
+    from runtime.mcp.client import list_tools_for_agent
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    discovered = list_tools_for_agent(agent_id, force_refresh=True)
+    return MCPToolsResponse(
+        agent_id=agent_id,
+        tools=[
+            MCPToolView(
+                server_name=t.server_name,
+                tool_name=t.tool_name,
+                qualified_name=t.qualified_name,
+                description=t.description,
+                input_schema=t.input_schema,
+            )
+            for t in discovered
+        ],
+    )
+
+
 @app.get("/agents/{agent_id}/channels", response_model=AgentChannelsResponse)
 def list_agent_channels_endpoint(agent_id: str) -> AgentChannelsResponse:
     """Per-channel connection status for the agent (P3.3). Used by the
