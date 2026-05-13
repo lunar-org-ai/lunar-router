@@ -100,6 +100,33 @@ def test_activate_unknown_returns_404(client):
     assert r.status_code == 404
 
 
+def test_patch_updates_model_and_route_yaml(client, tmp_path):
+    """PATCH /agents/<id> with {model} rewrites the agent's route.yaml.
+
+    Need to seed route.yaml first because the test fixture creates a
+    minimal live agent dir without one.
+    """
+    # Seed the _default agent's pipeline/route.yaml
+    pipeline = tmp_path / "agents" / "_default" / "pipeline"
+    pipeline.mkdir(parents=True, exist_ok=True)
+    (pipeline / "route.yaml").write_text(
+        "stage: route\nknobs:\n  small: claude-haiku-4-5\n  big: claude-opus-4-7\n"
+    )
+
+    r = client.patch("/agents/_default", json={"model": "claude-sonnet-4-6"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["model"] == "claude-sonnet-4-6"
+
+    new_route = (pipeline / "route.yaml").read_text()
+    assert "small: claude-sonnet-4-6" in new_route
+
+
+def test_patch_unknown_agent_404(client):
+    r = client.patch("/agents/no-such-id", json={"model": "claude-haiku-4-5"})
+    assert r.status_code == 404
+
+
 def test_delete_active_returns_409(client):
     r = client.delete("/agents/_default")
     # _default cannot be deleted at all

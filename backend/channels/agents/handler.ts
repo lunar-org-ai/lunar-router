@@ -16,11 +16,11 @@ const TIMEOUT_MS = 30_000
 export const agentsRouter = new Hono()
 
 const proxy = (
-  method: 'GET' | 'POST' | 'DELETE',
+  method: 'GET' | 'POST' | 'DELETE' | 'PATCH',
   pathBuilder: (c: import('hono').Context) => string,
 ) => async (c: import('hono').Context) => {
   let body: unknown = undefined
-  if (method === 'POST') {
+  if (method === 'POST' || method === 'PATCH') {
     try {
       body = await c.req.json()
     } catch {
@@ -32,8 +32,9 @@ const proxy = (
   try {
     const res = await fetch(RUNTIME_URL + pathBuilder(c), {
       method,
-      headers: method === 'POST' ? { 'content-type': 'application/json' } : undefined,
-      body: method === 'POST' ? JSON.stringify(body ?? {}) : undefined,
+      headers:
+        method === 'POST' || method === 'PATCH' ? { 'content-type': 'application/json' } : undefined,
+      body: method === 'POST' || method === 'PATCH' ? JSON.stringify(body ?? {}) : undefined,
       signal: controller.signal,
     })
     if (res.status === 204) {
@@ -61,6 +62,10 @@ const proxy = (
 agentsRouter.get('/', proxy('GET', () => '/agents'))
 agentsRouter.post('/', proxy('POST', () => '/agents'))
 agentsRouter.get('/:id', proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}`))
+agentsRouter.patch(
+  '/:id',
+  proxy('PATCH', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}`),
+)
 agentsRouter.post(
   '/:id/activate',
   proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/activate`),

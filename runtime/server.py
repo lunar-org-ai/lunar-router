@@ -3170,6 +3170,31 @@ def delete_agent_endpoint(agent_id: str) -> None:
     return None
 
 
+class AgentUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    model: Optional[str] = None
+
+
+@app.patch("/agents/{agent_id}", response_model=AgentSummary)
+def update_agent_endpoint(agent_id: str, payload: AgentUpdateRequest) -> AgentSummary:
+    """Mutate an agent's metadata. When ``model`` is provided, propagates
+    to the agent's ``pipeline/route.yaml`` so the next /run uses it. If
+    the agent is currently active, the change is also reflected in the
+    live ``agent/`` dir on the next activate."""
+    from runtime.agents.registry import get_registry, update_agent
+    try:
+        meta = update_agent(
+            agent_id,
+            name=payload.name,
+            description=payload.description,
+            model=payload.model,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+    return _summarize(meta, active_id=get_registry().active)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)

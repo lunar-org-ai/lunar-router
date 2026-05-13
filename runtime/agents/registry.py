@@ -208,6 +208,11 @@ def update_agent(
         meta.description = description
     if model is not None:
         meta.model = model
+        # P3.0 — propagate to the agent's route.yaml so /run uses it.
+        # If this agent is currently active, live ``agent/`` won't update
+        # until the operator hits /activate again — that's acceptable;
+        # the catalog copy is the source of truth.
+        _set_route_yaml_model(rroot / agent_id, model)
     meta.updated_at = _now_iso(now_iso)
     _save_registry(rroot, registry)
     return meta
@@ -307,11 +312,56 @@ def _apply_payload_to_dir(agent_dir: Path, payload: dict[str, Any]) -> None:
         )
         prompt_path.write_text(body, encoding="utf-8")
 
+    # P3.0 — propagate the operator's model choice into route.yaml so
+    # the next /run actually uses it. Without this the router stays on
+    # whatever the seed agent had (typically claude-haiku-4-5).
+    model = (payload.get("model") or "").strip()
+    if model:
+        _set_route_yaml_model(agent_dir, model)
+
     onboarding_path = agent_dir / "onboarding.json"
     onboarding_path.write_text(
         json.dumps(_clone_payload(payload), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+
+def _set_route_yaml_model(agent_dir: Path, model: str) -> None:
+    """Rewrite ``agent_dir/pipeline/route.yaml`` so its ``small`` knob
+    matches the operator's chosen model. The router treats this as the
+    default; ``big`` stays whatever the seed had (escalation target).
+
+    No-op when the file is missing — caller is responsible for ensuring
+    the agent dir was seeded from a working template first.
+    """
+    route_path = agent_dir / "pipeline" / "route.yaml"
+    if not route_path.is_file():
+        logger.warning("route.yaml missing at %s — model not propagated", route_path)
+        return
+    try:
+        body = route_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("failed to read %s: %s", route_path, e)
+        return
+
+    # Surgical line-level rewrite. Avoid a full YAML round-trip so
+    # comments + ordering stay intact (PyYAML doesn't preserve them).
+    new_lines: list[str] = []
+    rewrote = False
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("small:"):
+            indent = line[: len(line) - len(stripped)]
+            new_lines.append(f"{indent}small: {model}")
+            rewrote = True
+        else:
+            new_lines.append(line)
+    if not rewrote:
+        logger.warning("route.yaml at %s had no 'small:' knob — not modified", route_path)
+        return
+    if not body.endswith("\n"):
+        new_lines.append("")
+    route_path.write_text("\n".join(new_lines) + ("" if body.endswith("\n") else "\n"), encoding="utf-8")
 
 
 def _describe_from_payload(payload: dict[str, Any]) -> str:
