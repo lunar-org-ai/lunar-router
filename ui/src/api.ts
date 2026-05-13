@@ -1294,3 +1294,30 @@ export async function disconnectApiChannel(id: string): Promise<void> {
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// Slack channel (P3.3.2)
+
+export interface SlackChannelStatus {
+  configured: boolean;
+  connected: boolean;
+  team_id: string | null;
+  team_name: string | null;
+  installer_user_id: string | null;
+  installed_at: string | null;
+  install_url: string | null;
+  events_url: string | null;
+  detail: string | null;
+}
+
+export const getSlackChannel = (id: string) =>
+  _getJson<SlackChannelStatus>(`/v1/agents/${encodeURIComponent(id)}/channels/slack`);
+
+export async function disconnectSlackChannel(id: string): Promise<void> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/channels/slack`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}

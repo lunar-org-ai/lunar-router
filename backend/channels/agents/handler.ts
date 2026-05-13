@@ -9,6 +9,8 @@
  */
 
 import { Hono } from 'hono'
+import { SlackConfigError } from '../slack/config'
+import { disconnectAgentSlack, getAgentSlackStatus } from '../slack/handler'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 30_000
@@ -61,52 +63,79 @@ const proxy = (
 
 agentsRouter.get('/', proxy('GET', () => '/agents'))
 agentsRouter.post('/', proxy('POST', () => '/agents'))
-agentsRouter.get('/:id', proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}`))
+agentsRouter.get('/:id', proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}`))
 agentsRouter.patch(
   '/:id',
-  proxy('PATCH', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}`),
+  proxy('PATCH', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}`),
 )
 agentsRouter.get(
   '/:id/secrets',
-  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/secrets`),
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/secrets`),
 )
 agentsRouter.put(
   '/:id/secrets',
-  proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/secrets`),
+  proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/secrets`),
 )
 agentsRouter.get(
   '/:id/improvement',
-  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/improvement`),
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/improvement`),
 )
 agentsRouter.put(
   '/:id/improvement',
-  proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/improvement`),
+  proxy('PUT', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/improvement`),
 )
 agentsRouter.get(
   '/:id/channels',
-  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels`),
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels`),
 )
 agentsRouter.get(
   '/:id/channels/api',
-  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api`),
+  proxy('GET', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api`),
 )
 agentsRouter.post(
   '/:id/channels/api/connect',
-  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api/connect`),
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api/connect`),
 )
 agentsRouter.post(
   '/:id/channels/api/rotate',
-  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api/rotate`),
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api/rotate`),
 )
 agentsRouter.delete(
   '/:id/channels/api',
-  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/channels/api`),
+  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/channels/api`),
 )
+
+// ─── Slack channel (handled locally — OAuth files live in TS) ──────────────
+agentsRouter.get('/:id/channels/slack', async (c) => {
+  const id = c.req.param('id')
+  try {
+    return c.json(await getAgentSlackStatus(id))
+  } catch (e) {
+    return c.json(
+      { error: 'slack status failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
+
+agentsRouter.delete('/:id/channels/slack', async (c) => {
+  const id = c.req.param('id')
+  try {
+    await disconnectAgentSlack(id)
+    return c.body(null, 204)
+  } catch (e) {
+    if (e instanceof SlackConfigError) return c.json({ error: e.message }, 503)
+    return c.json(
+      { error: 'slack disconnect failed', detail: e instanceof Error ? e.message : String(e) },
+      500,
+    )
+  }
+})
 agentsRouter.post(
   '/:id/activate',
-  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}/activate`),
+  proxy('POST', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}/activate`),
 )
 agentsRouter.delete(
   '/:id',
-  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id'))}`),
+  proxy('DELETE', (c) => `/agents/${encodeURIComponent(c.req.param('id') ?? '')}`),
 )

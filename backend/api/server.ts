@@ -5,6 +5,7 @@ import { apiKeyAuth } from '../auth/api_key'
 import { agentRouter } from '../channels/agent/handler'
 import { agentsRouter } from '../channels/agents/handler'
 import { apiChannelRouter } from '../channels/api/handler'
+import { slackRouter } from '../channels/slack/handler'
 import { datasetRouter } from '../channels/dataset/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
@@ -30,6 +31,12 @@ app.get('/', (c) =>
 )
 
 app.get('/health', (c) => c.json({ status: 'ok' }))
+
+// Slack OAuth + events live outside the /v1/* apiKeyAuth chain because
+// Slack itself drives these requests (browser redirect for install, the
+// signed events webhook for messages). Each endpoint authenticates
+// itself: OAuth via state cookie, events via signature.
+app.route('/slack', slackRouter)
 
 // All /v1/* routes require auth and are real channels.
 app.use('/v1/*', apiKeyAuth)
