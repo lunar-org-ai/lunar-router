@@ -3370,6 +3370,46 @@ def api_chat_endpoint(
 _BEARER_RE = re.compile(r"^Bearer\s+(.+)$")
 
 
+@app.post("/api/{agent_id}/internal-run", response_model=ApiChatResponse)
+def internal_run_endpoint(
+    agent_id: str, payload: ApiChatRequest,
+) -> ApiChatResponse:
+    """Internal runtime endpoint used by trusted backends (Slack events
+    webhook, future channel handlers). NOT exposed publicly — only the
+    same-host TS gateway should hit this. Skips bearer auth because the
+    Slack-side signature already verified the request came from Slack;
+    if the TS gateway is compromised the rest of the system is too.
+
+    Activates the agent if needed, runs the pipeline, returns the result.
+    """
+    from runtime.agents.registry import activate as activate_agent
+    from runtime.agents.registry import get_agent, get_registry
+    from runtime.executor.tracing import write_trace
+    from runtime.protocols import Message
+
+    if get_agent(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
+
+    reg = get_registry()
+    if reg.active != agent_id:
+        try:
+            activate_agent(agent_id, on_activate=lambda m: _reload_live_pipeline(m.id))
+        except Exception as e:
+            logger.warning("internal_run: failed to activate %s: %s", agent_id, e)
+
+    history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
+    executor = _state["executor"]
+    _, exec_record = executor.run(payload.request, history=history)
+    trace_id = write_trace(exec_record)
+    return ApiChatResponse(
+        response=exec_record.response,
+        trace_id=trace_id,
+        duration_ms=exec_record.duration_ms,
+        success=exec_record.success,
+        error=exec_record.error,
+    )
+
+
 @app.get("/agents/{agent_id}/channels", response_model=AgentChannelsResponse)
 def list_agent_channels_endpoint(agent_id: str) -> AgentChannelsResponse:
     """Per-channel connection status for the agent (P3.3). Used by the

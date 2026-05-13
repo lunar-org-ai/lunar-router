@@ -13,10 +13,12 @@ import {
   ApiError,
   connectApiChannel,
   disconnectApiChannel,
+  disconnectSlackChannel,
   getAgentChannels,
   getAgentImprovement,
   getAgentSecrets,
   getApiChannel,
+  getSlackChannel,
   listAgents,
   putAgentImprovement,
   putAgentSecrets,
@@ -28,6 +30,7 @@ import {
   type ApiChannelConnectResponse,
   type ApiChannelStatus,
   type ImprovementConfig,
+  type SlackChannelStatus,
 } from '../api';
 
 type Tab = 'brain' | 'hands' | 'mouths' | 'keys';
@@ -716,16 +719,9 @@ const ChannelsTab = ({ agentId }: { agentId: string }) => {
       </p>
 
       <ApiChannelCard agentId={agentId} status={status?.channels.api ?? null} onChange={refresh} />
+      <SlackChannelCard agentId={agentId} onChange={refresh} />
 
       <div className="channel-coming-soon">
-        <div className="row-item" style={{ opacity: 0.6 }}>
-          <div className="ricon"><Icon name="chat" size={14} /></div>
-          <div className="rmain">
-            <div className="rname">Slack</div>
-            <div className="rmeta">OAuth flow + events handler — coming next (P3.3.2)</div>
-          </div>
-          <Tag>not yet</Tag>
-        </div>
         <div className="row-item" style={{ opacity: 0.6 }}>
           <div className="ricon"><Icon name="chat" size={14} /></div>
           <div className="rmain">
@@ -863,6 +859,149 @@ const ApiChannelCard = ({
             ENDPOINT
           </div>
           <pre className="api-channel-curl">{curl}</pre>
+        </div>
+      )}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const SlackChannelCard = ({
+  agentId,
+  onChange,
+}: {
+  agentId: string;
+  onChange: () => void | Promise<void>;
+}) => {
+  const [status, setStatus] = useState<SlackChannelStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const next = await getSlackChannel(agentId);
+      setStatus(next);
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getSlackChannel failed', e);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [agentId]);
+
+  // Slack redirects the operator back here after a successful install
+  // with ?slack_connected=<id>. Detect + refresh to flip the card.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('slack_connected') === agentId) {
+      void refresh();
+      void onChange();
+      // Clean the URL so a refresh doesn't re-trigger.
+      params.delete('slack_connected');
+      const next = params.toString();
+      window.history.replaceState(
+        {},
+        '',
+        next ? `${window.location.pathname}?${next}` : window.location.pathname,
+      );
+    }
+  }, [agentId]);
+
+  const connect = () => {
+    if (!status?.install_url) return;
+    // OAuth flow leaves the SPA and comes back via the callback's
+    // redirect to /?slack_connected=<id>. We trigger a full-page nav
+    // because Slack's authorize URL handles its own redirect chain.
+    window.location.href = status.install_url;
+  };
+
+  const disconnect = async () => {
+    if (!confirm('Disconnect Slack? The agent will stop receiving messages from this workspace.')) {
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await disconnectSlackChannel(agentId);
+      await refresh();
+      await onChange();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!status) {
+    return (
+      <div className="row-item" style={{ opacity: 0.6 }}>
+        <div className="ricon"><Icon name="chat" size={14} /></div>
+        <div className="rmain">
+          <div className="rname">Slack</div>
+          <div className="rmeta">Loading…</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!status.configured) {
+    return (
+      <div className="row-item" style={{ display: 'block' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div className="ricon"><Icon name="chat" size={14} /></div>
+          <div className="rmain" style={{ flex: 1 }}>
+            <div className="rname">Slack</div>
+            <div className="rmeta">Not configured on the backend.</div>
+          </div>
+          <Tag>setup needed</Tag>
+        </div>
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.5 }}>
+          Operator must register a Slack app and set <span className="mono">SLACK_CLIENT_ID</span>,
+          {' '}<span className="mono">SLACK_CLIENT_SECRET</span>, <span className="mono">SLACK_SIGNING_SECRET</span>,
+          {' '}and <span className="mono">PUBLIC_BASE_URL</span> on the backend. {status.detail}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`row-item ${status.connected ? 'on' : ''}`} style={{ display: 'block' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div className="ricon"><Icon name="chat" size={14} /></div>
+        <div className="rmain" style={{ flex: 1 }}>
+          <div className="rname">Slack</div>
+          <div className="rmeta">
+            {status.connected
+              ? <>Connected to <strong>{status.team_name}</strong>{status.team_id && <> · <span className="mono">{status.team_id}</span></>}</>
+              : <>Sends DMs + @mentions to this agent.</>}
+            {status.installed_at && status.connected && (
+              <> · installed {new Date(status.installed_at).toLocaleDateString()}</>
+            )}
+          </div>
+        </div>
+        {!status.connected ? (
+          <button className="btn primary sm" onClick={connect} disabled={busy}>
+            Connect Slack
+          </button>
+        ) : (
+          <button className="btn ghost sm" onClick={() => void disconnect()} disabled={busy}>
+            {busy ? 'Disconnecting…' : 'Disconnect'}
+          </button>
+        )}
+      </div>
+
+      {status.connected && status.events_url && (
+        <div className="dim" style={{ fontSize: 11.5, marginTop: 8, lineHeight: 1.6 }}>
+          Events URL (configure in Slack app's Event Subscriptions):
+          <code className="mono" style={{ marginLeft: 4, padding: '1px 6px', background: 'var(--bg-muted)', borderRadius: 3 }}>
+            {status.events_url}
+          </code>
         </div>
       )}
 
