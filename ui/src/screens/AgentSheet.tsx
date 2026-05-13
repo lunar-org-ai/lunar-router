@@ -74,13 +74,6 @@ interface Channel {
   vol: string | null;
 }
 
-interface Key {
-  id: string;
-  name: string;
-  mask: string;
-  valid: boolean;
-}
-
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'brain', label: 'Brain' },
   { id: 'hands', label: 'Hands' },
@@ -115,12 +108,6 @@ const INITIAL_CHANNELS: Channel[] = [
   { id: 'slack', name: 'Slack', desc: 'Not connected', on: false, vol: null },
 ];
 
-const INITIAL_KEYS: Key[] = [
-  { id: 'k1', name: 'Anthropic', mask: 'sk-ant-…f72a', valid: true },
-  { id: 'k2', name: 'OpenAI', mask: 'sk-…1c0d', valid: true },
-  { id: 'k3', name: 'Stripe', mask: 'sk_live_…b3', valid: true },
-];
-
 const toolIcon = (src: Tool['src']): IconName =>
   src === 'mcp' ? 'route' : src === 'builtin' ? 'sparkles' : 'code';
 
@@ -134,7 +121,6 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
   const [prompt, setPrompt] = useState(INITIAL_PROMPT);
   const [tools, setTools] = useState<Tool[]>(INITIAL_TOOLS);
   const [channels, setChannels] = useState<Channel[]>(INITIAL_CHANNELS);
-  const [keys] = useState<Key[]>(INITIAL_KEYS);
   const [drill, setDrill] = useState<Drill>(null);
   const [activeAgent, setActiveAgent] = useState<AgentSummary | null>(null);
   const [savingModel, setSavingModel] = useState(false);
@@ -370,37 +356,7 @@ export const AgentSheet = ({ onClose }: { onClose: () => void }) => {
             />
           )}
 
-          {tab === 'keys' && (
-            <div className="sheet-section">
-              <h3>API keys</h3>
-              <p className="desc">Stored encrypted. Used by the model router and tools.</p>
-              {keys.map((k) => (
-                <div className="row-item on" key={k.id}>
-                  <div className="ricon">
-                    <Icon name="shield" size={14} />
-                  </div>
-                  <div className="rmain">
-                    <div className="rname">{k.name}</div>
-                    <div className="rmeta mono">{k.mask}</div>
-                  </div>
-                  {k.valid ? (
-                    <Tag kind="success">
-                      <span className="dot" />
-                      Valid
-                    </Tag>
-                  ) : (
-                    <Tag kind="bad">
-                      <span className="dot" />
-                      Invalid
-                    </Tag>
-                  )}
-                </div>
-              ))}
-              <button className="add-btn" style={{ marginTop: 8 }}>
-                + Add API key
-              </button>
-            </div>
-          )}
+          {tab === 'keys' && activeAgent && <KeysTab agentId={activeAgent.id} />}
         </div>
         )}
       </div>
@@ -2622,6 +2578,190 @@ const WhatsAppGlyphColored = ({ size = 14 }: { size?: number }) => (
 );
 
 // ─── Hands tab (P3.4 — MCP tool integration) ────────────────────
+// ─── Keys tab — real BYOK per-agent ─────────────────────────────
+// Drives off the same /agents/<id>/secrets endpoint as the Brain tab's
+// BYOK section (P3.1), but rendered as the design's row list with
+// click-to-expand inline edit. Anthropic + OpenAI are the two
+// providers the runtime resolves today; rows are static for now and
+// gain a Save / Remove button when expanded.
+interface KeysTabProps {
+  agentId: string;
+}
+
+interface ProviderRow {
+  id: 'anthropic' | 'openai';
+  name: string;
+  placeholder: string;
+  signupHint: string;
+}
+
+const PROVIDER_ROWS: ProviderRow[] = [
+  {
+    id: 'anthropic',
+    name: 'Anthropic',
+    placeholder: 'sk-ant-api03-…',
+    signupHint: 'console.anthropic.com → Settings → API Keys',
+  },
+  {
+    id: 'openai',
+    name: 'OpenAI',
+    placeholder: 'sk-proj-…',
+    signupHint: 'platform.openai.com → API Keys',
+  },
+];
+
+const KeysTab = ({ agentId }: KeysTabProps) => {
+  const [secrets, setSecrets] = useState<AgentSecretsResponse | null>(null);
+  const [expanded, setExpanded] = useState<'anthropic' | 'openai' | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({ anthropic: '', openai: '' });
+  const [saving, setSaving] = useState<'anthropic' | 'openai' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setSecrets(await getAgentSecrets(agentId));
+    } catch (e) {
+      if (!(e instanceof ApiError)) console.warn('getAgentSecrets failed', e);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [agentId]);
+
+  const save = async (provider: 'anthropic' | 'openai') => {
+    const value = draft[provider]?.trim();
+    if (!value) {
+      setError('Paste a key first.');
+      return;
+    }
+    setSaving(provider);
+    setError(null);
+    try {
+      const body = provider === 'anthropic' ? { anthropic: value } : { openai: value };
+      const next = await putAgentSecrets(agentId, body);
+      setSecrets(next);
+      setDraft((d) => ({ ...d, [provider]: '' }));
+      setExpanded(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const remove = async (provider: 'anthropic' | 'openai') => {
+    const status = secrets?.providers[provider];
+    if (status?.source !== 'per-agent') return;
+    if (!confirm(`Remove the per-agent ${provider} key? Falls back to the global .env (if set), otherwise the agent can't call ${provider}.`)) {
+      return;
+    }
+    setSaving(provider);
+    setError(null);
+    try {
+      const body = provider === 'anthropic' ? { anthropic: '' } : { openai: '' };
+      const next = await putAgentSecrets(agentId, body);
+      setSecrets(next);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className="sheet-section">
+      <h3>API keys</h3>
+      <p className="desc">
+        Per-agent provider keys. Stored at{' '}
+        <span className="mono">agents/{agentId}/secrets.env</span> (mode 0600, gitignored).
+        Falls back to the global <span className="mono">.env</span> when a per-agent key
+        isn't set.
+      </p>
+
+      {PROVIDER_ROWS.map((p) => {
+        const status = secrets?.providers[p.id];
+        const isPerAgent = status?.source === 'per-agent';
+        const isGlobal = status?.source === 'global';
+        const isExpanded = expanded === p.id;
+        const tag: { kind: 'success' | 'warn' | 'bad'; label: string } = status?.set
+          ? isPerAgent
+            ? { kind: 'success', label: 'Per-agent' }
+            : { kind: 'warn', label: 'Global .env' }
+          : { kind: 'bad', label: 'Not set' };
+
+        return (
+          <div key={p.id} className={`row-item ${status?.set ? 'on' : ''}`} style={{ display: 'block', cursor: 'pointer' }}>
+            <div
+              style={{ display: 'flex', alignItems: 'center', gap: 12 }}
+              onClick={() => setExpanded((cur) => (cur === p.id ? null : p.id))}
+            >
+              <div className="ricon"><Icon name="shield" size={14} /></div>
+              <div className="rmain">
+                <div className="rname">{p.name}</div>
+                <div className="rmeta mono">
+                  {status?.mask ?? <span style={{ color: 'var(--fg-subtle)' }}>not set</span>}
+                </div>
+              </div>
+              <Tag kind={tag.kind}><span className="dot" />{tag.label}</Tag>
+              <Icon name={isExpanded ? 'chevronDown' : 'chevron'} size={14} />
+            </div>
+
+            {isExpanded && (
+              <div className="byok-row" style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border)' }} onClick={(e) => e.stopPropagation()}>
+                <div className="dim" style={{ fontSize: 11.5, marginBottom: 8, lineHeight: 1.5 }}>
+                  Get a key at <span className="mono">{p.signupHint}</span>.
+                  {isGlobal && (
+                    <> Currently inherited from the global <span className="mono">.env</span>; saving here overrides per-agent.</>
+                  )}
+                </div>
+                <div className="byok-row-input">
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    placeholder={isPerAgent ? `Replace ${p.name} key` : p.placeholder}
+                    value={draft[p.id] ?? ''}
+                    onChange={(e) => setDraft((d) => ({ ...d, [p.id]: e.target.value }))}
+                    disabled={saving === p.id}
+                  />
+                  <button
+                    className="btn sm primary"
+                    onClick={() => void save(p.id)}
+                    disabled={saving === p.id || !(draft[p.id]?.trim())}
+                  >
+                    {saving === p.id ? 'Saving…' : isPerAgent ? 'Rotate' : 'Save'}
+                  </button>
+                  {isPerAgent && (
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => void remove(p.id)}
+                      disabled={saving === p.id}
+                      title={`Remove the per-agent key; ${p.name} falls back to global .env`}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {error && (
+        <div className="dim" style={{ fontSize: 11.5, color: 'var(--bad-fg)', marginTop: 8 }}>
+          {error}
+        </div>
+      )}
+
+      <div className="dim" style={{ fontSize: 11.5, marginTop: 12, lineHeight: 1.5 }}>
+        More providers (Stripe, custom MCP keys) live with their respective integrations
+        in the Hands and Channels tabs.
+      </div>
+    </div>
+  );
+};
+
 const HandsTab = ({ agentId }: { agentId: string }) => {
   const [servers, setServers] = useState<MCPServer[]>([]);
   const [tools, setTools] = useState<MCPTool[]>([]);
