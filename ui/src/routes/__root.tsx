@@ -258,7 +258,10 @@ export const RootLayout = () => {
 
           <div className="sidebar-foot">
             <div className="persona-switch" title="Switch view">
-              <button className={view === 'simple' ? 'on' : ''} onClick={() => setView('simple')}>
+              <button
+                className={view !== 'technical' ? 'on' : ''}
+                onClick={() => setView('simple')}
+              >
                 Simple
               </button>
               <button
