@@ -2445,3 +2445,29 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* P2.2 — Evolution day-zero empty state (matches design's .day-zero) */
+.day-zero { text-align: left; padding: 32px 0 0; }
+.day-zero .steps {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+.day-zero .step {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--bg-elev);
+}
+.day-zero .step .n {
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: var(--bg-sunken);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 600;
+  color: var(--fg-muted);
+  margin-bottom: 10px;
+}
+.day-zero .step .name { font-weight: 500; font-size: 13.5px; margin-bottom: 4px; }
+.day-zero .step .help { font-size: 12.5px; color: var(--fg-muted); line-height: 1.5; }
