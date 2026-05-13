@@ -2367,3 +2367,81 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 .onbA-transport-cli .onbA-transport-dot { background: oklch(0.55 0.14 150); box-shadow: 0 0 0 3px oklch(0.55 0.14 150 / 0.2); }
 .onbA-transport-cli { border-color: oklch(0.55 0.14 150 / 0.3); }
 .onbA-transport-offline .onbA-transport-dot { background: var(--warn); }
+
+/* P2.0 — agent switcher dropdown */
+.agent-switcher { position: relative; display: inline-block; }
+.agent-switcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 280px;
+  background: var(--card);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 28px oklch(0.18 0.005 80 / 0.12);
+  padding: 6px;
+  z-index: 40;
+}
+.agent-switcher-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--fg-muted);
+  padding: 8px 10px 4px;
+}
+.agent-switcher-empty {
+  padding: 12px 10px;
+  font-size: 12.5px;
+  font-style: italic;
+}
+.agent-switcher-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.agent-switcher-row:hover { background: var(--muted); }
+.agent-switcher-row.on { background: var(--accent-soft); }
+.agent-switcher-row.on .agent-switcher-row-name { color: var(--accent-fg); font-weight: 600; }
+.agent-switcher-row:disabled { opacity: 0.6; cursor: progress; }
+.agent-switcher-row-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.agent-switcher-row-name { font-size: 12.5px; }
+.agent-switcher-row-sub { font-size: 11.5px; }
+.agent-switcher-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 9px 10px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  border-left: none;
+  border-right: none;
+  border-bottom: none;
+  border-radius: 0;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg);
+  text-align: left;
+}
+.agent-switcher-new:hover { background: var(--muted); }
+.agent-switcher-spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--fg);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }

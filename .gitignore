@@ -41,3 +41,8 @@ corpora/indexed/manifest.jsonl
 # Operator-curated documents may or may not be tracked; ignore by default
 corpora/ingested/
 
+# Multi-agent registry (P2.0) — each install builds its own catalog as
+# the operator runs onboarding. Top-level only so backend/channels/agents
+# and runtime/agents/ source dirs stay tracked.
+/agents/
+
