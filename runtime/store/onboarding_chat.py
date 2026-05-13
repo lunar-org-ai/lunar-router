@@ -328,7 +328,17 @@ def _call_claude_cli(messages: list[dict[str, str]]) -> str:
     """Stateless ``claude --print`` call (P1.13 path). The conversation
     history is rendered into the user prompt because each subprocess
     invocation has no memory of prior turns. Claude Code runs in the
-    server's cwd, so it can read the operator's project files."""
+    server's cwd, so it can read the operator's project files.
+
+    Env hygiene: we *strip* ``ANTHROPIC_API_KEY`` / ``ANTHROPIC_AUTH_TOKEN``
+    from the subprocess env so ``claude`` uses the operator's subscription
+    auth (OAuth on their machine) instead of falling into API mode. When
+    both an API key and a Claude Code subscription are present, the CLI
+    prefers the API key, which routes to the API account's credit
+    balance — usually empty in this codebase (the key is for the
+    runtime's generate stage, not the operator's brain). Stripping it
+    forces the subscription path.
+    """
     import subprocess
 
     convo = _render_history(messages)
@@ -347,11 +357,19 @@ def _call_claude_cli(messages: list[dict[str, str]]) -> str:
         "--append-system-prompt", SYSTEM_PROMPT,
         user_prompt,
     ]
+
+    # Subscription-first env: drop the API key so claude uses OAuth.
+    cli_env = {
+        k: v for k, v in os.environ.items()
+        if k not in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
+    }
+
     try:
         proc = subprocess.run(
             args,
             capture_output=True,
             text=True,
+            env=cli_env,
             timeout=int(os.environ.get("ONBOARDING_TURN_TIMEOUT_S", "120")),
         )
     except subprocess.TimeoutExpired as e:
