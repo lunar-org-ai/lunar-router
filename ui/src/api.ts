@@ -1165,3 +1165,36 @@ export async function deleteAgentById(id: string): Promise<void> {
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// Per-agent BYOK secrets (P3.1)
+
+export interface ProviderSecretStatus {
+  set: boolean;
+  source: 'per-agent' | 'global' | 'unset';
+  mask: string | null;
+  var: string;
+}
+
+export interface AgentSecretsResponse {
+  agent_id: string;
+  providers: Record<string, ProviderSecretStatus>;
+}
+
+export const getAgentSecrets = (id: string) =>
+  _getJson<AgentSecretsResponse>(`/v1/agents/${encodeURIComponent(id)}/secrets`);
+
+export async function putAgentSecrets(
+  id: string,
+  body: { anthropic?: string; openai?: string },
+): Promise<AgentSecretsResponse> {
+  const res = await fetch(`/v1/agents/${encodeURIComponent(id)}/secrets`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}

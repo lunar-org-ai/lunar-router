@@ -1,25 +1,29 @@
-"""prompt_strategies technique — REAL Anthropic SDK call (P1.9).
+"""prompt_strategies — real LLM call routed to Anthropic OR OpenAI (P3.1).
 
 The ``direct`` variant loads a prompt template, renders it with the
-retrieved documents + the user request, and calls
-``AnthropicClient.generate``. The routing decision picks the model
-(Haiku/Sonnet/Opus). Token usage is stashed in ``ctx.state["llm_usage"]``
-so the executor can compute exact cost instead of the char-based
-estimate it falls back to.
+retrieved documents + the user request, and calls whichever provider
+matches the model id picked by the route stage:
 
-Offline behavior — when ``ANTHROPIC_API_KEY`` is missing OR the
-``anthropic`` package can't be imported, ``execute`` populates
-``context.response`` with a clearly-marked offline marker. This keeps
-the contract intact (response is always a non-empty string with a
-positive token count) so tests that don't ship a key still run, and
-so a fresh clone of the repo works before the operator wires their
-key.
+  - ``claude-*`` / ``anthropic-*``  → Anthropic SDK
+  - ``gpt-*`` / ``o1-*`` / ``o3-*`` → OpenAI SDK
+
+Token usage is stashed in ``ctx.state["llm_usage"]`` so the executor
+can compute exact cost instead of the char-based estimate it falls
+back to.
+
+BYOK (P3.1): the key is resolved through ``runtime.agents.secrets``:
+  1) ``agents/<active_id>/secrets.env`` (operator's per-agent key)
+  2) ``os.environ`` (global ``.env`` from server startup)
+  3) None → offline marker, response still non-empty, tests still pass
+
+Offline path is intact for the cold-clone case: missing key / missing
+SDK package → clearly-marked response, no crash. Same shape the rest
+of the pipeline expects.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -42,6 +46,9 @@ class _Direct:
         self.temperature: float = float(knobs.get("temperature", 0.3))
 
     def execute(self, context: Context) -> Context:
+        from runtime.agent_context import get_active
+        from runtime.agents.secrets import get_secret, provider_for_model
+
         model = (
             context.routing.model
             if context.routing and context.routing.model
@@ -50,56 +57,149 @@ class _Direct:
         system = _load_system_prompt(self.prompt_path)
         user_msg = _render_user_message(context.documents, context.request)
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        provider = provider_for_model(model) or "anthropic"
+        agent_id = get_active()
+        api_key = get_secret(provider, agent_id=agent_id)
+
         if not api_key:
             context.response = (
-                f"[offline] No ANTHROPIC_API_KEY set — would have called "
-                f"{model} with {len(context.documents)} doc(s). "
+                f"[offline] No {provider} API key set for agent {agent_id!r} — "
+                f"would have called {model} with {len(context.documents)} doc(s). "
                 f"Request: {context.request!r}"
             )
             return context
 
         try:
-            from anthropic import Anthropic
-        except ImportError:
-            logger.warning("anthropic package not installed; running offline")
+            if provider == "openai":
+                text, usage = _call_openai(
+                    model=model,
+                    system=system,
+                    user=user_msg,
+                    api_key=api_key,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+            else:
+                text, usage = _call_anthropic(
+                    model=model,
+                    system=system,
+                    user=user_msg,
+                    api_key=api_key,
+                    max_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                )
+        except _SdkUnavailable as e:
+            logger.warning("%s SDK unavailable: %s", provider, e)
             context.response = (
-                f"[offline] anthropic SDK not installed — would have called "
+                f"[offline] {provider} SDK not installed — would have called "
                 f"{model}. Request: {context.request!r}"
             )
             return context
-
-        client = Anthropic(api_key=api_key)
-        try:
-            resp = client.messages.create(
-                model=model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=system,
-                messages=[{"role": "user", "content": user_msg}],
-            )
         except Exception as e:
-            logger.warning("Anthropic call failed (%s); returning error marker", e)
+            logger.warning("%s call failed (%s); returning error marker", provider, e)
             context.response = (
                 f"[error] LLM call failed: {type(e).__name__}: {e}. "
                 f"Request: {context.request!r}"
             )
             return context
 
-        text = ""
-        if resp.content:
-            parts = [getattr(block, "text", "") for block in resp.content]
-            text = "".join(p for p in parts if p)
         context.response = text or "(empty response)"
-
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            context.state["llm_usage"] = {
-                "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
-                "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
-                "model": model,
-            }
+        if usage:
+            context.state["llm_usage"] = {**usage, "model": model, "provider": provider}
         return context
+
+
+class _SdkUnavailable(RuntimeError):
+    """Raised when the provider's SDK isn't importable."""
+
+
+# ---------------------------------------------------------------------------
+# Anthropic
+# ---------------------------------------------------------------------------
+
+
+def _call_anthropic(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    api_key: str,
+    max_tokens: int,
+    temperature: float,
+) -> tuple[str, Optional[dict]]:
+    try:
+        from anthropic import Anthropic
+    except ImportError as e:
+        raise _SdkUnavailable("anthropic") from e
+
+    client = Anthropic(api_key=api_key)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    text = ""
+    if resp.content:
+        parts = [getattr(block, "text", "") for block in resp.content]
+        text = "".join(p for p in parts if p)
+    usage = getattr(resp, "usage", None)
+    usage_dict: Optional[dict] = None
+    if usage is not None:
+        usage_dict = {
+            "input_tokens": int(getattr(usage, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage, "output_tokens", 0) or 0),
+        }
+    return text, usage_dict
+
+
+# ---------------------------------------------------------------------------
+# OpenAI
+# ---------------------------------------------------------------------------
+
+
+def _call_openai(
+    *,
+    model: str,
+    system: str,
+    user: str,
+    api_key: str,
+    max_tokens: int,
+    temperature: float,
+) -> tuple[str, Optional[dict]]:
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise _SdkUnavailable("openai") from e
+
+    client = OpenAI(api_key=api_key)
+    resp = client.chat.completions.create(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    )
+    text = ""
+    if resp.choices:
+        text = (resp.choices[0].message.content or "")
+    usage_obj = getattr(resp, "usage", None)
+    usage_dict: Optional[dict] = None
+    if usage_obj is not None:
+        # OpenAI uses prompt_tokens / completion_tokens.
+        usage_dict = {
+            "input_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+        }
+    return text, usage_dict
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _load_system_prompt(path: str) -> str:
