@@ -22,5 +22,6 @@ from runtime.crypto.envelope import (  # noqa: F401
     encode_envelope,
 )
 from runtime.crypto.factory import select_crypto  # noqa: F401
+from runtime.crypto.fake import FakeKmsCrypto  # noqa: F401
 from runtime.crypto.noop import NoopCrypto  # noqa: F401
 from runtime.crypto.protocol import Crypto  # noqa: F401
