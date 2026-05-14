@@ -177,6 +177,46 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="opentracy-runtime", lifespan=lifespan)
 
 
+# P16.1.S5 — per-request tenant context.
+#
+# The backend gateway resolves the incoming Bearer (otrcy_live_…) to
+# a tenant_id and forwards it on the runtime fetch as ``x-tenant-id``.
+# This middleware reads that header and sets the process-global tenant
+# context for the duration of the request so every storage helper
+# (ledger writer, traces dir, agents catalog, corpora index) routes
+# under ``tenants/<tid>/…``.
+#
+# OSS mode (``OPENTRACY_MULTI_TENANT`` unset) → middleware is inert.
+# Legacy path resolvers stay on the flat project-root paths and the
+# tenant context is never touched.
+#
+# Known limitation (documented in PLAN_P16.1.md): the active tenant is
+# stored on a module global, not a contextvar. Two concurrent requests
+# in the same process can race. Single-tenant-per-process is the
+# explicit assumption for P16.1; request-scoped instances land in
+# P16.2 alongside the MCP server work.
+@app.middleware("http")
+async def tenant_middleware(request: Request, call_next):
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return await call_next(request)
+
+    from runtime import tenant_context
+    incoming = (request.headers.get("x-tenant-id") or "").strip()
+    previous = tenant_context._active
+    # Empty / missing / whitespace-only header → leave the global
+    # alone so background-task callers (set_active'd elsewhere) aren't
+    # trampled. Explicitly set only when the header carries a real value.
+    if incoming:
+        tenant_context.set_active(incoming)
+    try:
+        return await call_next(request)
+    finally:
+        # Restore previous regardless of how this request set things,
+        # so re-entrant calls (rare) don't leak context.
+        tenant_context.set_active(previous)
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     cfg = _state.get("cfg")
