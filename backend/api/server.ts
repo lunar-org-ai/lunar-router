@@ -7,6 +7,7 @@ import { tenantAuth } from '../auth/tenant'
 import { adminRouter } from '../channels/admin/handler'
 import { agentRouter } from '../channels/agent/handler'
 import { agentsRouter } from '../channels/agents/handler'
+import { mcpRouter } from '../channels/mcp/handler'
 import { apiChannelRouter } from '../channels/api/handler'
 import { slackRouter } from '../channels/slack/handler'
 import { whatsappRouter } from '../channels/whatsapp/handler'
@@ -47,6 +48,10 @@ app.route('/slack', slackRouter)
 app.route('/whatsapp', whatsappRouter)
 // Web widget — embed JS + public inbound messages. Origin-gated, no auth.
 app.route('/widget', widgetPublicRouter)
+// MCP HTTP/SSE — customer Claude Code CLI connects here with its
+// per-tenant Bearer. The runtime authenticates directly; no gateway
+// auth layer (would interfere with the per-tenant token).
+app.route('/mcp', mcpRouter)
 
 // Auth chain.
 //
