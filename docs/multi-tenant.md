@@ -221,6 +221,99 @@ points `claude mcp` at the stdio server — same tools, no Bearer needed,
 no infra needed. The HTTP transport is only mounted when
 `OPENTRACY_MULTI_TENANT=1` and returns **503 mcp_disabled** otherwise.
 
+## At-rest encryption via KMS (P16.3)
+
+Per-tenant BYOK keys (Anthropic, OpenAI) can be **envelope-encrypted
+at rest** using Google Cloud KMS. With KMS on, a filesystem snapshot
+or gcsfuse mount leak gives an attacker only ciphertext — they'd
+need both the disk image AND IAM access to the KEK to recover keys.
+
+The KMS feature is **independent of multi-tenant mode**: an operator
+can enable it for a single-tenant deploy too if they want at-rest
+encryption.
+
+### Enabling KMS
+
+1. Provision the KEK once (idempotent — done by `opentracy-infra/bootstrap/00-bootstrap-project.sh`):
+
+   ```bash
+   gcloud kms keyrings create opentracy-byok --location=us-east4
+   gcloud kms keys create byok-master \
+     --keyring=opentracy-byok --location=us-east4 \
+     --purpose=encryption
+   ```
+
+2. Grant the Cloud Run service account encrypt + decrypt on the key:
+
+   ```bash
+   gcloud kms keys add-iam-policy-binding byok-master \
+     --keyring=opentracy-byok --location=us-east4 \
+     --member="serviceAccount:opentracy-runtime@${PROJECT}.iam.gserviceaccount.com" \
+     --role=roles/cloudkms.cryptoKeyEncrypterDecrypter
+   ```
+
+3. Set the env var on the runtime:
+
+   ```bash
+   export OPENTRACY_KMS_KEY_NAME=projects/${PROJECT}/locations/us-east4/keyRings/opentracy-byok/cryptoKeys/byok-master
+   ```
+
+4. Install the optional dep:
+
+   ```bash
+   pip install opentracy-new-mode[kms]
+   ```
+
+5. Migrate any existing plaintext secrets:
+
+   ```bash
+   # Dry-run first
+   uv run python -m tools.migrate_secrets_to_kms --dry-run
+
+   # Then for real, deleting plaintext after a successful encrypt
+   uv run python -m tools.migrate_secrets_to_kms --delete-plaintext
+   ```
+
+### What gets encrypted
+
+Only **per-agent secrets files** — `tenants/<tid>/agents/<aid>/secrets.env`
+becomes `tenants/<tid>/agents/<aid>/secrets.enc.json` after migration.
+
+Each `.enc.json` file is a self-contained envelope:
+
+```json
+{
+  "v": 1,
+  "kek": "projects/<…>/cryptoKeys/byok-master",
+  "kek_version": 3,
+  "nonce_b64": "<12 bytes>",
+  "wrapped_dek_b64": "<KMS-wrapped DEK>",
+  "ciphertext_b64": "<AES-256-GCM ciphertext>"
+}
+```
+
+A fresh 32-byte DEK is generated locally per file; only the wrapped
+DEK ever leaves the runtime process. AES-256-GCM (via the audited
+`cryptography.hazmat` library) protects the dotenv body.
+
+Other per-agent state (`onboarding.json`, `integrations/<channel>.json`,
+`improvement.yaml`, etc) stays plaintext — they hold non-secret
+configuration. If a channel integration carries its own signing
+secret (Slack, Twilio), encrypting THAT is a follow-up scope.
+
+### Threat model
+
+✅ At-rest leak (disk image, gcsfuse mount, bucket snapshot): ciphertext only.
+❌ In-memory leak: decrypted keys are in process memory before the LLM SDK uses them. Anyone with process memory access already has full attack surface.
+❌ KMS misconfiguration: wrong key version, IAM removed mid-flight, KMS quota exceeded → the runtime fails closed (decrypt error raises, not silent empty dict).
+
+### Reverse migration (rollback)
+
+`tools/migrate_secrets_to_kms.py` deliberately has no reverse mode —
+moving back to plaintext is a security regression that should be a
+conscious operator decision with an audit log entry. The procedure
+lives in the `opentracy-infra` runbook.
+
 ## Known limitations
 
 - ~~**Singleton state**: the active tenant lives on a module global, not
@@ -228,6 +321,12 @@ no infra needed. The HTTP transport is only mounted when
   race. P16.1 explicitly assumes single-tenant-per-process; P16.2 fixes
   via request-scoped executors.~~ Fixed in P16.2: `tenant_context`
   now uses `contextvars.ContextVar` for proper per-request isolation.
+- **No KMS key rotation** yet. The runtime stamps `kek_version` on
+  every envelope but doesn't re-encrypt when KMS rotates the primary
+  version. Handling rotation cleanly is a P16.3.1 follow-up.
+- **DEK caching**: every read of a per-tenant secret = one
+  `kms.decrypt` call. At reasonable traffic this is fine; under heavy
+  load we'll want an in-process LRU keyed by `(kek, kek_version, wrapped_dek_hash)`.
 - **Channel proxies**: only the `agents` channel handler currently
   threads `x-tenant-id` to the runtime. The rest fall back to `_default`
   on the runtime side. They get migrated in P16.2 when real multi-tenant

@@ -12,6 +12,10 @@ dependencies = [
     "anthropic>=0.40",
     "openai>=1.40",
     "duckdb>=1.1",
+    # AES-GCM helpers in runtime/crypto/envelope.py. Currently
+    # comes in transitively via several other deps, but we use it
+    # directly so declare it explicitly. Tiny binary, audited primitives.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +34,11 @@ router = [
     "scikit-learn>=1.5",
     "sentence-transformers>=3.0",
 ]
+# KMS envelope encryption for per-tenant BYOK (P16.3). Activated by
+# setting OPENTRACY_KMS_KEY_NAME in env; OSS local installs that stick
+# with plaintext secrets.env don't need this. Adds ~20MB of Google
+# Cloud SDK transitive deps.
+kms = ["google-cloud-kms>=2.20"]
 
 [build-system]
 requires = ["hatchling"]
