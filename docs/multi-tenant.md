@@ -77,6 +77,24 @@ Format: `otrcy_live_<32 char base32>` (160 bits entropy).
 Stored as `sha256(token)` on disk — the plaintext is shown once at
 mint time and never persisted. Gates **everything else** on `/v1/*`.
 
+### From the UI (P16.4)
+
+Easier than curl: open the UI in multi-tenant mode and the sidebar
+shows a **Tenants** entry under "Technical" (operator-only;
+hidden in OSS). From there:
+
+- "+ New tenant" — opens a sheet with name + optional slug + description
+- Click any tenant — drill-in with the tokens list
+- "Mint token" in the drill-in — issues a new token + shows the
+  plaintext ONCE on a banner with a copy-to-clipboard button. After
+  dismiss the value is gone (only the hash prefix stays on disk).
+- Per-token "Revoke" with confirm
+- "Delete tenant" at the bottom (refused for `_default`)
+
+The UI hits the same `/v1/admin/tenants/*` routes documented below.
+
+### From the CLI
+
 ```bash
 ADMIN=$BACKEND_API_KEYS
 
