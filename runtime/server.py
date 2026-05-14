@@ -126,6 +126,21 @@ async def lifespan(app: FastAPI):
     if loaded:
         logger.info(".env loaded: %d key(s)", len(loaded))
 
+    # P16.1 — migrate the legacy single-tenant layout under
+    # ``tenants/_default/`` and seed the tenant registry. Idempotent;
+    # no-op after first boot. Runs BEFORE the agent bootstrap so the
+    # symlinks at the project root resolve to the new location.
+    from runtime.tenant_context import set_active as _set_active_tenant
+    from runtime.tenants.bootstrap import migrate_legacy_to_default
+    from runtime.tenants.registry import (
+        ensure_bootstrapped as _ensure_tenants_bootstrapped,
+    )
+    migrated = migrate_legacy_to_default()
+    if migrated:
+        logger.info("migrated legacy layout to tenants/_default/")
+    _ensure_tenants_bootstrapped()
+    _set_active_tenant("_default")
+
     # P2.0 — ensure multi-agent registry exists. On first run this
     # migrates the legacy ``agent/`` dir to ``agents/_default/`` and
     # writes ``agents/registry.json`` pointing at it. P2.1 also moves
