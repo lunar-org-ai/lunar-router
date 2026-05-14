@@ -156,12 +156,78 @@ Internal (not on public surface):
 |---|---|---|
 | `POST` | `/admin/tokens/resolve` | called by the backend's tenantAuth; not exposed via the gateway. |
 
-## Known limitations (P16.1)
+## MCP HTTP/SSE transport (P16.2)
 
-- **Singleton state**: the active tenant lives on a module global, not
+Customer Claude Code CLIs connect to the hosted runtime via the
+official MCP HTTP transports. The exact same 10 introspection tools
+that OSS local users see over stdio are available here, but gated by
+the per-tenant Bearer.
+
+### Endpoints
+
+| Transport | Endpoint | Notes |
+|---|---|---|
+| Streamable HTTP (modern) | `POST /mcp/` | One endpoint; client POSTs JSON-RPC, server responds with JSON or an SSE stream depending on `Accept`. |
+| SSE (legacy) | `GET /mcp/sse` + `POST /mcp/messages/<id>` | Older Claude Code builds may need this. |
+
+### Auth
+
+Every MCP request must carry the per-tenant Bearer header — the same
+`otrcy_live_<…>` token used for the REST surface:
+
+```
+Authorization: Bearer otrcy_live_<32-char base32>
+```
+
+The runtime resolves the token before any MCP handshake runs. Missing
+or wrong-shape tokens return **401 unauthorized** with a JSON body;
+the SDK transport is never reached.
+
+### Client setup (Claude Code)
+
+```bash
+claude mcp add opentracy \
+  --transport http \
+  --header "Authorization: Bearer otrcy_live_aBcD…" \
+  https://api.opentracy.cloud/mcp/
+```
+
+Or for an older Claude Code build that needs SSE:
+
+```bash
+claude mcp add opentracy \
+  --transport sse \
+  --header "Authorization: Bearer otrcy_live_aBcD…" \
+  https://api.opentracy.cloud/mcp/sse
+```
+
+After `claude` restarts, the 10 tools (`list_recent_promotions`,
+`get_lesson`, `router_health_check`, etc) appear in Claude Code's
+tool palette and read **only** that tenant's data.
+
+### Tools exposed
+
+Same set as the OSS local stdio server (`harness/introspection/tools.py`):
+
+- `list_recent_promotions`, `list_recent_rollbacks`, `get_lesson`
+- `get_day_epoch`, `list_predictions`, `list_available_epochs`
+- `router_health_check`, `propose_router_retrain`
+- `dataset_health_check`, `propose_dataset_curation`
+
+### What if I'm running OSS?
+
+Then you don't need any of this. `.mcp.json` at the repo root already
+points `claude mcp` at the stdio server — same tools, no Bearer needed,
+no infra needed. The HTTP transport is only mounted when
+`OPENTRACY_MULTI_TENANT=1` and returns **503 mcp_disabled** otherwise.
+
+## Known limitations
+
+- ~~**Singleton state**: the active tenant lives on a module global, not
   a contextvar. Two concurrent requests in the same Python process can
   race. P16.1 explicitly assumes single-tenant-per-process; P16.2 fixes
-  via request-scoped executors.
+  via request-scoped executors.~~ Fixed in P16.2: `tenant_context`
+  now uses `contextvars.ContextVar` for proper per-request isolation.
 - **Channel proxies**: only the `agents` channel handler currently
   threads `x-tenant-id` to the runtime. The rest fall back to `_default`
   on the runtime side. They get migrated in P16.2 when real multi-tenant
