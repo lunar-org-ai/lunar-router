@@ -1,0 +1,50 @@
+# Docker build context filters for runtime + backend images (P16.5).
+# Keep build context small; secrets out of images.
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+
+# Node
+**/node_modules/
+ui/dist/
+backend/dist/
+
+# Operator-local state that the runtime will regenerate at startup OR
+# that lives in the gcsfuse-mounted /data volume in production.
+.harness/
+agents/
+tenants/
+ledger/
+traces/
+corpora/indexed/
+corpora/ingested/
+evals/reports/
+
+# Local secrets — never into images. Per-tenant + admin keys live in
+# Secret Manager and KMS, not on disk.
+.env
+.env.*
+*.env
+!agent/.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Plan + roadmap markdown — useful in repo, useless in container.
+PLAN_*.md
+ROADMAP_*.md
