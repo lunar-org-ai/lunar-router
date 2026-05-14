@@ -140,6 +140,12 @@ def create_tenant(
 
     if slug:
         tenant_id = slug.strip()
+        # Reserved check first so the operator gets a precise error
+        # ("_default is reserved") rather than a regex-flavored one.
+        # _RESERVED_IDS all start with underscore today, so they'd
+        # fail the regex too — but the error message matters.
+        if tenant_id in _RESERVED_IDS:
+            raise ValueError(f"tenant id {tenant_id!r} is reserved")
         # Strict: case-sensitive match. Operators are expected to pass a
         # well-formed slug; auto-slugs from a free-form name lowercase
         # via _allocate_slug. Mixing both modes silently is confusing.
@@ -147,8 +153,6 @@ def create_tenant(
             raise ValueError(
                 f"invalid slug {tenant_id!r}: must match {_SLUG_RE.pattern}"
             )
-        if tenant_id in _RESERVED_IDS:
-            raise ValueError(f"tenant id {tenant_id!r} is reserved")
         if registry.get(tenant_id) is not None:
             raise ValueError(f"tenant {tenant_id!r} already exists")
     else:

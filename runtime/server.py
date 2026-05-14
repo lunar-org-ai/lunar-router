@@ -4232,6 +4232,183 @@ def update_agent_endpoint(agent_id: str, payload: AgentUpdateRequest) -> AgentSu
     return _summarize(meta, active_id=get_registry().active)
 
 
+# ---------------------------------------------------------------------------
+# P16.1 — Admin tenants API
+#
+# These routes are operator-only. The backend gateway mounts them under
+# /v1/admin/* and gates them with the global admin Bearer key
+# (BACKEND_API_KEYS env), separate from the per-tenant otrcy_live_…
+# tokens that gate everything else.
+#
+# /admin/tokens/resolve is used by the backend's tenantAuth middleware
+# to map an incoming Bearer to a tenant_id. It's listed here rather
+# than at the public surface so it can't be reached without admin auth.
+# ---------------------------------------------------------------------------
+
+
+class TenantSummary(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+    created_at: str
+    updated_at: str
+
+
+class TenantListResponse(BaseModel):
+    tenants: list[TenantSummary]
+
+
+class TenantCreateRequest(BaseModel):
+    name: str
+    slug: Optional[str] = None
+    description: str = ""
+
+
+class TokenSummary(BaseModel):
+    hash_prefix: str
+    label: str
+    created_at: str
+    last_used_at: Optional[str] = None
+
+
+class TokenListResponse(BaseModel):
+    tenant_id: str
+    tokens: list[TokenSummary]
+
+
+class TokenMintRequest(BaseModel):
+    label: str = ""
+
+
+class TokenMintResponse(BaseModel):
+    """Plaintext returned ONCE. ``display`` exists so UIs can render a
+    visible 'copy this — it will not be shown again' affordance without
+    inspecting field types."""
+
+    token: str
+    record: TokenSummary
+    display: str = "show_once"
+
+
+class TokenResolveRequest(BaseModel):
+    token: str
+
+
+class TokenResolveResponse(BaseModel):
+    tenant_id: str
+
+
+def _summarize_tenant(meta) -> TenantSummary:
+    return TenantSummary(
+        id=meta.id,
+        name=meta.name,
+        description=meta.description,
+        created_at=meta.created_at,
+        updated_at=meta.updated_at,
+    )
+
+
+def _summarize_token(rec) -> TokenSummary:
+    return TokenSummary(
+        hash_prefix=rec.hash_prefix,
+        label=rec.label,
+        created_at=rec.created_at,
+        last_used_at=rec.last_used_at,
+    )
+
+
+@app.get("/admin/tenants", response_model=TenantListResponse)
+def list_tenants_endpoint() -> TenantListResponse:
+    from runtime.tenants.registry import list_tenants
+    reg = list_tenants()
+    return TenantListResponse(tenants=[_summarize_tenant(t) for t in reg.tenants])
+
+
+@app.post("/admin/tenants", response_model=TenantSummary, status_code=201)
+def create_tenant_endpoint(payload: TenantCreateRequest) -> TenantSummary:
+    from runtime.tenants.registry import create_tenant
+    try:
+        meta = create_tenant(
+            payload.name,
+            slug=payload.slug,
+            description=payload.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _summarize_tenant(meta)
+
+
+@app.delete("/admin/tenants/{tenant_id}", status_code=204)
+def delete_tenant_endpoint(tenant_id: str) -> Response:
+    from runtime.tenants.registry import delete_tenant
+    try:
+        delete_tenant(tenant_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(status_code=204)
+
+
+@app.get("/admin/tenants/{tenant_id}/tokens", response_model=TokenListResponse)
+def list_tenant_tokens_endpoint(tenant_id: str) -> TokenListResponse:
+    from runtime.tenants.registry import get_tenant
+    from runtime.tenants.tokens import list_tokens
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    return TokenListResponse(
+        tenant_id=tenant_id,
+        tokens=[_summarize_token(r) for r in list_tokens(tenant_id)],
+    )
+
+
+@app.post(
+    "/admin/tenants/{tenant_id}/tokens",
+    response_model=TokenMintResponse,
+    status_code=201,
+)
+def mint_tenant_token_endpoint(
+    tenant_id: str, payload: TokenMintRequest
+) -> TokenMintResponse:
+    from runtime.tenants.registry import get_tenant
+    from runtime.tenants.tokens import mint_token
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    plaintext, record = mint_token(tenant_id, payload.label)
+    return TokenMintResponse(token=plaintext, record=_summarize_token(record))
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/tokens/{hash_prefix}",
+    status_code=204,
+)
+def revoke_tenant_token_endpoint(tenant_id: str, hash_prefix: str) -> Response:
+    from runtime.tenants.registry import get_tenant
+    from runtime.tenants.tokens import revoke_token
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    if not revoke_token(tenant_id, hash_prefix):
+        raise HTTPException(
+            status_code=404, detail=f"token_not_found: {hash_prefix}"
+        )
+    return Response(status_code=204)
+
+
+@app.post("/admin/tokens/resolve", response_model=TokenResolveResponse)
+def resolve_token_endpoint(payload: TokenResolveRequest) -> TokenResolveResponse:
+    """Backend's tenantAuth middleware calls this on every authenticated
+    request. Returns the tenant_id or 401 if the token is unknown.
+
+    Kept under /admin so it can't be reached without the operator
+    admin Bearer — preventing tenant enumeration via dictionary attacks
+    against the public surface."""
+    from runtime.tenants.tokens import resolve_token
+    tid = resolve_token(payload.token)
+    if tid is None:
+        raise HTTPException(status_code=401, detail="invalid_token")
+    return TokenResolveResponse(tenant_id=tid)
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)
