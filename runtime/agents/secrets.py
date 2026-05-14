@@ -52,8 +52,13 @@ KNOWN_PROVIDERS = tuple(PROVIDERS.keys())
 
 
 def _secrets_path(agent_id: str, *, root: Optional[Path] = None) -> Path:
-    base = Path(root) if root is not None else Path("agents")
-    return base / agent_id / "secrets.env"
+    if root is not None:
+        return Path(root) / agent_id / "secrets.env"
+    try:
+        from runtime.agents import registry as _reg
+        return _reg.agents_root() / agent_id / "secrets.env"
+    except Exception:
+        return Path("agents") / agent_id / "secrets.env"
 
 
 # ---------------------------------------------------------------------------

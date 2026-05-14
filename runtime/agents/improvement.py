@@ -70,12 +70,13 @@ class ImprovementConfig:
 def _path(agent_id: str, *, root: Optional[Path] = None) -> Path:
     if root is not None:
         return Path(root) / agent_id / _FILENAME
-    # Honor the registry's root so tests that monkeypatch
+    # Honor the registry's resolved root so tests that monkeypatch
     # ``runtime.agents.registry._DEFAULT_ROOT`` to tmp also redirect
-    # improvement.yaml reads/writes without separate patching.
+    # improvement.yaml reads/writes without separate patching, and
+    # so multi-tenant mode (P16.1) routes through tenants/<active>/.
     try:
         from runtime.agents import registry as _reg
-        return _reg._DEFAULT_ROOT / agent_id / _FILENAME
+        return _reg.agents_root() / agent_id / _FILENAME
     except Exception:
         return Path("agents") / agent_id / _FILENAME
 

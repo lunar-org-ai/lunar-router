@@ -72,7 +72,7 @@ def ensure_bootstrapped(
 
     Returns the registry in its post-bootstrap state.
     """
-    root = Path(root) if root is not None else _DEFAULT_ROOT
+    root = _resolve_root(root)
     live = Path(live_dir) if live_dir is not None else _LIVE_AGENT_DIR
     project = Path(project_root) if project_root is not None else Path.cwd()
     root.mkdir(parents=True, exist_ok=True)
@@ -111,6 +111,17 @@ def ensure_bootstrapped(
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
+
+
+def agents_root() -> Path:
+    """Effective filesystem root for the agents catalog right now.
+
+    Public surface for sibling modules (``channels``, ``improvement``,
+    ``mcp``) that previously read the ``_DEFAULT_ROOT`` constant
+    directly. In multi-tenant mode this routes through the active
+    tenant; in OSS mode it returns the legacy ``agents/`` path.
+    """
+    return _resolve_root(None)
 
 
 def list_agents(*, root: Optional[Path] = None) -> list[AgentMetadata]:
@@ -463,7 +474,26 @@ def _replace_tree(src: Path, dst: Path) -> None:
 
 
 def _resolve_root(root: Optional[Path]) -> Path:
-    return Path(root) if root is not None else _DEFAULT_ROOT
+    """Pick the on-disk root for the agents registry.
+
+    Resolution order:
+      1. Explicit ``root`` argument — always wins (tests use this).
+      2. If multi-tenant mode is ON (env ``OPENTRACY_MULTI_TENANT=1``),
+         route through ``tenants/<active>/agents/`` — the ASGI tenant
+         middleware sets ``active`` per-request; when nothing is set
+         (background tasks, lifespan startup), ``get_active()`` falls
+         back to ``_default``.
+      3. Otherwise (OSS local default) → ``_DEFAULT_ROOT`` at the
+         project root, unchanged from pre-P16.1 behavior.
+    """
+    if root is not None:
+        return Path(root)
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if is_multi_tenant_enabled():
+        from runtime.tenant_context import get_active
+        from runtime.tenants.registry import get_tenant_dir
+        return get_tenant_dir(get_active()) / "agents"
+    return _DEFAULT_ROOT
 
 
 def _load_registry(root: Path) -> Registry:

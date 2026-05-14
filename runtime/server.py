@@ -126,20 +126,27 @@ async def lifespan(app: FastAPI):
     if loaded:
         logger.info(".env loaded: %d key(s)", len(loaded))
 
-    # P16.1 — migrate the legacy single-tenant layout under
-    # ``tenants/_default/`` and seed the tenant registry. Idempotent;
-    # no-op after first boot. Runs BEFORE the agent bootstrap so the
-    # symlinks at the project root resolve to the new location.
-    from runtime.tenant_context import set_active as _set_active_tenant
-    from runtime.tenants.bootstrap import migrate_legacy_to_default
-    from runtime.tenants.registry import (
-        ensure_bootstrapped as _ensure_tenants_bootstrapped,
-    )
-    migrated = migrate_legacy_to_default()
-    if migrated:
-        logger.info("migrated legacy layout to tenants/_default/")
-    _ensure_tenants_bootstrapped()
-    _set_active_tenant("_default")
+    # P16.1 — multi-tenant migration runs ONLY when the hosted/infra
+    # mode is enabled (OPENTRACY_MULTI_TENANT=1). OSS local users
+    # never see this — their layout stays flat at the project root
+    # (agents/, ledger/, traces/, corpora/) and the path resolvers
+    # default to that.
+    #
+    # When enabled, this moves the legacy single-tenant layout under
+    # ``tenants/_default/``, drops back-compat symlinks at the
+    # project root, and seeds ``tenants/_registry.json``. Idempotent;
+    # no-op after first boot. We deliberately do NOT ``set_active(...)``
+    # here — the ASGI middleware (P16.1.S5) sets it per-request.
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if is_multi_tenant_enabled():
+        from runtime.tenants.bootstrap import migrate_legacy_to_default
+        from runtime.tenants.registry import (
+            ensure_bootstrapped as _ensure_tenants_bootstrapped,
+        )
+        migrated = migrate_legacy_to_default()
+        if migrated:
+            logger.info("migrated legacy layout to tenants/_default/")
+        _ensure_tenants_bootstrapped()
 
     # P2.0 — ensure multi-agent registry exists. On first run this
     # migrates the legacy ``agent/`` dir to ``agents/_default/`` and

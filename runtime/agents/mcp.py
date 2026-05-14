@@ -91,7 +91,7 @@ def _path(agent_id: str, *, root: Optional[Path] = None) -> Path:
         return Path(root) / agent_id / _FILENAME
     try:
         from runtime.agents import registry as _reg
-        return _reg._DEFAULT_ROOT / agent_id / _FILENAME
+        return _reg.agents_root() / agent_id / _FILENAME
     except Exception:
         return Path("agents") / agent_id / _FILENAME
 

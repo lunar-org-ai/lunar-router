@@ -33,16 +33,32 @@ def _agent_partition() -> str:
     return get_active()
 
 
+def _ledger_root() -> Path:
+    """Effective ledger root for the current request.
+
+    OSS mode (default) → legacy ``ledger/`` at project root.
+    Infra mode (``OPENTRACY_MULTI_TENANT=1``) → ``tenants/<active>/ledger/``
+    so each tenant's audit trail stays isolated. Falls back to
+    ``_default`` when no tenant context is set (background tasks,
+    boot-time writes)."""
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return _LEDGER_ROOT
+    from runtime.tenant_context import get_active as _get_tenant
+    from runtime.tenants.registry import get_tenant_dir
+    return get_tenant_dir(_get_tenant()) / "ledger"
+
+
 def _entries_dir_for(agent_id: Optional[str] = None) -> Path:
-    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "entries"
+    return _ledger_root() / (agent_id or _agent_partition()) / "entries"
 
 
 def _lessons_dir_for(agent_id: Optional[str] = None) -> Path:
-    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "lessons"
+    return _ledger_root() / (agent_id or _agent_partition()) / "lessons"
 
 
 def _decisions_dir_for(agent_id: Optional[str] = None) -> Path:
-    return _LEDGER_ROOT / (agent_id or _agent_partition()) / "decisions"
+    return _ledger_root() / (agent_id or _agent_partition()) / "decisions"
 
 
 # Back-compat aliases — preserved so existing tests that monkeypatch

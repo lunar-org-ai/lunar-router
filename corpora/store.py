@@ -40,6 +40,22 @@ MANIFEST_FILENAME = "manifest.jsonl"
 VECTORS_FILENAME = "vectors.npy"  # numpy fallback path
 
 
+def _corpus_root(root: Optional[Path]) -> Path:
+    """Pick the effective root. Explicit ``root`` always wins (tests).
+
+    OSS mode → legacy ``corpora/indexed/`` at project root.
+    Infra mode (``OPENTRACY_MULTI_TENANT=1``) → ``tenants/<active>/corpora/indexed/``.
+    """
+    if root is not None:
+        return Path(root)
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return _DEFAULT_ROOT
+    from runtime.tenant_context import get_active as _get_tenant
+    from runtime.tenants.registry import get_tenant_dir
+    return get_tenant_dir(_get_tenant()) / "corpora" / "indexed"
+
+
 @dataclass
 class CorpusHit:
     chunk_id: str
@@ -122,7 +138,7 @@ class CorpusStore:
     @classmethod
     def load(cls, root: Optional[Path] = None) -> "CorpusStore":
         """Open the persisted index. Returns an empty store if missing."""
-        root = Path(root) if root is not None else _DEFAULT_ROOT
+        root = _corpus_root(root)
         manifest_path = root / MANIFEST_FILENAME
         index_path = root / INDEX_FILENAME
         vectors_path = root / VECTORS_FILENAME

@@ -14,6 +14,7 @@ Public surface:
     the legacy single-tenant layout under ``tenants/_default/``.
 """
 
+from runtime.tenants.feature import is_multi_tenant_enabled  # noqa: F401
 from runtime.tenants.registry import (  # noqa: F401 (re-export)
     create_tenant,
     delete_tenant,

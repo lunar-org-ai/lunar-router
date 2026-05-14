@@ -42,7 +42,7 @@ def _integrations_dir(agent_id: str, *, root: Optional[Path] = None) -> Path:
     if root is None:
         try:
             from runtime.agents import registry as _reg
-            root = _reg._DEFAULT_ROOT
+            root = _reg.agents_root()
         except Exception:
             root = Path("agents")
     return root / agent_id / "integrations"
@@ -199,7 +199,7 @@ def find_agent_by_channel(
     """
     try:
         from runtime.agents import registry as _reg
-        rroot = root or _reg._DEFAULT_ROOT
+        rroot = root or _reg.agents_root()
     except Exception:
         rroot = root or Path("agents")
     if not rroot.is_dir():

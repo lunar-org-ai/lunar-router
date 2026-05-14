@@ -28,10 +28,24 @@ logger = logging.getLogger(__name__)
 TRACES_DIR = Path("traces/raw")  # back-compat alias for tests
 
 
+def _traces_root() -> Path:
+    """Effective traces root for the current request.
+
+    OSS mode (default) → legacy ``traces/`` at project root.
+    Infra mode (``OPENTRACY_MULTI_TENANT=1``) → ``tenants/<active>/traces/``.
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return Path("traces")
+    from runtime.tenant_context import get_active as _get_tenant
+    from runtime.tenants.registry import get_tenant_dir
+    return get_tenant_dir(_get_tenant()) / "traces"
+
+
 def _traces_dir_for(agent_id: Optional[str] = None) -> Path:
-    """Resolve ``traces/<agent_id>/raw`` at call time via agent_context."""
+    """Resolve ``<traces_root>/<agent_id>/raw`` at call time."""
     from runtime.agent_context import get_active
-    return Path("traces") / (agent_id or get_active()) / "raw"
+    return _traces_root() / (agent_id or get_active()) / "raw"
 
 
 class TraceBus:

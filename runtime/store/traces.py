@@ -26,15 +26,29 @@ RAW_DIR = ROOT / "traces" / "raw"
 PARQUET_DIR = ROOT / "traces" / "parquet"
 
 
+def _traces_root() -> Path:
+    """Effective traces root for the current request.
+
+    OSS mode → ``<project>/traces/``.
+    Infra mode (``OPENTRACY_MULTI_TENANT=1``) → ``tenants/<active>/traces/``.
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return ROOT / "traces"
+    from runtime.tenant_context import get_active as _get_tenant
+    from runtime.tenants.registry import get_tenant_dir
+    return get_tenant_dir(_get_tenant()) / "traces"
+
+
 def _raw_dir() -> Path:
-    """Active-agent-scoped raw dir. P2.1: ``traces/<agent_id>/raw``."""
+    """Active-agent-scoped raw dir. P2.1: ``<traces_root>/<agent_id>/raw``."""
     from runtime.agent_context import get_active
-    return ROOT / "traces" / get_active() / "raw"
+    return _traces_root() / get_active() / "raw"
 
 
 def _parquet_dir() -> Path:
     from runtime.agent_context import get_active
-    return ROOT / "traces" / get_active() / "parquet"
+    return _traces_root() / get_active() / "parquet"
 
 
 def _connect() -> duckdb.DuckDBPyConnection:

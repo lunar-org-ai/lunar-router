@@ -12,6 +12,11 @@ def client(tmp_path, monkeypatch):
     want to exercise the /admin/tenants/* surface."""
     from fastapi.testclient import TestClient
 
+    # Multi-tenant mode ON for these tests — that's the whole point of
+    # the /admin/tenants/* surface. OSS local mode (flag off) doesn't
+    # exercise these routes.
+    monkeypatch.setenv("OPENTRACY_MULTI_TENANT", "1")
+
     # Re-route every storage helper to tmp_path so the test doesn't
     # touch the operator's real filesystem.
     monkeypatch.setattr(
