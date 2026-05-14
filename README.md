@@ -43,3 +43,13 @@ traces/  →  evals/  →  harness/proposer/  →  harness/critics/
 ## Languages
 - Python: `harness/`, `runtime/`, `evals/`, `ml/`, `techniques/`
 - TypeScript: `backend/`, `ui/`
+
+## Distribution modes
+
+| Mode | When | What's different |
+|---|---|---|
+| **OSS local** (default) | You clone this repo, run it for yourself or a single team. | Everything stays at the project root. No tenants, no admin tokens, no migration. Same as it's always been. |
+| **Hosted/infra** (`OPENTRACY_MULTI_TENANT=1`) | A managed deploy serving multiple customer orgs (driven by the private `opentracy-infra` sibling repo). | Per-tenant namespacing under `tenants/<id>/…`, per-tenant Bearer tokens, separate admin gate. See [docs/multi-tenant.md](docs/multi-tenant.md). |
+
+The OSS distribution is the default. Hosted-only features are gated by
+the env var and add zero overhead when off.
