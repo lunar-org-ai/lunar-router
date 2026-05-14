@@ -9,6 +9,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 import { SlackConfigError } from '../slack/config'
 import {
   deleteAgentSlackCredentials,
@@ -44,9 +45,12 @@ const proxy = (
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
     const writeMethod = method === 'POST' || method === 'PATCH' || method === 'PUT'
+    const headers = writeMethod
+      ? { 'content-type': 'application/json', ...proxyHeaders(c) }
+      : proxyHeaders(c)
     const res = await fetch(RUNTIME_URL + pathBuilder(c), {
       method,
-      headers: writeMethod ? { 'content-type': 'application/json' } : undefined,
+      headers,
       body: writeMethod ? JSON.stringify(body ?? {}) : undefined,
       signal: controller.signal,
     })
