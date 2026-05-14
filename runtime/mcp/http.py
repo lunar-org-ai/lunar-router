@@ -128,12 +128,25 @@ async def mcp_lifespan(state: dict[str, Any]) -> AsyncIterator[None]:
 # ---------------------------------------------------------------------------
 
 
+async def _send_503(scope: Scope, receive: Receive, send: Send) -> None:
+    """Lifespan hasn't initialized the MCP transports — OSS mode or a
+    crash before mcp_lifespan ran."""
+    body = JSONResponse(
+        {"error": "mcp_disabled", "detail": "MCP HTTP transport not enabled on this server"},
+        status_code=503,
+    )
+    await body(scope, receive, send)
+
+
 def _make_streamable_handler(state: dict[str, Any]):
     """Streamable HTTP entry point — wraps the session manager with
     Bearer auth + tenant ContextVar setup."""
 
     async def handler(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            return
+        if "mcp_session_manager" not in state:
+            await _send_503(scope, receive, send)
             return
 
         token = _extract_token(_scope_headers(scope))
@@ -161,6 +174,9 @@ def _make_sse_handlers(state: dict[str, Any]):
     async def connect(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             return
+        if "mcp_sse" not in state or "mcp_server" not in state:
+            await _send_503(scope, receive, send)
+            return
 
         token = _extract_token(_scope_headers(scope))
         tenant_id = _resolve_bearer(token)
@@ -183,6 +199,9 @@ def _make_sse_handlers(state: dict[str, Any]):
 
     async def post_message(scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
+            return
+        if "mcp_sse" not in state:
+            await _send_503(scope, receive, send)
             return
 
         token = _extract_token(_scope_headers(scope))

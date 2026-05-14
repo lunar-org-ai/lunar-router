@@ -170,11 +170,34 @@ async def lifespan(app: FastAPI):
     # synchronous write_trace path back onto async subscriber queues.
     trace_bus.attach_loop(_asyncio.get_running_loop())
     logger.info("agent %s ready (%d stages)", cfg.version, len(pipeline.stages))
+
+    # P16.2 — MCP HTTP/SSE transport. Only mounted in hosted/infra
+    # mode; OSS local users keep using stdio MCP via .mcp.json. The
+    # session manager needs its run() context active for the whole
+    # lifetime of the app, so we enter it as part of the lifespan.
+    if is_multi_tenant_enabled():
+        from runtime.mcp.http import mcp_lifespan
+        async with mcp_lifespan(_state):
+            yield
+        _state.clear()
+        return
+
     yield
     _state.clear()
 
 
 app = FastAPI(title="opentracy-runtime", lifespan=lifespan)
+
+
+# P16.2 — Mount MCP HTTP/SSE routes. The handlers read the session
+# manager + SSE transport off ``_state`` which the lifespan populates
+# during ``mcp_lifespan``. We mount unconditionally (cheap routes that
+# just shell-check ``_state``) — the lifespan only attaches the
+# transports when ``OPENTRACY_MULTI_TENANT=1``, so in OSS mode the
+# handlers see an empty dict and return 503.
+from runtime.mcp.http import build_mcp_routes as _build_mcp_routes
+from starlette.routing import Mount as _Mount
+app.router.routes.append(_Mount("/mcp", routes=_build_mcp_routes(_state)))
 
 
 # P16.1.S5 — per-request tenant context.
