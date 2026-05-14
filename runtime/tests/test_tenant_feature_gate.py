@@ -59,11 +59,11 @@ def test_agents_root_uses_legacy_when_flag_off(monkeypatch, tmp_path):
     from runtime import tenant_context
     from runtime.agents.registry import agents_root
 
-    monkeypatch.setattr(tenant_context, "_active", "acme")
+    tenant_context.set_active("acme")
     try:
         assert agents_root() == tmp_path / "agents"
     finally:
-        monkeypatch.setattr(tenant_context, "_active", None)
+        tenant_context.set_active(None)
 
 
 def test_agents_root_uses_tenant_path_when_flag_on(monkeypatch, tmp_path):
@@ -75,11 +75,11 @@ def test_agents_root_uses_tenant_path_when_flag_on(monkeypatch, tmp_path):
     from runtime import tenant_context
     from runtime.agents.registry import agents_root
 
-    monkeypatch.setattr(tenant_context, "_active", "acme")
+    tenant_context.set_active("acme")
     try:
         assert agents_root() == tmp_path / "tenants" / "acme" / "agents"
     finally:
-        monkeypatch.setattr(tenant_context, "_active", None)
+        tenant_context.set_active(None)
 
 
 def test_agents_root_falls_back_to_default_tenant_when_no_active(
