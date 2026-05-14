@@ -33,6 +33,7 @@ import { Versions } from './screens/Versions';
 import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
+import { Tenants } from './screens/Tenants';
 
 export type View = 'simple' | 'technical';
 type LessonTab = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
@@ -120,6 +121,15 @@ const datasetsRoute = createRoute({
   component: Datasets,
 });
 
+// P16.4 — Tenants admin. Hidden from the sidebar when the runtime
+// isn't in multi-tenant mode; the route stays registered so a deep
+// link survives a refresh.
+const tenantsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/tenants',
+  component: Tenants,
+});
+
 const routeTree = rootRoute.addChildren([
   evolutionRoute,
   lessonRoute,
@@ -127,6 +137,7 @@ const routeTree = rootRoute.addChildren([
   versionsRoute,
   talkRoute,
   policiesRoute,
+  tenantsRoute,
   technicalLayoutRoute.addChildren([
     tracesRoute,
     evalsRoute,

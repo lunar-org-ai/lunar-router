@@ -25,7 +25,14 @@ import { AgentSheet } from '../screens/AgentSheet';
 import { AgentSwitcher } from '../components/AgentSwitcher';
 import { Onboarding } from '../screens/Onboarding';
 import { Button } from '../components/ui/button';
-import { ApiError, getOnboardingState, listLessons, type OnboardingState } from '../api';
+import {
+  ApiError,
+  getFeatures,
+  getOnboardingState,
+  listLessons,
+  type FeatureFlags,
+  type OnboardingState,
+} from '../api';
 import { preserveSearch, type View } from '../router';
 
 interface RootContext {
@@ -47,9 +54,13 @@ interface TechNavItem {
     | '/technical/traces'
     | '/technical/evals'
     | '/technical/router'
-    | '/technical/datasets';
+    | '/technical/datasets'
+    | '/admin/tenants';
   label: string;
   icon: IconName;
+  /** Only render this nav entry when the runtime has the named feature
+   *  flag on. Undefined = always show. */
+  feature?: keyof FeatureFlags;
 }
 
 const NAV: NavItem[] = [
@@ -65,6 +76,10 @@ const TECH_NAV: TechNavItem[] = [
   { to: '/technical/evals', label: 'Eval suites', icon: 'flask' },
   { to: '/technical/router', label: 'Router config', icon: 'route' },
   { to: '/technical/datasets', label: 'Datasets', icon: 'book' },
+  // Multi-tenant admin. Only surfaces when the runtime is in
+  // OPENTRACY_MULTI_TENANT=1 mode (gated by `features.multi_tenant`
+  // in the render below).
+  { to: '/admin/tenants', label: 'Tenants', icon: 'settings', feature: 'multi_tenant' },
 ];
 
 const ACCENT = {
@@ -83,6 +98,7 @@ const ROUTE_LABEL: Record<string, string> = {
   '/technical/evals': 'Eval suites',
   '/technical/router': 'Router config',
   '/technical/datasets': 'Datasets',
+  '/admin/tenants': 'Tenants',
 };
 
 export const RootLayout = () => {
@@ -100,6 +116,13 @@ export const RootLayout = () => {
   // shell back until we know whether to render Onboarding or the routes.
   const [onboarding, setOnboarding] = useState<OnboardingState | null>(null);
   const [onboardingLoaded, setOnboardingLoaded] = useState(false);
+  // P16.4 — runtime feature flags drive which operator-only nav items
+  // surface (Tenants is hidden in OSS mode). Defaults to all-off so the
+  // sidebar doesn't flash an Admin section before the fetch resolves.
+  const [features, setFeatures] = useState<FeatureFlags>({
+    multi_tenant: false,
+    kms: false,
+  });
 
   useEffect(() => {
     document.documentElement.style.setProperty('--primary', ACCENT.primary);
@@ -138,6 +161,20 @@ export const RootLayout = () => {
       } catch (e) {
         if (!(e instanceof ApiError)) console.warn('listLessons failed', e);
       }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // P16.4 — pull deployment-mode flags from the runtime. Defensive:
+  // getFeatures returns {false, false} on any error so the rest of the
+  // shell renders even against an older backend.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const f = await getFeatures();
+      if (!cancelled) setFeatures(f);
     })();
     return () => {
       cancelled = true;
@@ -243,7 +280,7 @@ export const RootLayout = () => {
 
           <div className="sidebar-section tech-only" style={{ marginTop: 8 }}>
             <div className="sidebar-section-label">Technical</div>
-            {TECH_NAV.map((n) => (
+            {TECH_NAV.filter((n) => !n.feature || features[n.feature]).map((n) => (
               <Link
                 key={n.to}
                 to={n.to}
