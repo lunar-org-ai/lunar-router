@@ -1586,3 +1586,147 @@ export async function removeMCPServer(id: string, serverName: string): Promise<v
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Tenants admin API (P16.4)
+//
+// Operator-only — gated by the same Bearer the UI already uses for
+// every other /v1/* call. These endpoints exist only when the
+// runtime is in multi-tenant mode; otherwise they 404 / 401 and the
+// UI hides the Tenants nav based on `getFeatures()` below.
+// ---------------------------------------------------------------------------
+
+
+export interface FeatureFlags {
+  multi_tenant: boolean;
+  kms: boolean;
+}
+
+export async function getFeatures(): Promise<FeatureFlags> {
+  // Defensive fetch — if /admin/features isn't mounted (e.g. an older
+  // runtime), we return the OSS defaults so the rest of the UI keeps
+  // working instead of throwing.
+  try {
+    const res = await fetch('/v1/admin/features');
+    if (!res.ok) return { multi_tenant: false, kms: false };
+    return (await res.json()) as FeatureFlags;
+  } catch {
+    return { multi_tenant: false, kms: false };
+  }
+}
+
+
+export interface TenantSummary {
+  id: string;
+  name: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TenantListResponse {
+  tenants: TenantSummary[];
+}
+
+export async function listTenants(): Promise<TenantListResponse> {
+  const res = await fetch('/v1/admin/tenants');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as TenantListResponse;
+}
+
+export async function createTenant(payload: {
+  name: string;
+  slug?: string;
+  description?: string;
+}): Promise<TenantSummary> {
+  const res = await fetch('/v1/admin/tenants', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as TenantSummary;
+}
+
+export async function deleteTenant(tenantId: string): Promise<void> {
+  const res = await fetch(`/v1/admin/tenants/${encodeURIComponent(tenantId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
+
+
+export interface TokenSummary {
+  hash_prefix: string;
+  label: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
+export interface TokenListResponse {
+  tenant_id: string;
+  tokens: TokenSummary[];
+}
+
+export async function listTokens(tenantId: string): Promise<TokenListResponse> {
+  const res = await fetch(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/tokens`,
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as TokenListResponse;
+}
+
+export interface TokenMintResponse {
+  /** Plaintext token — shown ONCE on mint. Never returned by list. */
+  token: string;
+  record: TokenSummary;
+  /** Sentinel the backend sets so client UIs can branch on the
+   * "show once + clear after copy" affordance. */
+  display: 'show_once';
+}
+
+export async function mintToken(
+  tenantId: string,
+  label: string,
+): Promise<TokenMintResponse> {
+  const res = await fetch(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/tokens`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as TokenMintResponse;
+}
+
+export async function revokeToken(
+  tenantId: string,
+  hashPrefix: string,
+): Promise<void> {
+  const res = await fetch(
+    `/v1/admin/tenants/${encodeURIComponent(tenantId)}/tokens/${encodeURIComponent(hashPrefix)}`,
+    { method: 'DELETE' },
+  );
+  if (!res.ok && res.status !== 204) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+}

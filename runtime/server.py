@@ -4479,6 +4479,32 @@ def resolve_token_endpoint(payload: TokenResolveRequest) -> TokenResolveResponse
     return TokenResolveResponse(tenant_id=tid)
 
 
+class FeatureFlags(BaseModel):
+    multi_tenant: bool
+    kms: bool
+
+
+@app.get("/admin/features", response_model=FeatureFlags)
+def admin_features_endpoint() -> FeatureFlags:
+    """Surface the runtime's deployment-mode flags so the UI can hide
+    operator-only screens (Tenants admin) in OSS local mode without
+    relying on env vars the browser can't see."""
+    from runtime.crypto import NoopCrypto, select_crypto
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    # Defensively probe the crypto backend: if google-cloud-kms isn't
+    # installed but the env var is set, ``select_crypto()`` raises on
+    # the lazy import. Treat that as "KMS off" so the UI surface stays
+    # responsive — the operator will see the import error in logs.
+    try:
+        kms_on = not isinstance(select_crypto(), NoopCrypto)
+    except Exception:
+        kms_on = False
+    return FeatureFlags(
+        multi_tenant=is_multi_tenant_enabled(),
+        kms=kms_on,
+    )
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     uvicorn.run("runtime.server:app", host="127.0.0.1", port=8001, reload=False)

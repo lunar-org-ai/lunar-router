@@ -68,6 +68,7 @@ const proxy = (
 // to a typed helper so the call sites stay readable.
 const p = (c: Context, key: string): string => c.req.param(key) ?? ''
 
+adminRouter.get('/features', proxy('GET', () => '/admin/features'))
 adminRouter.get('/tenants', proxy('GET', () => '/admin/tenants'))
 adminRouter.post('/tenants', proxy('POST', () => '/admin/tenants'))
 adminRouter.delete(
