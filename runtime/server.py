@@ -4061,6 +4061,40 @@ _WIDGET_JS_TEMPLATE = r"""// OpenTracy Web Widget v1 — dependency-free
 # ─── Public API: external callers chat with an agent via bearer token ─────
 
 
+def _resolve_api_token_tenant(agent_id: str, token: str) -> None:
+    """Find the tenant that owns ``agents/<agent_id>/integrations/api.json``
+    with a matching token, and set it as the active tenant.
+
+    The /api/<id>/chat endpoint is gateway-public — it doesn't get
+    x-tenant-id from the backend (each ot_* token is implicitly bound
+    to one tenant via the agent it was minted for, not via a tenant
+    Bearer). We scan tenants to discover the binding once per request.
+
+    No-op in OSS mode (single-tenant root); the regular load() call
+    in the caller handles the OSS case directly.
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return
+
+    from runtime import tenant_context
+    from runtime.tenants.registry import list_tenants, get_tenant_dir
+
+    for t in list_tenants().tenants:
+        api_json = get_tenant_dir(t.id) / "agents" / agent_id / "integrations" / "api.json"
+        if not api_json.is_file():
+            continue
+        try:
+            with api_json.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("token") == token:
+            tenant_context.set_active(t.id)
+            return
+    raise HTTPException(status_code=401, detail="invalid_token")
+
+
 class ApiChatRequest(BaseModel):
     request: str
     history: Optional[list[HistoryMessage]] = None
@@ -4092,6 +4126,15 @@ def api_chat_endpoint(
     if not m:
         raise HTTPException(status_code=401, detail="missing_bearer_token")
     token = m.group(1).strip()
+
+    # /v1/api/<id>/chat is the only /v1/* route that doesn't carry an
+    # otrcy_live_* tenant Bearer (the gateway skips tenantAuth for this
+    # prefix). Without x-tenant-id every storage helper resolves under
+    # whatever tenant happened to be active on this worker last —
+    # almost always wrong. The ot_* token IS the identity, so we scan
+    # tenants for the (agent_id, token) pair and set the context to
+    # the matching tenant before any further lookups.
+    _resolve_api_token_tenant(agent_id, token)
 
     if get_agent(agent_id) is None:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")

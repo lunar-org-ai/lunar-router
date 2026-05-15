@@ -76,9 +76,15 @@ app.route('/v1/auth', authSessionRouter)
 if (isMultiTenantEnabled()) {
   app.use('/v1/admin/*', apiKeyAuth)
   app.use('/v1/*', async (c, next) => {
-    // Skip tenantAuth for /v1/admin/* (gated by apiKeyAuth above) and
-    // for /v1/auth/* (the public session exchange).
-    if (c.req.path.startsWith('/v1/admin/') || c.req.path.startsWith('/v1/auth/')) {
+    // Skip tenantAuth for /v1/admin/* (gated by apiKeyAuth above),
+    // /v1/auth/* (the public session exchange), and /v1/api/* (the
+    // per-agent public chat endpoint; it auths against the agent's
+    // own ot_* token, not a tenant Bearer).
+    if (
+      c.req.path.startsWith('/v1/admin/') ||
+      c.req.path.startsWith('/v1/auth/') ||
+      c.req.path.startsWith('/v1/api/')
+    ) {
       return next()
     }
     return tenantAuth(c, next)
