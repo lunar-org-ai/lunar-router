@@ -85,6 +85,7 @@ onboardingRouter.post('/session/say', proxy('POST', '/onboarding/session/say', S
 onboardingRouter.post('/session/decide', proxy('POST', '/onboarding/session/decide'))
 onboardingRouter.post('/session/rewind', proxy('POST', '/onboarding/session/rewind'))
 onboardingRouter.post('/session/reset', proxy('POST', '/onboarding/session/reset'))
+onboardingRouter.post('/session/save-key', proxy('POST', '/onboarding/session/save-key'))
 
 // Slack connect — stubs in Phase A; Phase C wires real OAuth.
 onboardingRouter.post('/connect/slack/begin', proxy('POST', '/onboarding/connect/slack/begin'))
