@@ -812,9 +812,33 @@ def _materialize_agent(session: Session) -> None:
     """
     if session.agent_id is not None:
         return
-    session.agent_id = _new_id("agt")
 
     channel = (session.decisions or {}).get("channel", "slack")
+
+    # Register the agent in the registry so /v1/api/<id>/chat and the
+    # widget endpoints can resolve it. Without this step the connect
+    # cards hand out tokens for a ghost id and every smoke-test returns
+    # `agent_not_found`. The registry seeds the agent dir from _default
+    # (or whatever the active seed is) so `agents/<id>/integrations/...`
+    # writes a few lines below land in a real directory.
+    purpose = (session.decisions or {}).get("purpose") or ""
+    payload = {
+        "name": purpose.strip() or "agent",
+        "prompt": purpose.strip(),
+        "model": (session.decisions or {}).get("model") or "claude-sonnet-4-6",
+        "tools": [],
+        "channels": [channel],
+    }
+    try:
+        from runtime.agents.registry import create_agent
+        meta = create_agent(payload)
+        session.agent_id = meta.id
+    except Exception as e:  # noqa: BLE001
+        # Fall through with a random id — connect cards still surface,
+        # but the channel won't actually route until the operator fixes
+        # the registry issue (most likely a tenant-context problem).
+        logger.warning("create_agent failed during onboarding: %s", e)
+        session.agent_id = _new_id("agt")
 
     if channel == "api":
         _mint_api_channel_token(session)
