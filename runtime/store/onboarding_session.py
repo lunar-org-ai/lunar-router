@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import threading
 from dataclasses import dataclass, field
@@ -350,15 +351,28 @@ def _connect_card(session: Session) -> dict[str, Any]:
             "status": status,
         }
     if channel == "api":
+        # Hostname is environment-specific. Cloud Run injects
+        # PUBLIC_BASE_URL via the runtime-{env}.yaml spec; defaults to
+        # the dev gateway for local runs. Note: until a Cloud Run
+        # domain mapping is wired for api.dev.opentracy.cloud (manual
+        # step, requires Google domain verification), this URL will
+        # 502 from the operator's browser — fall back to the direct
+        # *.run.app URL by overriding PUBLIC_BASE_URL in the spec.
+        host = os.environ.get(
+            "PUBLIC_BASE_URL", "https://api.dev.opentracy.cloud",
+        ).rstrip("/")
+        agent_id = session.agent_id or "<your-agent-id>"
+        endpoint = f"{host}/v1/api/{agent_id}/chat"
         return {
             "type": "connect_api",
-            "endpoint": "https://api.opentracy.cloud/v1/run",
+            "endpoint": endpoint,
+            "agent_id": agent_id,
             "agent_key_preview": masked,
             "curl_example": (
-                "curl https://api.opentracy.cloud/v1/run \\\n"
+                f"curl {endpoint} \\\n"
                 f"  -H 'Authorization: Bearer {masked}' \\\n"
                 "  -H 'Content-Type: application/json' \\\n"
-                "  -d '{\"message\": \"hello\"}'"
+                "  -d '{\"request\": \"hello\"}'"
             ),
             "status": status,
         }
@@ -772,43 +786,84 @@ def _model_rationale(session: Session) -> str:
 
 
 def _materialize_agent(session: Session) -> None:
-    """Create the actual agent + mint a Bearer-style key preview.
+    """Create the agent + mint the right kind of bearer for the chosen channel.
 
-    The Connect card needs to surface a real (masked) key so the user
-    can paste it into the Slack integration's install screen. We use
-    the existing tenant-token mint for parity — same plaintext shape
-    (``otrcy_live_…``), shown once, hash on disk.
+    The Connect card needs to surface a real (masked) key the user can
+    paste into the channel's setup screen. There are two token types
+    in play:
+
+    - ``otrcy_live_…`` — tenant-level bearer minted by ``runtime.tenants.tokens``.
+      Used for Slack, WhatsApp, and Web widget connects (those channels
+      authenticate via tenant context on the gateway).
+    - ``ot_…``        — API-channel-specific token minted by
+      ``runtime.agents.channels`` and persisted to
+      ``agents/<id>/integrations/api.json``. The public ``/v1/api/{agent_id}/chat``
+      endpoint validates against THIS token exclusively. Tenant
+      bearers won't be accepted by the API channel.
+
+    We mint based on ``session.decisions["channel"]`` so the card
+    surfaces the right thing for the user to paste.
     """
     if session.agent_id is not None:
         return
-    # Allocate an agent id — we don't import the agents registry
-    # directly here to keep the test surface small. Phase C will
-    # wire this to a proper agent creation call.
     session.agent_id = _new_id("agt")
 
-    # Mint a real per-tenant token so the key the user pastes into
-    # Slack is one the runtime will accept. We only persist the
-    # *preview* (first 11 + last 4 chars masked) in the session
-    # file — plaintext goes to the UI via this turn and is gone after.
+    channel = (session.decisions or {}).get("channel", "slack")
+
+    if channel == "api":
+        _mint_api_channel_token(session)
+    else:
+        _mint_tenant_token(session)
+
+
+def _mint_tenant_token(session: Session) -> None:
+    """Mint an ``otrcy_live_*`` tenant bearer for Slack / WhatsApp / Web."""
     try:
         from runtime.tenants.tokens import mint_token
         from runtime.tenant_context import get_active
 
         tenant_id = get_active()
-        token, _record = mint_token(tenant_id, label=f"slack-onboarding-{session.agent_id}")
-        # token is "otrcy_live_<32 base32>"; mask the middle 24
-        # chars and keep the last 4 visible.
+        token, _record = mint_token(
+            tenant_id,
+            label=f"onboarding-{session.agent_id}",
+        )
         if len(token) >= 16:
             head = token[:11]   # "otrcy_live_"
             tail = token[-4:]
             session.agent_key_preview = f"{head}••••••••••••{tail}"
         else:
             session.agent_key_preview = token
-        # Carry the plaintext only on the *current* connect card so
-        # the UI can copy-on-reveal once. The card is re-built from
-        # the session on the next read, which only has the preview —
-        # so the plaintext doesn't survive a refresh.
+        # Carry the plaintext ONLY on the current connect card. The
+        # session file persists the masked preview only — the plaintext
+        # doesn't survive a page refresh.
         session.slack["agent_key_plaintext_once"] = token
     except Exception as e:  # noqa: BLE001
-        logger.warning("could not mint onboarding token: %s", e)
+        logger.warning("could not mint tenant onboarding token: %s", e)
         session.agent_key_preview = "ot_live_••••••••••••••••"
+
+
+def _mint_api_channel_token(session: Session) -> None:
+    """Mint an ``ot_*`` API-channel token + persist to integrations/api.json.
+
+    Bypasses the HTTP layer (no roundtrip to ``/agents/{id}/channels/api/connect``)
+    because we're already in-process. We replicate the same on-disk
+    shape the connect endpoint produces so subsequent calls into
+    ``/v1/api/{agent_id}/chat`` validate cleanly.
+    """
+    try:
+        import secrets as _secrets
+
+        from runtime.agents.channels import _mask_token, save
+
+        token = f"ot_{_secrets.token_urlsafe(32)}"
+        created_at = _now_iso()
+        save(session.agent_id, "api", {
+            "token": token,
+            "created_at": created_at,
+            "last_used_at": None,
+        })
+        session.agent_key_preview = _mask_token(token)
+        session.slack["agent_key_plaintext_once"] = token
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not mint API channel token: %s", e)
+        session.agent_key_preview = "ot_••••••••••••••••"

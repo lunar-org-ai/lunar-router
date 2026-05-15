@@ -1135,6 +1135,7 @@ export interface ConnectWebCard {
 export interface ConnectApiCard {
   type: 'connect_api';
   endpoint: string;
+  agent_id: string;
   agent_key_preview: string;
   curl_example: string;
   status: 'waiting' | 'connected';
