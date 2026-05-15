@@ -339,13 +339,19 @@ def _connect_card(session: Session) -> dict[str, Any]:
             "status": status,
         }
     if channel == "web":
+        # The P3.5 widget infra owns the runtime side: each widget gets a
+        # widget_id and a self-hostable embed JS at /widget/<id>/v1.js. We
+        # mint the widget config during _materialize_agent so session.slack
+        # carries widget_id + signing_secret_plaintext_once for this card.
+        host = os.environ.get(
+            "PUBLIC_BASE_URL", "https://api.dev.opentracy.cloud",
+        ).rstrip("/")
+        widget_id = session.slack.get("widget_id") or "<your-widget-id>"
+        embed_url = f"{host}/widget/{widget_id}/v1.js"
         return {
             "type": "connect_web",
             "embed_snippet": (
-                "<script async\n"
-                "  src=\"https://app.opentracy.cloud/widget.js\"\n"
-                f"  data-agent-key=\"{masked}\">\n"
-                "</script>"
+                f"<script async src=\"{embed_url}\"></script>"
             ),
             "agent_key_preview": masked,
             "status": status,
@@ -812,6 +818,8 @@ def _materialize_agent(session: Session) -> None:
 
     if channel == "api":
         _mint_api_channel_token(session)
+    elif channel == "web":
+        _provision_web_channel(session)
     else:
         _mint_tenant_token(session)
 
@@ -840,6 +848,53 @@ def _mint_tenant_token(session: Session) -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("could not mint tenant onboarding token: %s", e)
         session.agent_key_preview = "ot_live_••••••••••••••••"
+
+
+def _provision_web_channel(session: Session) -> None:
+    """Mint a widget_id + signing secret and persist to integrations/web.json.
+
+    Mirrors POST /agents/<id>/channels/web/connect (P3.5) but in-process —
+    onboarding is already inside the runtime, no need for the HTTP hop. The
+    public /widget/<widget_id>/v1.js endpoint will then resolve back to
+    this agent and serve the embed JS. allowed_domains stays empty so the
+    operator can test on localhost first; they pin domains from the agent
+    dashboard once the widget is on a real site.
+    """
+    try:
+        import secrets as _secrets
+
+        from runtime.agents.channels import _mask_token, save
+
+        widget_id = "w_" + _secrets.token_hex(8)
+        signing_secret = "whsec_" + _secrets.token_urlsafe(24)
+        installed_at = _now_iso()
+        save(session.agent_id, "web", {
+            "widget_id": widget_id,
+            "signing_secret": signing_secret,
+            "allowed_domains": [],
+            "settings": {
+                "position": "br",
+                "shape": "circle",
+                "accent": "green",
+                "greeting": "",
+                "welcome": "",
+                "fallback": "",
+                "show_greeting": True,
+                "require_email": False,
+                "pill_label": "Chat",
+            },
+            "installed_at": installed_at,
+        })
+        # widget_id is public (it's in the embed snippet); the signing
+        # secret is only needed for outbound webhooks — surface it once
+        # so power users can grab it, but the masked preview is the
+        # signing secret mask, not the widget_id.
+        session.slack["widget_id"] = widget_id
+        session.slack["signing_secret_plaintext_once"] = signing_secret
+        session.agent_key_preview = _mask_token(signing_secret)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("could not provision web widget: %s", e)
+        session.agent_key_preview = "whsec_••••••••••••••••"
 
 
 def _mint_api_channel_token(session: Session) -> None:
