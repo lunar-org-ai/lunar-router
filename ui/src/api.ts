@@ -1084,6 +1084,7 @@ export const getOnboardingTransport = () =>
 export type OnboardingPhase =
   | 'intent'
   | 'model'
+  | 'key'
   | 'channel'
   | 'connect'
   | 'live'
@@ -1113,6 +1114,13 @@ export interface ChannelPickerCard {
   type: 'channel_picker';
   recommended_id: string;
   options: ChannelPickerOption[];
+}
+export interface ProviderKeyPasteCard {
+  type: 'provider_key_paste';
+  provider: 'anthropic';
+  console_url: string;
+  mask: string | null;
+  status: 'missing' | 'ready';
 }
 export interface ConnectSlackCard {
   type: 'connect_slack';
@@ -1152,6 +1160,7 @@ export type OnboardingCard =
   | ConnectWhatsappCard
   | ConnectWebCard
   | ConnectApiCard
+  | ProviderKeyPasteCard
   | TracePreviewCard;
 
 export interface OnboardingV2Turn {
@@ -1215,6 +1224,12 @@ export const rewindOnboardingV2 = (decision_key: 'model' | 'channel') =>
 
 export const resetOnboardingV2 = () =>
   _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/reset', {});
+
+export const saveOnboardingV2Key = (provider: 'anthropic', plaintext: string) =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/save-key', {
+    provider,
+    plaintext,
+  });
 
 export interface SlackConnectBegin {
   install_url: string;

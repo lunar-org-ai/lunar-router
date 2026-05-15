@@ -33,6 +33,7 @@ import {
   getOnboardingV2Session,
   getSlackConnectStatus,
   rewindOnboardingV2,
+  saveOnboardingV2Key,
   sayOnboardingV2,
   skipOnboarding,
   type ChannelPickerCard,
@@ -46,6 +47,7 @@ import {
   type OnboardingState,
   type OnboardingV2Session,
   type OnboardingV2Turn,
+  type ProviderKeyPasteCard,
   type TracePreviewCard,
 } from '../api';
 import { Icon } from '../components/Icon';
@@ -700,6 +702,88 @@ const TracePreviewView = ({ card }: { card: TracePreviewCard }) => {
   );
 };
 
+const ProviderKeyPasteView = ({
+  card,
+  onSaveKey,
+  saving,
+}: {
+  card: ProviderKeyPasteCard;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  saving: boolean;
+}) => {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const submit = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) { setError('Paste a key first.'); return; }
+    setError(null);
+    try {
+      await onSaveKey(trimmed);
+      setValue('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the key.');
+    }
+  };
+  const isReady = card.status === 'ready';
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <Icon name="lock" size={14} style={{ color: 'var(--accent-fg)' }} />
+        <span className="gd-card-h">Paste your Anthropic API key</span>
+        <span className="gd-card-sub">{isReady ? 'Saved' : 'Stays KMS-encrypted'}</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-slack">
+          <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+            We don't bill our account for your traffic — every tenant brings their own key. Grab one at{' '}
+            <a href={card.console_url} target="_blank" rel="noreferrer noopener" className="button-link">
+              console.anthropic.com
+            </a>.
+          </div>
+          {isReady ? (
+            <div className="gd-connected">
+              <div className="icon"><Icon name="check" size={12} /></div>
+              <div>
+                <div style={{ fontWeight: 500 }}>Key saved</div>
+                <div className="meta mono">{card.mask}</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <input
+                className="gd-input"
+                type="password"
+                placeholder="sk-ant-…"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+                disabled={saving}
+                autoComplete="off"
+                spellCheck={false}
+                style={{ marginTop: 6 }}
+              />
+              {error && (
+                <div style={{ fontSize: 11.5, color: 'var(--danger-fg, #b00020)', marginTop: 4 }}>{error}</div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {!isReady && (
+        <div className="gd-card-actions">
+          <button
+            className="gd-btn-primary"
+            onClick={submit}
+            disabled={saving || !value.trim()}
+          >
+            {saving ? 'Saving…' : 'Save key + continue'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const RenderCard = ({
   card,
   onPick,
@@ -707,6 +791,8 @@ const RenderCard = ({
   plaintextKey,
   liveStatus,
   pendingPick,
+  onSaveKey,
+  savingKey,
 }: {
   card: OnboardingCard;
   onPick: (key: 'model' | 'channel', value: string) => void;
@@ -714,6 +800,8 @@ const RenderCard = ({
   plaintextKey: string | null;
   liveStatus: 'waiting' | 'connected';
   pendingPick: { key: 'model' | 'channel'; value: string } | null;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  savingKey: boolean;
 }) => {
   switch (card.type) {
     case 'model_picker':
@@ -733,6 +821,10 @@ const RenderCard = ({
           disabled={disabled}
           pendingPick={pendingPick?.key === 'channel' ? pendingPick.value : null}
         />
+      );
+    case 'provider_key_paste':
+      return (
+        <ProviderKeyPasteView card={card} onSaveKey={onSaveKey} saving={savingKey} />
       );
     case 'connect_slack':
       return <ConnectSlackView card={card} plaintextKey={plaintextKey} liveStatus={liveStatus} />;
@@ -758,6 +850,8 @@ const AssistantTurn = ({
   plaintextKey,
   liveStatus,
   pendingPick,
+  onSaveKey,
+  savingKey,
 }: {
   turn: OnboardingV2Turn;
   onPick: (key: 'model' | 'channel', value: string) => void;
@@ -765,6 +859,8 @@ const AssistantTurn = ({
   plaintextKey: string | null;
   liveStatus: 'waiting' | 'connected';
   pendingPick: { key: 'model' | 'channel'; value: string } | null;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  savingKey: boolean;
 }) => (
   <div className="gd-msg claude">
     <div className="gd-msg-meta">
@@ -783,6 +879,8 @@ const AssistantTurn = ({
           plaintextKey={plaintextKey}
           liveStatus={liveStatus}
           pendingPick={pendingPick}
+          onSaveKey={onSaveKey}
+          savingKey={savingKey}
         />
       ))}
     </div>
@@ -947,6 +1045,7 @@ const ChatComposer = ({
 const PLACEHOLDERS: Record<OnboardingPhase, string> = {
   intent: 'Tell Claude what your agent should do…',
   model: 'Reply or pick from the card above.',
+  key: 'Paste your Anthropic key in the card above — or reply.',
   channel: "Pick a card above or just type — e.g. \"Slack\"",
   connect: 'Paste the token above, or reply with anything to add to the prompt…',
   live: 'Ask Claude anything — e.g. "show me yesterday\'s tone issues"',
@@ -979,17 +1078,20 @@ const visibilityFor = (
     return { showWelcome: false, sidebarState: 'empty', panelStage: 'initial', progress: 15 };
   }
   if (phase === 'model') {
-    return { showWelcome: false, sidebarState: 'draft', panelStage: 'initial', progress: 45 };
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'initial', progress: 35 };
+  }
+  if (phase === 'key') {
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'initial', progress: 55 };
   }
   if (phase === 'channel') {
-    return { showWelcome: false, sidebarState: 'draft', panelStage: 'channel', progress: 60 };
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'channel', progress: 70 };
   }
   if (phase === 'connect') {
     return {
       showWelcome: false,
       sidebarState: 'partial',
       panelStage: slackConnected ? 'connected' : 'channel',
-      progress: slackConnected ? 85 : 70,
+      progress: slackConnected ? 90 : 80,
     };
   }
   // live / done
@@ -1024,6 +1126,7 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
   // server's reply arrives (the picker is replaced by a chip anyway) —
   // this only exists to give the click instant visual feedback.
   const [pendingPick, setPendingPick] = useState<{ key: 'model' | 'channel'; value: string } | null>(null);
+  const [savingKey, setSavingKey] = useState(false);
 
   // Cold load.
   useEffect(() => {
@@ -1125,6 +1228,20 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
     } finally {
       setPending(false);
       setPendingPick(null);
+    }
+  };
+
+  const handleSaveKey = async (plaintext: string) => {
+    setSavingKey(true);
+    setError(null);
+    try {
+      const next = await saveOnboardingV2Key('anthropic', plaintext);
+      applySession(next);
+    } catch (e) {
+      // Re-throw so the input view can surface the error inline.
+      throw e instanceof Error ? e : new Error(String(e));
+    } finally {
+      setSavingKey(false);
     }
   };
 
@@ -1341,6 +1458,8 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
                   plaintextKey={plaintextKey}
                   liveStatus={liveStatus}
                   pendingPick={pendingPick}
+                  onSaveKey={handleSaveKey}
+                  savingKey={savingKey}
                 />
               ) : (
                 <UserTurn key={t.id} turn={t} onEdit={handleEdit} disabled={pending} />

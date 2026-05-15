@@ -174,7 +174,7 @@ class Session:
     version: int = 1
     session_id: str = ""
     started_at: str = ""
-    phase: str = "intent"   # intent|model|channel|connect|live|done
+    phase: str = "intent"   # intent|model|key|channel|connect|live|done
     turns: list[Turn] = field(default_factory=list)
     decisions: dict[str, Any] = field(default_factory=dict)
     # The agent gets created when the user picks a channel. Holding
@@ -314,6 +314,25 @@ def _channel_card() -> dict[str, Any]:
     }
 
 
+def _provider_key_card(session: Session) -> dict[str, Any]:
+    """BYOK paste card. Surfaces the current mask (if any) and the
+    provider, plus a console-link the user can follow to grab a key.
+
+    Status:
+      - "missing"  — no key on file; UI shows an empty input + button.
+      - "ready"    — key is present and validated; advances are unblocked.
+    """
+    status = "ready" if session.decisions.get("anthropic_key_set") else "missing"
+    mask = session.decisions.get("anthropic_key_mask") or None
+    return {
+        "type": "provider_key_paste",
+        "provider": "anthropic",
+        "console_url": "https://console.anthropic.com/settings/keys",
+        "mask": mask,
+        "status": status,
+    }
+
+
 def _connect_card(session: Session) -> dict[str, Any]:
     """Channel-specific connect card. Each channel has its own UX:
 
@@ -443,10 +462,18 @@ _PHASE_GUIDANCE = {
         "and WHY (volume, latency, accuracy). Invite the user to tap a "
         "card or type a preference. Do not list prices — the card has them."
     ),
+    "key": (
+        "A 'paste your Anthropic API key' card is on screen. We're BYOK: "
+        "every tenant brings their own key (we never pay for inference). "
+        "Tell the user where to grab the key (console.anthropic.com → API "
+        "Keys) in ONE sentence. Don't proceed until the key is saved — "
+        "the host app gates the next step."
+    ),
     "channel": (
-        "A channel-picker card (Slack / WhatsApp / Web / API) is on screen. "
-        "Mention which channel you'd recommend for THIS use-case in one "
-        "sentence and invite the user to tap or type."
+        "Agent + model + API key are all set. A channel-picker card "
+        "(Slack / WhatsApp / Web / API) is on screen — the LAST step "
+        "before they can test. Recommend a channel for THIS use-case in "
+        "one sentence and invite the user to tap or type."
     ),
     "connect": (
         "A channel-specific connect card is on screen — Slack install link, "
@@ -637,13 +664,22 @@ def decide(decision_key: str, value: str) -> Session:
 
         # Advance + emit next deterministic card.
         if decision_key == "model":
-            session.phase = "channel"
+            # Model picked — gate on the BYOK key before channels. The
+            # earlier flow jumped straight to channel and only revealed
+            # the missing key when the user tried to curl-test; users
+            # asked for the gate to be explicit + earlier.
+            session.phase = "key"
             reply = Turn(
                 id=_new_id("t"),
                 ts=_now_iso(),
                 role="assistant",
-                text="Got it — using " + label + ". Where should this agent live?",
-                cards=[_channel_card()],
+                text=(
+                    "Got it — using " + label + ". One thing before we wire "
+                    "a channel: paste your Anthropic API key. We never store "
+                    "it in plaintext (KMS-encrypted) and never bill our "
+                    "account for your usage."
+                ),
+                cards=[_provider_key_card(session)],
             )
             session.turns.append(reply)
         elif decision_key == "channel":
@@ -665,6 +701,58 @@ def decide(decision_key: str, value: str) -> Session:
             )
             session.turns.append(reply)
 
+        _save(session, path)
+        return session
+
+
+def save_provider_key(provider: str, plaintext: str) -> Session:
+    """Persist a BYOK provider key for the active tenant and advance
+    onboarding from the `key` phase to `channel`.
+
+    The plaintext is forwarded to runtime.tenants.byok.set_provider_key
+    (KMS envelope-encrypted on disk). The session only persists the mask
+    so the next refresh can re-render the card with a "key is set"
+    state without re-prompting.
+
+    OSS mode (single-tenant): writes to the host tenant. Multi-tenant:
+    writes to whichever tenant the current request resolved.
+    """
+    provider = (provider or "").strip().lower()
+    if provider != "anthropic":
+        raise ValueError(f"unsupported provider in onboarding: {provider!r}")
+    if not (plaintext or "").strip():
+        raise ValueError("plaintext key is empty")
+
+    path = _resolve_session_path()
+    with _lock_for(path):
+        session = _load(path) or _seed(path)
+
+        # Persist via the BYOK module — KMS-wraps + writes
+        # tenants/<t>/byok/<provider>.json.
+        try:
+            from runtime.tenant_context import get_active as _get_tenant
+            from runtime.tenants.byok import set_provider_key
+            tid = _get_tenant()
+            meta = set_provider_key(tid, provider, plaintext)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("byok save failed: %s", e)
+            raise
+
+        session.decisions["anthropic_key_set"] = True
+        session.decisions["anthropic_key_mask"] = meta["mask"]
+        session.phase = "channel"
+
+        reply = Turn(
+            id=_new_id("t"),
+            ts=_now_iso(),
+            role="assistant",
+            text=(
+                "Key saved (KMS-encrypted). Last step — where should this "
+                "agent live?"
+            ),
+            cards=[_channel_card()],
+        )
+        session.turns.append(reply)
         _save(session, path)
         return session
 

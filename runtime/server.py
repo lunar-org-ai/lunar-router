@@ -3234,6 +3234,26 @@ def onboarding_v2_decide(payload: OnboardingV2DecideRequest) -> OnboardingV2Sess
         raise HTTPException(status_code=400, detail=str(e))
 
 
+class OnboardingV2KeyRequest(BaseModel):
+    provider: str = "anthropic"
+    plaintext: str
+
+
+@app.post("/onboarding/session/save-key", response_model=OnboardingV2Session)
+def onboarding_v2_save_key(payload: OnboardingV2KeyRequest) -> OnboardingV2Session:
+    """Save a BYOK provider key during onboarding and advance to the
+    channel phase. The plaintext is consumed; only the mask persists
+    on the session for re-renders. The actual key lives KMS-encrypted
+    under tenants/<active>/byok/<provider>.json (see runtime.tenants.byok)."""
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(
+            onboarding_session.save_provider_key(payload.provider, payload.plaintext)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @app.post("/onboarding/session/rewind", response_model=OnboardingV2Session)
 def onboarding_v2_rewind(payload: OnboardingV2RewindRequest) -> OnboardingV2Session:
     """Drop a settled decision and re-emit the picker.
