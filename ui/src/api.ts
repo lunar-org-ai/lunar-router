@@ -1120,6 +1120,25 @@ export interface ConnectSlackCard {
   agent_key_preview: string;
   status: 'waiting' | 'connected';
 }
+export interface ConnectWhatsappCard {
+  type: 'connect_whatsapp';
+  webhook_url: string;
+  verify_token_preview: string;
+  status: 'waiting' | 'connected';
+}
+export interface ConnectWebCard {
+  type: 'connect_web';
+  embed_snippet: string;
+  agent_key_preview: string;
+  status: 'waiting' | 'connected';
+}
+export interface ConnectApiCard {
+  type: 'connect_api';
+  endpoint: string;
+  agent_key_preview: string;
+  curl_example: string;
+  status: 'waiting' | 'connected';
+}
 export interface TracePreviewCard {
   type: 'trace_preview';
   trace_id: string;
@@ -1129,6 +1148,9 @@ export type OnboardingCard =
   | ModelPickerCard
   | ChannelPickerCard
   | ConnectSlackCard
+  | ConnectWhatsappCard
+  | ConnectWebCard
+  | ConnectApiCard
   | TracePreviewCard;
 
 export interface OnboardingV2Turn {

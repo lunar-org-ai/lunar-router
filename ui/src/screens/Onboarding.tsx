@@ -34,8 +34,12 @@ import {
   getSlackConnectStatus,
   rewindOnboardingV2,
   sayOnboardingV2,
+  skipOnboarding,
   type ChannelPickerCard,
+  type ConnectApiCard,
   type ConnectSlackCard,
+  type ConnectWebCard,
+  type ConnectWhatsappCard,
   type ModelPickerCard,
   type OnboardingCard,
   type OnboardingPhase,
@@ -285,6 +289,7 @@ const channelIcon = (id: string): ReactNode => {
   if (id === 'slack') return <SlackGlyph size={24} />;
   if (id === 'whatsapp') return <Icon name="phone" size={22} style={{ color: '#25D366' }} />;
   if (id === 'web') return <Icon name="globe" size={22} style={{ color: 'var(--info-fg)' }} />;
+  if (id === 'api') return <Icon name="code" size={22} style={{ color: 'var(--fg)' }} />;
   return <Icon name="chat" size={22} />;
 };
 
@@ -292,77 +297,106 @@ const ChannelPickerView = ({
   card,
   onPick,
   disabled,
+  pendingPick,
 }: {
   card: ChannelPickerCard;
   onPick: (id: string) => void;
   disabled: boolean;
-}) => (
-  <div className="gd-card">
-    <div className="gd-card-head">
-      <span className="gd-card-h">Pick a channel</span>
-      <span className="gd-card-sub">Start with one — add more later</span>
-    </div>
-    <div className="gd-card-body">
-      <div className="gd-channels">
-        {card.options.map((opt) => (
-          <button
-            key={opt.id}
-            type="button"
-            className={`gd-channel ${opt.id === card.recommended_id ? 'on' : ''}`}
-            onClick={() => onPick(opt.id)}
-            disabled={disabled}
-          >
-            <div className="icon">{channelIcon(opt.id)}</div>
-            <div className="name">{opt.name}</div>
-            <div className="sub">{opt.sub}</div>
-          </button>
-        ))}
+  pendingPick: string | null;
+}) => {
+  // Local "armed" state: the option the user just clicked. Falls back to
+  // the server's recommendation when nothing is armed. We highlight the
+  // armed option visually until the server's next session arrives and
+  // replaces the picker with a settled chip.
+  const [armed, setArmed] = useState<string | null>(null);
+  const selected = pendingPick ?? armed ?? card.recommended_id;
+
+  const pick = (id: string) => {
+    setArmed(id);
+    onPick(id);
+  };
+
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <span className="gd-card-h">Pick a channel</span>
+        <span className="gd-card-sub">Start with one — add more later</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-channels">
+          {card.options.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className={`gd-channel ${opt.id === selected ? 'on' : ''}`}
+              onClick={() => pick(opt.id)}
+              disabled={disabled}
+            >
+              <div className="icon">{channelIcon(opt.id)}</div>
+              <div className="name">{opt.name}</div>
+              <div className="sub">{opt.sub}</div>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ModelPickerView = ({
   card,
   onPick,
   disabled,
+  pendingPick,
 }: {
   card: ModelPickerCard;
   onPick: (id: string) => void;
   disabled: boolean;
-}) => (
-  <div className="gd-card">
-    <div className="gd-card-head">
-      <span className="gd-card-h">Choose a model</span>
-      <span className="gd-card-sub">You can switch anytime</span>
-    </div>
-    <div className="gd-card-body">
-      <div className="gd-models">
-        {card.options.map((opt) => {
-          const isRec = opt.id === card.recommended_id;
-          return (
-            <button
-              key={opt.id}
-              type="button"
-              className={`gd-model ${isRec ? 'on' : ''}`}
-              onClick={() => onPick(opt.id)}
-              disabled={disabled}
-            >
-              <span className="gd-model-radio" />
-              <div className="gd-model-info">
-                <div className="gd-model-name">{opt.name}</div>
-                <div className="gd-model-meta">
-                  {opt.cost_per_million_in} / 1M in · ~{opt.p50_latency_s}s p50 · {isRec ? card.rationale : opt.tag}
+  pendingPick: string | null;
+}) => {
+  const [armed, setArmed] = useState<string | null>(null);
+  const selected = pendingPick ?? armed ?? card.recommended_id;
+
+  const pick = (id: string) => {
+    setArmed(id);
+    onPick(id);
+  };
+
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <span className="gd-card-h">Choose a model</span>
+        <span className="gd-card-sub">You can switch anytime</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-models">
+          {card.options.map((opt) => {
+            const isSelected = opt.id === selected;
+            const isRec = opt.id === card.recommended_id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`gd-model ${isSelected ? 'on' : ''}`}
+                onClick={() => pick(opt.id)}
+                disabled={disabled}
+              >
+                <span className="gd-model-radio" />
+                <div className="gd-model-info">
+                  <div className="gd-model-name">{opt.name}</div>
+                  <div className="gd-model-meta">
+                    {opt.cost_per_million_in} / 1M in · ~{opt.p50_latency_s}s p50 · {isRec ? card.rationale : opt.tag}
+                  </div>
                 </div>
-              </div>
-              {isRec && <span className="rec">Recommended</span>}
-            </button>
-          );
-        })}
+                {isRec && <span className="rec">Recommended</span>}
+              </button>
+            );
+          })}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 const ConnectSlackView = ({
   card,
@@ -459,6 +493,197 @@ const ConnectSlackView = ({
   );
 };
 
+const CopyableInput = ({
+  value,
+  plaintextKey,
+  fallbackValue,
+}: {
+  value: string | null;
+  plaintextKey: string | null;
+  fallbackValue: string;
+}) => {
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const display = revealed && plaintextKey ? plaintextKey : (value || fallbackValue);
+  const copyValue = plaintextKey ?? value ?? fallbackValue;
+
+  const copy = async () => {
+    if (!copyValue) return;
+    try {
+      await navigator.clipboard.writeText(copyValue);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard fail in insecure contexts */
+    }
+  };
+
+  return (
+    <div className="gd-input">
+      <Icon name="lock" size={13} style={{ color: 'var(--fg-subtle)' }} />
+      <input value={display ?? ''} readOnly />
+      {plaintextKey && (
+        <button type="button" className="button-link" onClick={() => setRevealed((v) => !v)}>
+          {revealed ? 'Hide' : 'Reveal'}
+        </button>
+      )}
+      <button type="button" className="button-link" onClick={copy} style={{ marginRight: -4 }}>
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+};
+
+const CodeBlock = ({ children }: { children: string }) => {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(children);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <div className="gd-codeblock">
+      <pre>{children}</pre>
+      <button type="button" className="gd-codeblock-copy" onClick={copy}>
+        <Icon name={copied ? 'check' : 'copy'} size={12} /> {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+};
+
+const ConnectWhatsappView = ({
+  card,
+  liveStatus,
+}: {
+  card: ConnectWhatsappCard;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="phone" size={14} style={{ color: '#25D366' }} />
+      <span className="gd-card-h">Connect WhatsApp</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'Meta Business setup'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+          In Meta Business Manager, point your WhatsApp webhook at the URL below and paste the verify token.
+        </div>
+        <div className="gd-slack-row">
+          <span className="label">Webhook URL</span>
+        </div>
+        <CopyableInput value={card.webhook_url} plaintextKey={null} fallbackValue="" />
+        <div className="gd-slack-row">
+          <span className="label">Verify token</span>
+        </div>
+        <CopyableInput value={card.verify_token_preview} plaintextKey={null} fallbackValue="" />
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>WhatsApp connected</div>
+              <div className="meta">First message received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+    <div className="gd-card-actions">
+      <a className="gd-btn-primary" href="https://business.facebook.com/" target="_blank" rel="noreferrer noopener" style={{ textDecoration: 'none' }}>
+        Open Meta Business
+      </a>
+      {liveStatus !== 'connected' && (
+        <span style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>
+          Waiting for your first WhatsApp message…
+        </span>
+      )}
+    </div>
+  </div>
+);
+
+const ConnectWebView = ({
+  card,
+  liveStatus,
+}: {
+  card: ConnectWebCard;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="globe" size={14} style={{ color: 'var(--info-fg)' }} />
+      <span className="gd-card-h">Embed Web widget</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'Drop the snippet on your site'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+          Paste this snippet before <code style={{ fontFamily: 'var(--font-mono)' }}>&lt;/body&gt;</code> on every page where the widget should appear.
+        </div>
+        <CodeBlock>{card.embed_snippet}</CodeBlock>
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>Widget connected</div>
+              <div className="meta">First visitor message received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+    <div className="gd-card-actions">
+      {liveStatus !== 'connected' && (
+        <span style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>
+          Waiting for your first widget message…
+        </span>
+      )}
+    </div>
+  </div>
+);
+
+const ConnectApiView = ({
+  card,
+  plaintextKey,
+  liveStatus,
+}: {
+  card: ConnectApiCard;
+  plaintextKey: string | null;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="code" size={14} />
+      <span className="gd-card-h">Use the HTTP API</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'curl it from anywhere'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div className="gd-slack-row">
+          <span className="label">Agent key</span>
+        </div>
+        <CopyableInput value={card.agent_key_preview} plaintextKey={plaintextKey} fallbackValue="ot_live_…" />
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55, marginTop: 4 }}>
+          Then send a request:
+        </div>
+        <CodeBlock>{card.curl_example}</CodeBlock>
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>API connected</div>
+              <div className="meta">First call received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+);
+
 const TracePreviewView = ({ card }: { card: TracePreviewCard }) => {
   const summary = card.summary ?? {};
   return (
@@ -481,20 +706,42 @@ const RenderCard = ({
   disabled,
   plaintextKey,
   liveStatus,
+  pendingPick,
 }: {
   card: OnboardingCard;
   onPick: (key: 'model' | 'channel', value: string) => void;
   disabled: boolean;
   plaintextKey: string | null;
   liveStatus: 'waiting' | 'connected';
+  pendingPick: { key: 'model' | 'channel'; value: string } | null;
 }) => {
   switch (card.type) {
     case 'model_picker':
-      return <ModelPickerView card={card} onPick={(v) => onPick('model', v)} disabled={disabled} />;
+      return (
+        <ModelPickerView
+          card={card}
+          onPick={(v) => onPick('model', v)}
+          disabled={disabled}
+          pendingPick={pendingPick?.key === 'model' ? pendingPick.value : null}
+        />
+      );
     case 'channel_picker':
-      return <ChannelPickerView card={card} onPick={(v) => onPick('channel', v)} disabled={disabled} />;
+      return (
+        <ChannelPickerView
+          card={card}
+          onPick={(v) => onPick('channel', v)}
+          disabled={disabled}
+          pendingPick={pendingPick?.key === 'channel' ? pendingPick.value : null}
+        />
+      );
     case 'connect_slack':
       return <ConnectSlackView card={card} plaintextKey={plaintextKey} liveStatus={liveStatus} />;
+    case 'connect_whatsapp':
+      return <ConnectWhatsappView card={card} liveStatus={liveStatus} />;
+    case 'connect_web':
+      return <ConnectWebView card={card} liveStatus={liveStatus} />;
+    case 'connect_api':
+      return <ConnectApiView card={card} plaintextKey={plaintextKey} liveStatus={liveStatus} />;
     case 'trace_preview':
       return <TracePreviewView card={card} />;
     default:
@@ -510,12 +757,14 @@ const AssistantTurn = ({
   pending,
   plaintextKey,
   liveStatus,
+  pendingPick,
 }: {
   turn: OnboardingV2Turn;
   onPick: (key: 'model' | 'channel', value: string) => void;
   pending: boolean;
   plaintextKey: string | null;
   liveStatus: 'waiting' | 'connected';
+  pendingPick: { key: 'model' | 'channel'; value: string } | null;
 }) => (
   <div className="gd-msg claude">
     <div className="gd-msg-meta">
@@ -533,6 +782,7 @@ const AssistantTurn = ({
           disabled={pending}
           plaintextKey={plaintextKey}
           liveStatus={liveStatus}
+          pendingPick={pendingPick}
         />
       ))}
     </div>
@@ -770,6 +1020,10 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const prevDecisionsRef = useRef<string>('');
   const [updatedSection, setUpdatedSection] = useState<'behavior' | 'tone' | 'channel' | 'model' | null>(null);
+  // What the user just clicked on a picker card. Cleared the moment the
+  // server's reply arrives (the picker is replaced by a chip anyway) —
+  // this only exists to give the click instant visual feedback.
+  const [pendingPick, setPendingPick] = useState<{ key: 'model' | 'channel'; value: string } | null>(null);
 
   // Cold load.
   useEffect(() => {
@@ -862,12 +1116,26 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
   const handlePick = async (key: 'model' | 'channel', value: string) => {
     setPending(true);
     setError(null);
+    setPendingPick({ key, value });
     try {
       const next = await decideOnboardingV2(key, value);
       applySession(next);
     } catch (e) {
       setError(String((e as Error)?.message ?? e));
     } finally {
+      setPending(false);
+      setPendingPick(null);
+    }
+  };
+
+  const handleSkip = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      const state = await skipOnboarding();
+      onDone(state);
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
       setPending(false);
     }
   };
@@ -1000,6 +1268,14 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
                   <Icon name="warn" size={12} /> {error}
                 </div>
               )}
+              <button
+                type="button"
+                className="gd-skip"
+                onClick={handleSkip}
+                disabled={pending}
+              >
+                Skip onboarding — I'll set up later
+              </button>
             </div>
           </div>
         </main>
@@ -1042,6 +1318,17 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
       )}
 
       <main className="gd-main">
+        <div className="gd-main-toolbar">
+          <button
+            type="button"
+            className="gd-toolbar-link"
+            onClick={handleSkip}
+            disabled={pending}
+            title="Skip onboarding and go straight to the dashboard"
+          >
+            Skip onboarding
+          </button>
+        </div>
         <div className="gd-thread">
           <div className="gd-thread-inner">
             {session.turns.map((t) =>
@@ -1053,6 +1340,7 @@ export const Onboarding = ({ onDone }: OnboardingProps) => {
                   pending={pending}
                   plaintextKey={plaintextKey}
                   liveStatus={liveStatus}
+                  pendingPick={pendingPick}
                 />
               ) : (
                 <UserTurn key={t.id} turn={t} onEdit={handleEdit} disabled={pending} />

@@ -116,6 +116,7 @@ _CHANNEL_OPTIONS = [
     {"id": "slack", "name": "Slack", "sub": "For internal teams"},
     {"id": "whatsapp", "name": "WhatsApp", "sub": "For customers"},
     {"id": "web", "name": "Web widget", "sub": "For your site"},
+    {"id": "api", "name": "API", "sub": "Direct HTTP calls"},
 ]
 
 
@@ -313,14 +314,57 @@ def _channel_card() -> dict[str, Any]:
 
 
 def _connect_card(session: Session) -> dict[str, Any]:
+    """Channel-specific connect card. Each channel has its own UX:
+
+    - Slack: OAuth install button + paste agent key into Slack app config
+    - WhatsApp: webhook URL + verify token (Meta Business setup)
+    - Web: <script> snippet for site embed
+    - API: curl example + agent key
+
+    The ``session.slack`` field is reused as a generic install/status
+    bag so we don't have to refactor the session schema for every
+    channel — the meaning of "installed" is channel-dependent.
+    """
+    channel = (session.decisions or {}).get("channel", "slack")
     masked = session.agent_key_preview or "ot_live_••••••••••••••••"
-    status = "connected" if session.slack.get("installed") else "waiting"
+    connected = bool(session.slack.get("installed"))
+    status = "connected" if connected else "waiting"
+
+    if channel == "whatsapp":
+        return {
+            "type": "connect_whatsapp",
+            "webhook_url": "https://api.opentracy.cloud/v1/channels/whatsapp/webhook",
+            "verify_token_preview": masked,
+            "status": status,
+        }
+    if channel == "web":
+        return {
+            "type": "connect_web",
+            "embed_snippet": (
+                "<script async\n"
+                "  src=\"https://app.opentracy.cloud/widget.js\"\n"
+                f"  data-agent-key=\"{masked}\">\n"
+                "</script>"
+            ),
+            "agent_key_preview": masked,
+            "status": status,
+        }
+    if channel == "api":
+        return {
+            "type": "connect_api",
+            "endpoint": "https://api.opentracy.cloud/v1/run",
+            "agent_key_preview": masked,
+            "curl_example": (
+                "curl https://api.opentracy.cloud/v1/run \\\n"
+                f"  -H 'Authorization: Bearer {masked}' \\\n"
+                "  -H 'Content-Type: application/json' \\\n"
+                "  -d '{\"message\": \"hello\"}'"
+            ),
+            "status": status,
+        }
+    # default: slack
     return {
         "type": "connect_slack",
-        # The real install URL gets injected by /connect/slack/begin
-        # (Phase C). Until then, a stub anchor lets the UI render the
-        # button without crashing — clicking it is a no-op in the
-        # browser.
         "install_url": "#stub-slack-install",
         "agent_key_preview": masked,
         "status": status,
@@ -380,14 +424,15 @@ _PHASE_GUIDANCE = {
         "card or type a preference. Do not list prices — the card has them."
     ),
     "channel": (
-        "A channel-picker card (Slack / WhatsApp / Web) is on screen. "
+        "A channel-picker card (Slack / WhatsApp / Web / API) is on screen. "
         "Mention which channel you'd recommend for THIS use-case in one "
         "sentence and invite the user to tap or type."
     ),
     "connect": (
-        "A Slack connect card is on screen with an install link and an "
-        "agent-key field. Acknowledge the choice, point at the card, and "
-        "offer ONE parallel question (e.g. brand do's and don'ts, escalation rules)."
+        "A channel-specific connect card is on screen — Slack install link, "
+        "WhatsApp webhook URL, Web embed snippet, or API curl example. "
+        "Acknowledge the choice, point at the card, and offer ONE parallel "
+        "question (e.g. brand do's and don'ts, escalation rules)."
     ),
     "live": (
         "The agent is live. Stop interviewing — answer normal operational "

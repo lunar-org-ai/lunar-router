@@ -4440,6 +4440,9 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   overflow: hidden;
   display: flex; flex-direction: column;
   min-width: 0;
+  /* Fixed in viewport: only the chat thread scrolls. */
+  min-height: 0;
+  height: 100vh;
 }
 .gd-side-head {
   padding: 18px 16px 14px;
@@ -4581,9 +4584,33 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
 .gd-main {
   display: flex; flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  height: 100vh;
   background: var(--bg);
   position: relative;
 }
+
+.gd-main-toolbar {
+  display: flex; justify-content: flex-end; align-items: center;
+  padding: 10px 24px;
+  flex-shrink: 0;
+}
+.gd-toolbar-link {
+  font: inherit;
+  font-size: 12px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-subtle);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.gd-toolbar-link:hover {
+  color: var(--fg);
+  background: var(--bg-muted);
+}
+.gd-toolbar-link:disabled { opacity: 0.4; cursor: default; }
 
 /* Minimal centered welcome state */
 .gd-welcome {
@@ -5133,6 +5160,9 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   display: flex; flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  /* Fixed in viewport: scroll stays inside .gd-panel-body. */
+  min-height: 0;
+  height: 100vh;
 }
 .gd-panel-head {
   padding: 16px 20px 12px;
@@ -5346,3 +5376,67 @@ textarea.prompt:focus { border-color: var(--fg-subtle); }
   padding: 8px 12px;
   display: inline-flex; align-items: center; gap: 8px;
 }
+
+/* Code block for Web embed snippet + API curl example */
+.gd-codeblock {
+  position: relative;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow: hidden;
+}
+.gd-codeblock pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--fg);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+.gd-codeblock-copy {
+  position: absolute;
+  top: 6px; right: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--fg-muted);
+  padding: 3px 8px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 4px;
+  opacity: 0.85;
+}
+.gd-codeblock-copy:hover { opacity: 1; color: var(--fg); }
+
+/* Skip-onboarding link under the welcome stage */
+.gd-skip {
+  margin-top: 24px;
+  background: transparent;
+  border: 0;
+  color: var(--fg-subtle);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+.gd-skip:hover { color: var(--fg); background: var(--bg-muted); }
+.gd-skip:disabled { opacity: 0.4; cursor: default; }
+
+/* Inline shortcut for the button-link helper used inside connect cards */
+.button-link {
+  font-size: 12px;
+  color: var(--accent-fg);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 0 4px;
+}
+.button-link:hover { text-decoration: underline; }
+.button-link:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
