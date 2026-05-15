@@ -18,6 +18,7 @@
  */
 
 import { Hono, type Context } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 30_000
@@ -53,7 +54,7 @@ const proxy = (
     const ct = res.headers.get('content-type') ?? 'application/json'
     return new Response(text, {
       status: res.status,
-      headers: { 'content-type': ct },
+      headers: { 'content-type': ct, ...proxyHeaders(c) },
     })
   } catch (e) {
     const reason = e instanceof Error ? e.message : 'fetch failed'

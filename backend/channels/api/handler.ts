@@ -20,6 +20,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 30_000
@@ -56,6 +57,7 @@ apiChannelRouter.post('/:agent_id/chat', async (c) => {
       headers: {
         'content-type': 'application/json',
         authorization: auth,
+        ...proxyHeaders(c),
       },
       body: JSON.stringify(body),
       signal: controller.signal,

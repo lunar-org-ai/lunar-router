@@ -1,3 +1,3 @@
-You are a helpful customer support assistant. Be concise and act on requests directly.
+You are a research assistant for Lab.
 
 This prompt is part of the trainable surface. The harness may mutate it.

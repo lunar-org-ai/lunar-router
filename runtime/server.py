@@ -3130,6 +3130,173 @@ def onboarding_transport() -> OnboardingTransportInfo:
 
 
 # ---------------------------------------------------------------------------
+# Conversational onboarding v2 (Phase A) — stateful session + inline cards
+# ---------------------------------------------------------------------------
+#
+# Endpoints below replace the stateless /turn flow for the new UI. The
+# server is the source of truth: it owns the running thread, the
+# settled decisions, and the phase. The UI fetches /session at boot,
+# POSTs /say to add a user message, /decide to pick a card option,
+# and /rewind to undo a settled decision.
+#
+# The Pydantic models are intentionally loose around card payloads —
+# the card schema varies by type, and tightening it (discriminated
+# unions) is a Phase-B follow-up. ``cards: list[dict[str, Any]]``
+# keeps the wire format flexible without sacrificing the typing on
+# the rest of the session.
+
+
+class OnboardingV2Turn(BaseModel):
+    id: str
+    ts: str
+    role: str
+    text: str = ""
+    cards: list[dict[str, Any]] = []
+    decision_key: Optional[str] = None
+    decision_value: Optional[str] = None
+    decision_label: Optional[str] = None
+
+
+class OnboardingV2Session(BaseModel):
+    version: int = 1
+    session_id: str
+    started_at: str
+    phase: str
+    turns: list[OnboardingV2Turn] = []
+    decisions: dict[str, Any] = {}
+    agent_id: Optional[str] = None
+    slack: dict[str, Any] = {}
+    agent_key_preview: Optional[str] = None
+    # Plaintext token shown ONCE on the connect card immediately
+    # after agent creation. Read it from session.slack and clear in
+    # the response so callers don't get tempted to log it.
+    agent_key_plaintext_once: Optional[str] = None
+
+
+class OnboardingV2SayRequest(BaseModel):
+    text: str
+
+
+class OnboardingV2DecideRequest(BaseModel):
+    decision_key: str   # "model" | "channel"
+    value: str
+
+
+class OnboardingV2RewindRequest(BaseModel):
+    decision_key: str   # "model" | "channel"
+
+
+def _to_v2_response(session) -> OnboardingV2Session:
+    """Project the internal Session dataclass to the wire model.
+
+    Pulls the one-shot plaintext key out of ``slack`` so the next
+    GET /session returns it as ``null`` — the masked preview survives,
+    the plaintext doesn't.
+    """
+    data = session.to_dict()
+    plaintext = data.get("slack", {}).pop("agent_key_plaintext_once", None)
+    data["agent_key_plaintext_once"] = plaintext
+    return OnboardingV2Session(**data)
+
+
+@app.get("/onboarding/session", response_model=OnboardingV2Session)
+def onboarding_v2_session() -> OnboardingV2Session:
+    """Return the current session, seeding it on first call.
+
+    The seed inserts the opening assistant turn, so the UI never has
+    to special-case an empty thread — it always renders at least one
+    message + the composer.
+    """
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.get_or_create_session())
+
+
+@app.post("/onboarding/session/say", response_model=OnboardingV2Session)
+def onboarding_v2_say(payload: OnboardingV2SayRequest) -> OnboardingV2Session:
+    """Append a user message + emit the assistant's reply.
+
+    Phase transitions happen server-side based on what the user said
+    and what the brain signaled.
+    """
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.say(payload.text))
+
+
+@app.post("/onboarding/session/decide", response_model=OnboardingV2Session)
+def onboarding_v2_decide(payload: OnboardingV2DecideRequest) -> OnboardingV2Session:
+    """Record a card pick (model / channel) and advance the phase."""
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(
+            onboarding_session.decide(payload.decision_key, payload.value)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/onboarding/session/rewind", response_model=OnboardingV2Session)
+def onboarding_v2_rewind(payload: OnboardingV2RewindRequest) -> OnboardingV2Session:
+    """Drop a settled decision and re-emit the picker.
+
+    Rewinds cascade: re-picking the model also drops the channel + the
+    materialized agent, since both depend on the model decision having
+    closed in this thread.
+    """
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(onboarding_session.rewind(payload.decision_key))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/onboarding/session/reset", response_model=OnboardingV2Session)
+def onboarding_v2_reset() -> OnboardingV2Session:
+    """Wipe the session and seed a fresh one. Reserved for the
+    "start over" affordance and for tests."""
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.reset())
+
+
+# ─── Slack connect stubs (Phase A) ───────────────────────────────────
+#
+# Real OAuth lands in Phase C. These endpoints exist now so the UI
+# can wire its buttons + polling against stable URLs.
+
+
+class SlackConnectBeginResponse(BaseModel):
+    install_url: str
+    state: str
+
+
+@app.post("/onboarding/connect/slack/begin", response_model=SlackConnectBeginResponse)
+def onboarding_slack_begin() -> SlackConnectBeginResponse:
+    """Stub — returns a placeholder install URL until Phase C wires
+    real Slack OAuth. The UI surfaces this as the "Add to Slack" button
+    target; clicking it today is a no-op."""
+    return SlackConnectBeginResponse(
+        install_url="https://slack.com/oauth/v2/authorize?stub=1",
+        state="stub",
+    )
+
+
+class SlackConnectStatusResponse(BaseModel):
+    installed: bool
+    first_message_at: Optional[str] = None
+
+
+@app.get("/onboarding/connect/slack/status", response_model=SlackConnectStatusResponse)
+def onboarding_slack_status() -> SlackConnectStatusResponse:
+    """Stub — returns the current Slack connection state from the
+    session. Phase C will update it from real OAuth + event callbacks."""
+    from runtime.store import onboarding_session
+    session = onboarding_session.get_or_create_session()
+    return SlackConnectStatusResponse(
+        installed=bool(session.slack.get("installed")),
+        first_message_at=session.slack.get("first_message_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Multi-agent (P2.0)
 # ---------------------------------------------------------------------------
 

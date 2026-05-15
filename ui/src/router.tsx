@@ -34,6 +34,9 @@ import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
 import { Tenants } from './screens/Tenants';
+import { Login } from './screens/Login';
+import { Register } from './screens/Register';
+import { VerifyEmail } from './screens/VerifyEmail';
 
 export type View = 'simple' | 'technical';
 type LessonTab = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
@@ -130,6 +133,34 @@ const tenantsRoute = createRoute({
   component: Tenants,
 });
 
+// P16.6 — Auth screens. They share the root tree so a refresh of
+// /login still resolves, but `RootLayout` detects these pathnames
+// and renders the auth pages without the sidebar shell.
+const loginRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/login',
+  component: Login,
+});
+
+const registerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/register',
+  component: Register,
+});
+
+const verifyEmailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/verify-email',
+  component: VerifyEmail,
+});
+
+/** Pathnames that bypass the sidebar shell and any auth gate. */
+export const AUTH_ROUTES: ReadonlySet<string> = new Set([
+  '/login',
+  '/register',
+  '/verify-email',
+]);
+
 const routeTree = rootRoute.addChildren([
   evolutionRoute,
   lessonRoute,
@@ -138,6 +169,9 @@ const routeTree = rootRoute.addChildren([
   talkRoute,
   policiesRoute,
   tenantsRoute,
+  loginRoute,
+  registerRoute,
+  verifyEmailRoute,
   technicalLayoutRoute.addChildren([
     tracesRoute,
     evalsRoute,

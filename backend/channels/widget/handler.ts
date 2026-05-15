@@ -12,6 +12,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 30_000
@@ -77,7 +78,7 @@ widgetPublicRouter.post('/:widgetId/message', async (c) => {
     `/widget/${encodeURIComponent(c.req.param('widgetId') ?? '')}/message`,
     {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
       body: JSON.stringify(body),
     },
   )

@@ -10,6 +10,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 15_000
@@ -22,7 +23,7 @@ const getProxy = (runtimePath: string) => async (c: import('hono').Context) => {
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   const qs = c.req.url.includes('?') ? c.req.url.slice(c.req.url.indexOf('?')) : ''
   try {
-    const res = await fetch(RUNTIME_URL + runtimePath + qs, { signal: controller.signal })
+    const res = await fetch(RUNTIME_URL + runtimePath + qs, { headers: proxyHeaders(c), signal: controller.signal })
     // Pass through 4xx that carry user-facing reasons.
     if (res.status === 400 || res.status === 404 || res.status === 409 || res.status === 422) {
       const data = await res.json().catch(() => ({}))
@@ -60,7 +61,7 @@ const bodyProxy = (method: 'POST' | 'PUT', pathBuilder: (c: import('hono').Conte
     try {
       const res = await fetch(RUNTIME_URL + pathBuilder(c), {
         method,
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
         body: JSON.stringify(body),
         signal: controller.signal,
       })

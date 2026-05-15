@@ -10,6 +10,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 15_000
@@ -21,7 +22,7 @@ export const tracesRouter = new Hono()
 // fetch is cancelled when the downstream client disconnects.
 tracesRouter.get('/stream', async (c) => {
   const upstream = await fetch(`${RUNTIME_URL}/traces/stream`, {
-    headers: { Accept: 'text/event-stream' },
+    headers: { Accept: 'text/event-stream', ...proxyHeaders(c) },
     signal: c.req.raw.signal,
   })
   if (!upstream.ok || !upstream.body) {
@@ -48,7 +49,7 @@ tracesRouter.get('/', async (c) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(url, { signal: controller.signal })
+    const res = await fetch(url, { headers: proxyHeaders(c), signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       return c.json(
@@ -75,7 +76,7 @@ const traceLikeProxy = (path: (id: string) => string) =>
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
     try {
-      const res = await fetch(`${RUNTIME_URL}${path(id)}`, { signal: controller.signal })
+      const res = await fetch(`${RUNTIME_URL}${path(id)}`, { headers: proxyHeaders(c), signal: controller.signal })
       if (res.status === 404) {
         const data = await res.json().catch(() => ({}))
         return c.json(data, 404)
@@ -124,7 +125,7 @@ tracesRouter.post('/:id/flag', async (c) => {
       `${RUNTIME_URL}/traces/${encodeURIComponent(id)}/flag`,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
         body: JSON.stringify(body),
         signal: controller.signal,
       },
@@ -199,7 +200,7 @@ tracesRouter.post('/:id/feedback', async (c) => {
       `${RUNTIME_URL}/traces/${encodeURIComponent(id)}/feedback`,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
         body: JSON.stringify(body),
         signal: controller.signal,
       },

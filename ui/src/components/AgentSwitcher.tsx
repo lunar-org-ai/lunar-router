@@ -1,16 +1,15 @@
 /**
  * AgentSwitcher — topbar dropdown showing the active agent + the list
- * of all agents in the registry (P2.0).
+ * of all agents in the registry (P2.0, restyled P16.7).
  *
  * Click the pill → opens a dropdown:
- *   - Active agent gets a check mark
- *   - Other agents are clickable rows → POST /agents/{id}/activate
- *   - "+ New agent" row at the bottom → re-runs the Onboarding flow
+ *   - List rows are clickable → activates that agent + reloads
+ *   - Footer has "New agent" (opens NewAgentModal) and
+ *     "Configure current agent" (opens AgentSheet for the active one)
  *
- * The current agent persists across reloads naturally because the
- * server tracks it in agents/registry.json — no localStorage needed.
+ * The active agent persists across reloads because the server tracks
+ * it in agents/registry.json — no localStorage needed.
  */
-
 import { useEffect, useRef, useState } from 'react';
 
 import {
@@ -22,15 +21,9 @@ import {
 import { Icon } from './Icon';
 
 interface AgentSwitcherProps {
-  /**
-   * Open the AgentSheet drawer. Called with `null` when the operator
-   * clicks the active row in the dropdown (loads the active agent), or
-   * with a specific agent ID when they click the gear icon next to any
-   * row — that lets them peek at another agent's config without
-   * activating it.
-   */
+  /** Open the AgentSheet drawer for the active agent. */
   onOpenSheet: (agentId: string | null) => void;
-  /** Called when the operator picks "+ New agent" — UI swaps to onboarding. */
+  /** Click on "+ New agent" — opens NewAgentModal. */
   onNewAgent: () => void;
 }
 
@@ -76,9 +69,9 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
       await activateAgent(a.id);
       await refresh();
       setOpen(false);
-      // Force a full reload — all the screens (Evolution, Traces, etc)
-      // need to re-fetch against the newly-active agent's data. Simpler
-      // than threading an "active version" context through every fetcher.
+      // Force a full reload — every screen needs to re-fetch against
+      // the newly-active agent's data. Simpler than threading an
+      // "active version" context through every fetcher.
       window.location.reload();
     } catch (e) {
       console.warn('activate failed', e);
@@ -87,19 +80,13 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
     }
   };
 
-  const handlePeek = (e: React.MouseEvent, a: AgentSummary) => {
-    // Open the sheet for THIS agent without activating. Stops propagation
-    // so the row's outer click (which activates) doesn't fire.
-    e.stopPropagation();
-    setOpen(false);
-    onOpenSheet(a.id);
-  };
-
   return (
     <div className="agent-switcher" ref={rootRef}>
       <button
         className="agent-pill"
         onClick={() => setOpen((o) => !o)}
+        aria-haspopup="menu"
+        aria-expanded={open}
         title={active ? `${active.name} (${active.model})` : 'No agent'}
       >
         <span className="dot" />
@@ -109,58 +96,60 @@ export const AgentSwitcher = ({ onOpenSheet, onNewAgent }: AgentSwitcherProps) =
       </button>
 
       {open && state && (
-        <div className="agent-switcher-menu">
-          <div className="agent-switcher-label">Switch agent</div>
-          {state.agents.length === 0 && (
-            <div className="agent-switcher-empty dim">No agents yet.</div>
-          )}
-          {state.agents.map((a) => {
-            const isSwitching = switching === a.id;
-            return (
-              <div
-                key={a.id}
-                className={`agent-switcher-row ${a.is_active ? 'on' : ''}`}
-              >
-                <button
-                  className="agent-switcher-row-pick"
-                  onClick={() => void handlePick(a)}
-                  disabled={isSwitching}
-                  title={a.is_active ? 'Open this agent' : `Switch to ${a.name}`}
-                >
-                  <div className="agent-switcher-row-main">
-                    <span className="agent-switcher-row-name mono">{a.id}</span>
-                    <span className="agent-switcher-row-sub dim">
-                      {a.name} · {shortModel(a.model)}
+        <>
+          <div className="popover-backdrop" onClick={() => setOpen(false)} />
+          <div className="agent-menu" role="menu">
+            <div className="agent-menu-label">Your agents</div>
+            <div className="agent-menu-list">
+              {state.agents.length === 0 && (
+                <div style={{ padding: '12px 14px', color: 'var(--fg-muted)', fontSize: 12 }}>
+                  No agents yet.
+                </div>
+              )}
+              {state.agents.map((a) => {
+                const isSwitching = switching === a.id;
+                return (
+                  <button
+                    key={a.id}
+                    className={`agent-menu-item ${a.is_active ? 'on' : ''}`}
+                    onClick={() => void handlePick(a)}
+                    disabled={isSwitching}
+                  >
+                    <span className="dot" />
+                    <span className="agent-menu-text">
+                      <span className="agent-menu-name">{a.name || a.id}</span>
+                      <span className="agent-menu-meta">{shortModel(a.model)} · {a.is_active ? 'live' : 'idle'}</span>
                     </span>
-                  </div>
-                  {a.is_active ? (
-                    <Icon name="check" size={13} />
-                  ) : isSwitching ? (
-                    <span className="agent-switcher-spinner" />
-                  ) : null}
-                </button>
+                    {a.is_active && <Icon name="check" size={13} />}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="agent-menu-foot">
+              <button
+                className="agent-menu-item primary"
+                onClick={() => { setOpen(false); onNewAgent(); }}
+              >
+                <span className="agent-menu-plus"><Icon name="plus" size={12} /></span>
+                <span className="agent-menu-text">
+                  <span className="agent-menu-name">New agent</span>
+                  <span className="agent-menu-meta">Start from a template or scratch</span>
+                </span>
+              </button>
+              {active && (
                 <button
-                  className="agent-switcher-row-peek"
-                  onClick={(e) => handlePeek(e, a)}
-                  disabled={isSwitching}
-                  title={a.is_active ? 'Open settings' : 'Peek at this agent without activating'}
-                  aria-label={`Open ${a.name} settings`}
+                  className="agent-menu-item ghost"
+                  onClick={() => { setOpen(false); onOpenSheet(null); }}
                 >
                   <Icon name="settings" size={13} />
+                  <span className="agent-menu-text">
+                    <span className="agent-menu-name">Configure current agent</span>
+                  </span>
                 </button>
-              </div>
-            );
-          })}
-          <button
-            className="agent-switcher-new"
-            onClick={() => {
-              setOpen(false);
-              onNewAgent();
-            }}
-          >
-            <Icon name="sparkles" size={13} /> New agent
-          </button>
-        </div>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

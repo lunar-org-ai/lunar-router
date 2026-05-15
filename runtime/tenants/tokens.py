@@ -31,11 +31,31 @@ import hmac
 import json
 import logging
 import secrets
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 from runtime.tenants.types import TokenRecord
+
+# Per-tenant locks serialize the read-modify-write cycle inside a
+# single uvicorn worker. They don't help across Cloud Run instances —
+# for that, `_load_tokens` below recovers from concat-corruption that
+# concurrent writes from two instances can leave on gcsfuse. Together,
+# the two layers eliminate the "Extra data" JSONDecodeError loop we
+# saw at every Firebase login.
+_TENANT_LOCKS: dict[str, threading.Lock] = {}
+_TENANT_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(tenant_dir: Path) -> threading.Lock:
+    key = str(tenant_dir)
+    with _TENANT_LOCKS_GUARD:
+        lock = _TENANT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _TENANT_LOCKS[key] = lock
+        return lock
 
 
 logger = logging.getLogger("runtime.tenants.tokens")
@@ -159,17 +179,18 @@ def revoke_token(
     UI to operators so they don't need to handle the full hash."""
     rroot = _resolve_root(root)
     tenant_dir = rroot / tenant_id
-    records = _load_tokens(tenant_dir)
-    kept: list[TokenRecord] = []
-    removed_hash: Optional[str] = None
-    for rec in records:
-        if rec.hash.startswith(hash_prefix):
-            removed_hash = rec.hash
-            continue
-        kept.append(rec)
-    if removed_hash is None:
-        return False
-    _save_tokens(tenant_dir, kept)
+    with _lock_for(tenant_dir):
+        records = _load_tokens(tenant_dir)
+        kept: list[TokenRecord] = []
+        removed_hash: Optional[str] = None
+        for rec in records:
+            if rec.hash.startswith(hash_prefix):
+                removed_hash = rec.hash
+                continue
+            kept.append(rec)
+        if removed_hash is None:
+            return False
+        _save_tokens(tenant_dir, kept)
     _index_remove(rroot, removed_hash)
     return True
 
@@ -229,8 +250,52 @@ def _load_tokens(tenant_dir: Path) -> list[TokenRecord]:
     if not path.is_file():
         return []
     with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return [TokenRecord.from_dict(t) for t in (data.get("tokens") or [])]
+        text = f.read()
+    try:
+        data = json.loads(text)
+        return [TokenRecord.from_dict(t) for t in (data.get("tokens") or [])]
+    except json.JSONDecodeError:
+        # Two writers on different Cloud Run instances raced and the
+        # file ended up with multiple concatenated JSON objects (e.g.
+        # `{"tokens":[…]}{"tokens":[…]}`). Recover by parsing each
+        # object in turn and unioning their `tokens` arrays, deduped
+        # by hash. Then rewrite the file so subsequent reads are fast.
+        logger.warning(
+            "tokens.json at %s had concatenated/corrupt JSON; recovering",
+            path,
+        )
+        merged: dict[str, TokenRecord] = {}
+        decoder = json.JSONDecoder()
+        cursor = 0
+        n = len(text)
+        while cursor < n:
+            # Skip whitespace between objects.
+            while cursor < n and text[cursor] in " \t\r\n":
+                cursor += 1
+            if cursor >= n:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, cursor)
+            except json.JSONDecodeError:
+                # Trailing garbage we can't parse — stop here, accept
+                # whatever we recovered so far.
+                break
+            cursor = end
+            if isinstance(obj, dict):
+                for t in obj.get("tokens") or []:
+                    try:
+                        rec = TokenRecord.from_dict(t)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    merged[rec.hash] = rec
+        recovered = list(merged.values())
+        # Best-effort rewrite — if the rewrite itself loses to another
+        # racer, the next call will just recover again.
+        try:
+            _save_tokens(tenant_dir, recovered)
+        except OSError as e:
+            logger.warning("could not rewrite recovered tokens.json: %s", e)
+        return recovered
 
 
 def _save_tokens(tenant_dir: Path, records: list[TokenRecord]) -> None:
@@ -249,21 +314,23 @@ def _save_tokens(tenant_dir: Path, records: list[TokenRecord]) -> None:
 
 
 def _append_token(tenant_dir: Path, record: TokenRecord) -> None:
-    records = _load_tokens(tenant_dir)
-    records.append(record)
-    _save_tokens(tenant_dir, records)
+    with _lock_for(tenant_dir):
+        records = _load_tokens(tenant_dir)
+        records.append(record)
+        _save_tokens(tenant_dir, records)
 
 
 def _touch_last_used(tenant_dir: Path, token_hash: str, when: str) -> None:
-    records = _load_tokens(tenant_dir)
-    changed = False
-    for rec in records:
-        if rec.hash == token_hash:
-            rec.last_used_at = when
-            changed = True
-            break
-    if changed:
-        _save_tokens(tenant_dir, records)
+    with _lock_for(tenant_dir):
+        records = _load_tokens(tenant_dir)
+        changed = False
+        for rec in records:
+            if rec.hash == token_hash:
+                rec.last_used_at = when
+                changed = True
+                break
+        if changed:
+            _save_tokens(tenant_dir, records)
 
 
 def _load_index(root: Path) -> dict[str, str]:

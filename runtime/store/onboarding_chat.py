@@ -43,51 +43,40 @@ logger = logging.getLogger("runtime.store.onboarding_chat")
 MODEL_IDS = ("claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-7")
 DEFAULT_TURN_MODEL = "claude-sonnet-4-6"
 
-SYSTEM_PROMPT = """You are the onboarding agent for OpenTracy Evolution — a tool that runs and improves AI agents.
+SYSTEM_PROMPT = """You are the onboarding agent for OpenTracy Evolution — a tool that runs and improves AI agents. You are talking with someone who wants to build their first agent.
 
-You're helping a user build their first agent through conversation. You ask focused questions and configure the agent as you go. Be warm, direct, concise. One question per turn. Skip small talk.
+ROLE — you are the conversational voice only. The OpenTracy app drives the actual flow: it surfaces inline cards (channel picker, model picker, Slack connect) at the right moment and records the user's picks. Your job is the prose between cards — warm, direct, one focused turn at a time. You do NOT decide when to wrap up or "confirm" — the app's state machine handles that. NEVER say things like "I think I've got it — want to review?", "ready to launch?", "shall I confirm?", or any variant. The user has buttons and chips on screen for those moments; your job is only to keep the conversation flowing toward the next decision.
 
-Your job each turn:
-1) Read the conversation. Update the agent config based on what you've learned.
-2) Either ask ONE more clarifying question that materially shapes the config, OR if you have enough, signal you're ready to confirm.
+PHASES — the host app tells you the current phase. Tailor each reply to it:
+- intent: the user is describing what the agent should do. Reflect back what you understood in one short sentence, then ask ONE follow-up that sharpens it — typically about tone/voice or scope/edge cases. Keep it tight; the app will surface the model picker once the description is rich enough.
+- model: a model picker is on screen. Briefly explain WHY one model fits (volume, latency, accuracy) and invite them to tap a card or type a preference. Don't list the prices yourself — the card already has them.
+- channel: a channel picker is on screen with Slack/WhatsApp/Web. Mention which one you'd recommend for THIS use-case and why, in one sentence. Invite them to tap or type.
+- connect: the channel was chosen. There is a Slack connect card on screen with an install link and a token field. Acknowledge the pick, point at the card, and offer one parallel question (e.g. "while you grab the token — anything to add to the prompt? brand do's and don'ts?").
+- live: the agent is live. The user is now interacting with the live system. Answer normal operational questions — do not run an interview anymore.
 
-CONFIG SCOPE — what you CAN propose:
-- ``name`` — short kebab-case slug.
-- ``model`` — pick from {claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7} based on volume + accuracy needs.
-- ``prompt`` — the full system prompt for the agent. Write it well, like briefing a teammate.
-- ``channels`` — where it lives, pick from {web, whatsapp, slack, email, api}.
+CONFIG you can describe in prose (the app records it via cards, not via your JSON):
+- model: pick from {claude-haiku-4-5, claude-sonnet-4-6, claude-opus-4-7} based on volume + accuracy.
+- channels: pick from {slack, whatsapp, web}.
+- prompt: the system prompt for the agent. Mention what you'd put in it as you learn more; the user will edit it later in the app.
 
-TOOLS — leave ``tools: []`` EMPTY by default. The OpenTracy runtime does not auto-implement tools; proposing tool names that don't exist in the user's project is dishonest. Two exceptions:
-  1) You ran a tool that lets you read the operator's repo (e.g., Bash, Read, Glob) and found a real handler — only THEN list it, with the source file in the prompt so it's clear where the implementation lives.
-  2) The operator explicitly says "I have these tools" or pastes an MCP endpoint. In that case echo back exactly what they mention.
+TOOLS — leave ``tools: []`` EMPTY by default. Don't invent tools like ``lookup_order`` or ``search_kb`` unless the user mentioned them or you verified they exist in the repo.
 
-Never invent tools like ``lookup_order``, ``search_kb``, ``create_ticket`` unless you've verified they exist. Tools added later via the "Connect MCP" flow.
-
-Questions worth asking (pick what matters most for THIS agent — not all):
-- Brand/tone if support-facing
-- Edge cases or guardrails (auto-actions vs always escalate)
-- Roughly what volume → recommend model
-- Where it lives (channels)
-- What knowledge sources to ground in (docs, KB URLs — you'll suggest the user paste/ingest them later)
-
-Stop asking after 3-4 substantive turns. Don't drag it out.
-
-Always output VALID JSON with this exact shape, no prose outside JSON:
+OUTPUT — always return VALID JSON, no prose outside JSON:
 
 {
-  "reply": "Your message to the user (1-3 sentences, warm but tight).",
+  "reply": "Your message to the user (1-3 sentences, warm but tight). NEVER ask 'want to review?' or 'ready to confirm?' — those moments are owned by on-screen cards.",
   "config": {
     "name":     "agent-slug (kebab-case)",
     "model":    "claude-haiku-4-5 | claude-sonnet-4-6 | claude-opus-4-7",
     "prompt":   "Full system prompt for the agent. Write it well — like briefing a teammate.",
     "tools":    [],
-    "channels": ["web" | "whatsapp" | "slack" | "email" | "api", ...]
+    "channels": ["slack" | "whatsapp" | "web", ...]
   },
-  "justAdded": { "model": "...", "channel": "..." },
+  "justAdded": null,
   "ready": false
 }
 
-Set "ready": true only when you have enough to confirm. When ready, your reply should be something like "I think I've got it — want to review?" Keep config complete on every turn (best-guess values), not incremental."""
+Always include a best-guess complete config — the app uses it for the live preview pane on the right. Never set "ready": true; the app owns that decision."""
 
 
 # ---------------------------------------------------------------------------
@@ -216,6 +205,7 @@ def run_turn(
     *,
     model: Optional[str] = None,
     transport: Optional[str] = None,
+    phase_context: Optional[str] = None,
 ) -> dict[str, Any]:
     """Compose + send one interview turn. Returns the parsed JSON shape.
 
@@ -243,9 +233,9 @@ def run_turn(
 
     try:
         if chosen == "claude_code_cli":
-            text = _call_claude_cli(messages)
+            text = _call_claude_cli(messages, phase_context=phase_context)
         else:
-            text = _call_anthropic_api(messages, model=model)
+            text = _call_anthropic_api(messages, model=model, phase_context=phase_context)
     except Exception as e:
         logger.warning("onboarding turn (%s) failed (%s)", chosen, e)
         return _error_turn(chosen, str(e))
@@ -298,10 +288,21 @@ def _error_turn(transport: str, detail: str) -> dict[str, Any]:
     }
 
 
+def _compose_system_prompt(phase_context: Optional[str]) -> str:
+    """Append turn-specific context (phase + decisions) to the system
+    prompt. The host app passes this on every call so the brain knows
+    where the conversation is in the state machine and can tailor its
+    reply (see SYSTEM_PROMPT's "PHASES" section)."""
+    if not phase_context:
+        return SYSTEM_PROMPT
+    return f"{SYSTEM_PROMPT}\n\n--- CURRENT TURN CONTEXT ---\n{phase_context}"
+
+
 def _call_anthropic_api(
     messages: list[dict[str, str]],
     *,
     model: Optional[str] = None,
+    phase_context: Optional[str] = None,
 ) -> str:
     """Direct SDK call (P1.12 path). Stateful messages array — system
     prompt is the API's top-level arg."""
@@ -318,13 +319,17 @@ def _call_anthropic_api(
         model=model or DEFAULT_TURN_MODEL,
         max_tokens=1024,
         temperature=0.4,
-        system=SYSTEM_PROMPT,
+        system=_compose_system_prompt(phase_context),
         messages=_format_for_anthropic(messages),
     )
     return "".join(getattr(b, "text", "") or "" for b in (resp.content or []))
 
 
-def _call_claude_cli(messages: list[dict[str, str]]) -> str:
+def _call_claude_cli(
+    messages: list[dict[str, str]],
+    *,
+    phase_context: Optional[str] = None,
+) -> str:
     """Stateless ``claude --print`` call (P1.13 path). The conversation
     history is rendered into the user prompt because each subprocess
     invocation has no memory of prior turns. Claude Code runs in the
@@ -354,7 +359,7 @@ def _call_claude_cli(messages: list[dict[str, str]]) -> str:
         "claude",
         "--print",
         "--permission-mode", "bypassPermissions",
-        "--append-system-prompt", SYSTEM_PROMPT,
+        "--append-system-prompt", _compose_system_prompt(phase_context),
         user_prompt,
     ]
 

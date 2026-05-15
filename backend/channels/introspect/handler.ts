@@ -6,6 +6,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 import { z } from 'zod'
 
 const HistoryMessageSchema = z.object({
@@ -42,7 +43,7 @@ introspectRouter.post('/', async (c) => {
   try {
     const res = await fetch(RUNTIME_URL + '/introspect', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
       body: JSON.stringify(parsed.data),
       signal: controller.signal,
     })
