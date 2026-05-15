@@ -4689,6 +4689,97 @@ def resolve_token_endpoint(payload: TokenResolveRequest) -> TokenResolveResponse
     return TokenResolveResponse(tenant_id=tid)
 
 
+class ProviderKeyRecord(BaseModel):
+    provider: str
+    mask: str
+    created_at: str
+    rotated_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+
+
+class ProviderKeyListResponse(BaseModel):
+    tenant_id: str
+    keys: list[ProviderKeyRecord]
+
+
+class ProviderKeySetRequest(BaseModel):
+    plaintext: str
+
+
+class ProviderKeySetResponse(BaseModel):
+    provider: str
+    mask: str
+    created_at: str
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/provider-keys",
+    response_model=ProviderKeyListResponse,
+)
+def list_tenant_provider_keys_endpoint(tenant_id: str) -> ProviderKeyListResponse:
+    """List BYOK keys for a tenant — mask + metadata only.
+    Plaintext / ciphertext never leaves the runtime."""
+    from runtime.tenants.byok import list_provider_keys
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    raw = list_provider_keys(tenant_id)
+    return ProviderKeyListResponse(
+        tenant_id=tenant_id,
+        keys=[ProviderKeyRecord(**r) for r in raw],
+    )
+
+
+@app.post(
+    "/admin/tenants/{tenant_id}/provider-keys/{provider}",
+    response_model=ProviderKeySetResponse,
+    status_code=201,
+)
+def set_tenant_provider_key_endpoint(
+    tenant_id: str, provider: str, payload: ProviderKeySetRequest,
+) -> ProviderKeySetResponse:
+    """Set/rotate a BYOK provider key. Encrypts via the configured KMS
+    and stores under tenants/<tid>/byok/<provider>.json. Idempotent —
+    re-posting overwrites the prior record (rotation case).
+
+    The plaintext is consumed and immediately encrypted; only the
+    mask + timestamps are returned. This endpoint must be reachable
+    only by the operator admin Bearer (mounted under /v1/admin/* in
+    the backend, which is apiKeyAuth-gated)."""
+    from runtime.tenants.byok import set_provider_key, SUPPORTED_PROVIDERS
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported_provider: {provider}",
+        )
+    try:
+        meta = set_provider_key(tenant_id, provider, payload.plaintext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ProviderKeySetResponse(
+        provider=provider,
+        mask=meta["mask"],
+        created_at=meta["created_at"],
+    )
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/provider-keys/{provider}",
+    status_code=204,
+)
+def delete_tenant_provider_key_endpoint(tenant_id: str, provider: str) -> Response:
+    from runtime.tenants.byok import delete_provider_key
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    if not delete_provider_key(tenant_id, provider):
+        raise HTTPException(status_code=404, detail=f"key_not_found: {provider}")
+    return Response(status_code=204)
+
+
 class FeatureFlags(BaseModel):
     multi_tenant: bool
     kms: bool
