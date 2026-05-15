@@ -49,6 +49,7 @@ import {
   type TracePreviewCard,
 } from '../api';
 import { Icon } from '../components/Icon';
+import { UserMenu } from '../components/UserMenu';
 
 interface OnboardingProps {
   onDone: (next: OnboardingState | null) => void;
@@ -176,8 +177,7 @@ const Sidebar = ({
       </button>
 
       <div className="gd-side-foot">
-        <div className="av">JM</div>
-        <span>Jamie Marsh · Acme</span>
+        <UserMenu />
       </div>
     </aside>
   );
