@@ -15,6 +15,7 @@
 
 import crypto from 'node:crypto'
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 import {
   clearConfig,
   findAgentByFromNumber,
@@ -151,6 +152,9 @@ async function postOutbound(
 }
 
 async function runOnAgent(agentId: string, text: string): Promise<string> {
+  // Twilio webhook flow — no tenant Bearer to propagate (Twilio signs the
+  // request, not a tenant token). The runtime resolves the tenant from
+  // the agent id itself.
   const res = await fetch(`${RUNTIME_URL}/api/${encodeURIComponent(agentId)}/internal-run`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

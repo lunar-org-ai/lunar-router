@@ -23,10 +23,15 @@ backend/dist/
 
 # Operator-local state that the runtime will regenerate at startup OR
 # that lives in the gcsfuse-mounted /data volume in production.
+# NOTE: `ledger/` and `harness/` are Python packages (code + data); we
+# only exclude their data subdirs, not the modules themselves.
 .harness/
 agents/
 tenants/
-ledger/
+ledger/_default/
+ledger/entries/
+ledger/lessons/
+ledger/research-assistant*/
 traces/
 corpora/indexed/
 corpora/ingested/

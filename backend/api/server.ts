@@ -3,6 +3,7 @@ import { Hono } from 'hono'
 import { logger } from 'hono/logger'
 import { apiKeyAuth } from '../auth/api_key'
 import { isMultiTenantEnabled } from '../auth/feature'
+import { authSessionRouter } from '../auth/session'
 import { tenantAuth } from '../auth/tenant'
 import { adminRouter } from '../channels/admin/handler'
 import { agentRouter } from '../channels/agent/handler'
@@ -13,6 +14,7 @@ import { slackRouter } from '../channels/slack/handler'
 import { whatsappRouter } from '../channels/whatsapp/handler'
 import { widgetPublicRouter } from '../channels/widget/handler'
 import { datasetRouter } from '../channels/dataset/handler'
+import { billingRouter } from '../channels/billing/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
 import { lessonsRouter } from '../channels/lessons/handler'
@@ -66,17 +68,33 @@ app.route('/mcp', mcpRouter)
 // Per-channel proxy code uses `proxyHeaders(c)` to thread the tenant
 // header through. In OSS mode that helper returns {} and nothing
 // extra is added.
+// P16.7 — /v1/auth/* is the public exchange endpoint that hands the
+// browser a tenant Bearer in return for a verified Firebase ID token.
+// It MUST be mounted before the auth middlewares below so it's not
+// gated by them; chicken-and-egg otherwise.
+app.route('/v1/auth', authSessionRouter)
+
 if (isMultiTenantEnabled()) {
   app.use('/v1/admin/*', apiKeyAuth)
   app.use('/v1/*', async (c, next) => {
-    // Skip tenantAuth for /v1/admin/* — that gate is apiKeyAuth above.
-    if (c.req.path.startsWith('/v1/admin/')) {
+    // Skip tenantAuth for /v1/admin/* (gated by apiKeyAuth above),
+    // /v1/auth/* (the public session exchange), and /v1/api/* (the
+    // per-agent public chat endpoint; it auths against the agent's
+    // own ot_* token, not a tenant Bearer).
+    if (
+      c.req.path.startsWith('/v1/admin/') ||
+      c.req.path.startsWith('/v1/auth/') ||
+      c.req.path.startsWith('/v1/api/')
+    ) {
       return next()
     }
     return tenantAuth(c, next)
   })
 } else {
-  app.use('/v1/*', apiKeyAuth)
+  app.use('/v1/*', async (c, next) => {
+    if (c.req.path.startsWith('/v1/auth/')) return next()
+    return apiKeyAuth(c, next)
+  })
 }
 // Operator-only tenant admin (gated by apiKeyAuth above when flag on).
 // In OSS mode the routes still exist but require the same BACKEND_API_KEYS
@@ -98,6 +116,7 @@ app.route('/v1/evals', evalsRouter)
 app.route('/v1/router', routerRouter)
 app.route('/v1/datasets', datasetRouter)
 app.route('/v1/onboarding', onboardingRouter)
+app.route('/v1/billing', billingRouter)
 
 // Convention: 8001 = python runtime, 8002 = ts backend.
 const port = Number(process.env.PORT ?? 8002)

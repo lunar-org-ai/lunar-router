@@ -12,6 +12,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 15_000
@@ -22,7 +23,7 @@ lessonsRouter.get('/', async (c) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(RUNTIME_URL + '/lessons', { signal: controller.signal })
+    const res = await fetch(RUNTIME_URL + '/lessons', { headers: proxyHeaders(c), signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       return c.json(
@@ -48,8 +49,7 @@ lessonsRouter.get('/:id', async (c) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(`${RUNTIME_URL}/lessons/${encodeURIComponent(id)}`, {
-      signal: controller.signal,
+    const res = await fetch(`${RUNTIME_URL}/lessons/${encodeURIComponent(id)}`, { headers: proxyHeaders(c), signal: controller.signal,
     })
     if (res.status === 404) {
       const data = await res.json().catch(() => ({}))
@@ -91,7 +91,7 @@ const reviewAction = (action: 'approve' | 'reject' | 'requeue') =>
         `${RUNTIME_URL}/lessons/${encodeURIComponent(id)}/${action}`,
         {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
           body: JSON.stringify(body),
           signal: controller.signal,
         },

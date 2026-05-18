@@ -46,3 +46,5 @@ corpora/ingested/
 # and runtime/agents/ source dirs stay tracked.
 /agents/
 
+
+.cloudbuild.*

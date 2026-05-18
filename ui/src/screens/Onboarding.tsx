@@ -1,956 +1,1526 @@
 /**
- * P1.12 — Conversational onboarding (Claude-led, Direction A).
+ * Onboarding — Guided conversational flow (port of claude-design
+ * "Onboarding Guided.html"). ChatGPT/Claude-style 3-pane layout that
+ * materializes progressively:
  *
- * 4 stages: Welcome → Chat → Confirm → Launching.
+ *   • G1: minimal centered welcome (no sidebar, no right panel)
+ *   • G2: user describes intent → right panel slides in with a live
+ *         agent-config preview
+ *   • G3: tone/topic settled → sidebar fades in as a draft agent
+ *   • G4: channel chosen → Slack connect card inline; sidebar partial
+ *   • G5: Slack connected → model picker; right panel highlights channel
+ *   • G6: model picked → "Ready to launch" summary; everything filled
  *
- * Translated from claude-design/screens/Onboarding.jsx (chat variant) —
- * markup + class names preserved so the design CSS in styles.css
- * renders the same shapes. Wired to the real backend:
- *
- *   - POST /v1/onboarding/turn → drives the chat; returns reply +
- *     materialized config + justAdded badge + ready flag. Server
- *     falls back to a scripted 5-turn flow when no ANTHROPIC_API_KEY,
- *     so the UI never deadlocks.
- *   - POST /v1/onboarding/complete → persists the confirmed config
- *     (writes agent/prompts/system.md, records an agent_created Lesson).
- *   - POST /v1/onboarding/skip → escape hatch from header.
+ * Server contract is unchanged (V2 session: /session, /say, /decide,
+ * /rewind). Phase + decisions drive which panes are visible and what
+ * the right panel shows — the brain owns the prose, the session module
+ * owns the state machine, the UI owns the visual progression.
  */
-
-import { useEffect, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 
 import {
   completeOnboarding,
-  getOnboardingTransport,
-  onboardingTurn,
+  decideOnboardingV2,
+  getOnboardingV2Session,
+  getSlackConnectStatus,
+  rewindOnboardingV2,
+  saveOnboardingV2Key,
+  sayOnboardingV2,
   skipOnboarding,
-  type OnboardingChatMessage,
-  type OnboardingJustAdded,
+  type ChannelPickerCard,
+  type ConnectApiCard,
+  type ConnectSlackCard,
+  type ConnectWebCard,
+  type ConnectWhatsappCard,
+  type ModelPickerCard,
+  type OnboardingCard,
+  type OnboardingPhase,
   type OnboardingState,
-  type OnboardingTransportInfo,
-  type OnboardingTurnConfig,
+  type OnboardingV2Session,
+  type OnboardingV2Turn,
+  type ProviderKeyPasteCard,
+  type TracePreviewCard,
 } from '../api';
 import { Icon } from '../components/Icon';
-
-interface Model {
-  id: string;
-  name: string;
-  desc: string;
-  recommended?: boolean;
-}
-
-const MODELS: Model[] = [
-  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', desc: 'Anthropic · fastest + cheapest.' },
-  { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', desc: 'Anthropic · smart default.', recommended: true },
-  { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', desc: 'Anthropic · strongest reasoning.' },
-  { id: 'gpt-4o-mini', name: 'GPT-4o mini', desc: 'OpenAI · cheap + capable.' },
-  { id: 'gpt-4o', name: 'GPT-4o', desc: 'OpenAI · multimodal default.' },
-  { id: 'gpt-5', name: 'GPT-5', desc: 'OpenAI · frontier.' },
-];
-
-const CHANNEL_LABELS: Record<string, string> = {
-  web: 'Web chat widget',
-  whatsapp: 'WhatsApp',
-  slack: 'Slack',
-  email: 'Email',
-  api: 'API only',
-};
-
-const STARTERS = [
-  {
-    title: 'Customer support',
-    hint: 'Refunds, order lookups, ticket handoff.',
-    seed:
-      'A customer support agent for our Shopify store. Needs to handle order lookups, refund questions, and hand off to a human on anything billing-related.',
-  },
-  {
-    title: 'SDR / sales',
-    hint: 'Qualify inbound leads, book meetings.',
-    seed:
-      'An SDR that qualifies inbound demo requests with BANT, then books a meeting on my calendar. Should never pitch — just qualify.',
-  },
-  {
-    title: 'Research assistant',
-    hint: 'Search, cite sources, distinguish fact from inference.',
-    seed:
-      'A research assistant that summarizes papers and articles I drop in. Must cite sources and flag uncertainty.',
-  },
-  {
-    title: 'Internal helpdesk',
-    hint: 'Slack bot for IT/HR questions.',
-    seed:
-      "An internal helpdesk bot for our Slack workspace. Should answer IT and HR questions from our notion docs and open a ticket if it can't.",
-  },
-];
-
-const DEFAULT_CONFIG: OnboardingTurnConfig = {
-  name: '',
-  model: 'claude-sonnet-4-6',
-  prompt: '',
-  tools: [],
-  channels: [],
-};
-
-type Stage = 'welcome' | 'chat' | 'confirm' | 'launching';
-
-interface ChatMsg {
-  role: 'user' | 'assistant';
-  text: string;
-  justAdded?: OnboardingJustAdded | null;
-}
+import { UserMenu } from '../components/UserMenu';
 
 interface OnboardingProps {
   onDone: (next: OnboardingState | null) => void;
 }
 
-export const Onboarding = ({ onDone }: OnboardingProps) => {
-  const [stage, setStage] = useState<Stage>('welcome');
-  const [config, setConfig] = useState<OnboardingTurnConfig>(DEFAULT_CONFIG);
-  const [messages, setMessages] = useState<ChatMsg[]>([]);
-  const [thinking, setThinking] = useState(false);
-  const [ready, setReady] = useState(false);
+// ─── Atoms ───────────────────────────────────────────────────────
+
+const SlackGlyph = ({ size = 16 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ display: 'block', flexShrink: 0 }}>
+    <path d="M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313z" fill="#E01E5A" />
+    <path d="M8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312z" fill="#36C5F0" />
+    <path d="M18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312z" fill="#2EB67D" />
+    <path d="M15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z" fill="#ECB22E" />
+  </svg>
+);
+
+const ROT_WORDS = [
+  'support agent',
+  'sales bot',
+  'refund flow',
+  'lead qualifier',
+  'onboarding guide',
+  'research assistant',
+];
+
+const RotatingWord = ({ words = ROT_WORDS, interval = 2200 }: { words?: string[]; interval?: number }) => {
+  const [idx, setIdx] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setIdx((i) => (i + 1) % words.length), interval);
+    return () => clearInterval(t);
+  }, [words, interval]);
+  return (
+    <span className="gd-rot">
+      <span className="gd-rot-sizer" aria-hidden="true">{words[idx]}</span>
+      {words.map((w, i) => (
+        <span
+          key={w}
+          className={`gd-rot-item ${
+            i === idx
+              ? 'is-on'
+              : i === (idx - 1 + words.length) % words.length
+                ? 'is-out'
+                : ''
+          }`}
+          aria-hidden={i !== idx}
+        >
+          {w}
+        </span>
+      ))}
+      <span className="gd-rot-sr" aria-live="polite">{words[idx]}</span>
+    </span>
+  );
+};
+
+// ─── Sidebar (left) ──────────────────────────────────────────────
+
+type SidebarState = 'empty' | 'draft' | 'partial' | 'ready';
+
+const Sidebar = ({
+  state,
+  progress,
+  agentName,
+  channel,
+  model,
+  toolCount,
+}: {
+  state: Exclude<SidebarState, 'empty'>;
+  progress: number;
+  agentName: string;
+  channel: ReactNode | null;
+  model: string | null;
+  toolCount: number;
+}) => {
+  const dotClass = state === 'ready' ? 'active' : state === 'draft' ? 'draft' : '';
+  const subtitle =
+    state === 'ready' ? 'Ready to launch' : state === 'partial' ? 'Configuring…' : 'Drafting…';
+
+  const rows: Array<{ k: string; v: ReactNode; pending: boolean }> = [
+    { k: 'Status', v: subtitle, pending: false },
+    { k: 'Channel', v: channel ?? 'Not chosen', pending: !channel },
+    { k: 'Model', v: model ?? 'Not chosen', pending: !model },
+  ];
+  if (state === 'ready') {
+    rows.push({ k: 'Tools', v: `${toolCount} selected`, pending: false });
+  }
+
+  return (
+    <aside className="gd-side">
+      <div className="gd-side-head">
+        <div className="gd-side-mark" />
+        <div className="gd-side-brand">OpenTracy <span className="dim">Evolution</span></div>
+      </div>
+
+      <div className="gd-side-section">
+        <div className="gd-side-label">Your agent</div>
+        <div className={`gd-side-agent ${dotClass}`}>
+          <div className="name">
+            <span className="dot" />
+            {agentName}
+          </div>
+          <div className="gd-side-meta">
+            {rows.map((r) => (
+              <div key={r.k} className="gd-side-meta-row">
+                <span className="k">{r.k}</span>
+                <span className={`v ${r.pending ? 'pending' : ''}`}>{r.v}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="gd-side-progress">
+        <div className="gd-side-progress-label">
+          <span>Setup progress</span>
+          <span>{progress}%</span>
+        </div>
+        <div className="gd-side-progress-bar">
+          <div className="gd-side-progress-fill" style={{ width: `${progress}%` }} />
+        </div>
+      </div>
+
+      <button className="gd-side-new" disabled>
+        <Icon name="plus" size={13} />
+        New agent
+      </button>
+
+      <div className="gd-side-foot">
+        <UserMenu />
+      </div>
+    </aside>
+  );
+};
+
+// ─── Right panel ─────────────────────────────────────────────────
+
+type PanelStage = 'initial' | 'channel' | 'connected' | 'full';
+
+const Panel = ({
+  stage,
+  agentName,
+  purpose,
+  tone,
+  channel,
+  model,
+  updatedSection,
+}: {
+  stage: PanelStage;
+  agentName: string;
+  purpose: string;
+  tone: string | null;
+  channel: ReactNode | null;
+  model: string | null;
+  updatedSection: 'behavior' | 'tone' | 'channel' | 'model' | null;
+}) => {
+  const promptBody = (
+    <>
+      You are a {agentName} agent.{'\n\n'}
+      <strong>Behavior</strong>{'\n'}
+      {purpose ? `• ${purpose}` : '• [awaiting your description…]'}{'\n\n'}
+      <strong>Tone</strong>{'\n'}
+      {tone ? (
+        <span className={updatedSection === 'tone' ? 'new' : undefined}>{tone}</span>
+      ) : (
+        <span className="pending">[awaiting tone…]</span>
+      )}
+    </>
+  );
+
+  const sectionClass = (key: 'behavior' | 'tone' | 'channel' | 'model') =>
+    `gd-panel-section ${updatedSection === key ? 'gd-section-updated' : ''}`;
+
+  return (
+    <div className="gd-panel">
+      <div className="gd-panel-head">
+        <span className="gd-panel-h">Agent config</span>
+        <span className="gd-panel-live"><span className="dot" /> live</span>
+      </div>
+      <div className="gd-panel-body">
+
+        <div className="gd-panel-section">
+          <div className="gd-panel-name">{agentName}</div>
+          <div style={{ fontSize: 12, color: 'var(--fg-muted)', marginTop: 2 }}>v0.1 · draft</div>
+        </div>
+
+        <div className={sectionClass(updatedSection === 'tone' ? 'tone' : 'behavior')}>
+          <h4 className="gd-panel-section-h">
+            Agent instructions
+            {(updatedSection === 'behavior' || updatedSection === 'tone') && <span className="live-dot" />}
+          </h4>
+          <div className="gd-panel-prompt">{promptBody}</div>
+        </div>
+
+        <div className={sectionClass('channel')}>
+          <h4 className="gd-panel-section-h">Channel</h4>
+          {channel ? (
+            <div className="gd-panel-chips">
+              <span className="gd-panel-chip accent">{channel}</span>
+            </div>
+          ) : (
+            <div className="gd-panel-empty">Not chosen yet…</div>
+          )}
+        </div>
+
+        <div className={sectionClass('model')}>
+          <h4 className="gd-panel-section-h">Model</h4>
+          {model ? (
+            <div className="gd-panel-chips">
+              <span className="gd-panel-chip accent">{model}</span>
+              {stage === 'full' && <span className="gd-panel-chip">+ Sonnet fallback</span>}
+            </div>
+          ) : (
+            <div className="gd-panel-empty">Not chosen yet…</div>
+          )}
+        </div>
+
+      </div>
+    </div>
+  );
+};
+
+const PanelEmpty = () => (
+  <div className="gd-panel">
+    <div className="gd-panel-head">
+      <span className="gd-panel-h">Agent config</span>
+      <span className="gd-panel-live" style={{ color: 'var(--fg-subtle)' }}>idle</span>
+    </div>
+    <div className="gd-panel-empty-hero">
+      <div className="icon"><Icon name="file" size={16} /></div>
+      <div className="text">Your agent's instructions and config will appear here as we go.</div>
+    </div>
+  </div>
+);
+
+// ─── Cards (re-skinned with gd-card) ─────────────────────────────
+
+const channelIcon = (id: string): ReactNode => {
+  if (id === 'slack') return <SlackGlyph size={24} />;
+  if (id === 'whatsapp') return <Icon name="phone" size={22} style={{ color: '#25D366' }} />;
+  if (id === 'web') return <Icon name="globe" size={22} style={{ color: 'var(--info-fg)' }} />;
+  if (id === 'api') return <Icon name="code" size={22} style={{ color: 'var(--fg)' }} />;
+  return <Icon name="chat" size={22} />;
+};
+
+const ChannelPickerView = ({
+  card,
+  onPick,
+  disabled,
+  pendingPick,
+}: {
+  card: ChannelPickerCard;
+  onPick: (id: string) => void;
+  disabled: boolean;
+  pendingPick: string | null;
+}) => {
+  // Local "armed" state: the option the user just clicked. Falls back to
+  // the server's recommendation when nothing is armed. We highlight the
+  // armed option visually until the server's next session arrives and
+  // replaces the picker with a settled chip.
+  const [armed, setArmed] = useState<string | null>(null);
+  const selected = pendingPick ?? armed ?? card.recommended_id;
+
+  const pick = (id: string) => {
+    setArmed(id);
+    onPick(id);
+  };
+
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <span className="gd-card-h">Pick a channel</span>
+        <span className="gd-card-sub">Start with one — add more later</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-channels">
+          {card.options.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              className={`gd-channel ${opt.id === selected ? 'on' : ''}`}
+              onClick={() => pick(opt.id)}
+              disabled={disabled}
+            >
+              <div className="icon">{channelIcon(opt.id)}</div>
+              <div className="name">{opt.name}</div>
+              <div className="sub">{opt.sub}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ModelPickerView = ({
+  card,
+  onPick,
+  disabled,
+  pendingPick,
+}: {
+  card: ModelPickerCard;
+  onPick: (id: string) => void;
+  disabled: boolean;
+  pendingPick: string | null;
+}) => {
+  const [armed, setArmed] = useState<string | null>(null);
+  const selected = pendingPick ?? armed ?? card.recommended_id;
+
+  const pick = (id: string) => {
+    setArmed(id);
+    onPick(id);
+  };
+
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <span className="gd-card-h">Choose a model</span>
+        <span className="gd-card-sub">You can switch anytime</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-models">
+          {card.options.map((opt) => {
+            const isSelected = opt.id === selected;
+            const isRec = opt.id === card.recommended_id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`gd-model ${isSelected ? 'on' : ''}`}
+                onClick={() => pick(opt.id)}
+                disabled={disabled}
+              >
+                <span className="gd-model-radio" />
+                <div className="gd-model-info">
+                  <div className="gd-model-name">{opt.name}</div>
+                  <div className="gd-model-meta">
+                    {opt.cost_per_million_in} / 1M in · ~{opt.p50_latency_s}s p50 · {isRec ? card.rationale : opt.tag}
+                  </div>
+                </div>
+                {isRec && <span className="rec">Recommended</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ConnectSlackView = ({
+  card,
+  plaintextKey,
+  liveStatus,
+}: {
+  card: ConnectSlackCard;
+  plaintextKey: string | null;
+  liveStatus: 'waiting' | 'connected';
+}) => {
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const masked = card.agent_key_preview;
+  const display = revealed && plaintextKey ? plaintextKey : masked;
+
+  const copy = async () => {
+    const v = plaintextKey ?? masked;
+    if (!v) return;
+    try {
+      await navigator.clipboard.writeText(v);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard fail in insecure contexts — ignore */
+    }
+  };
+
+  const installHref = card.install_url || '#';
+
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <SlackGlyph size={14} />
+        <span className="gd-card-h">Connect Slack</span>
+        <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : '~30 seconds'}</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-slack">
+          <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+            Install the OpenTracy app in your workspace, then paste the agent key below in the Slack app config.
+          </div>
+          <div className="gd-slack-row">
+            <span className="label">Your agent key</span>
+            <button
+              type="button"
+              className="button-link"
+              onClick={() => setRevealed((v) => !v)}
+              disabled={!plaintextKey}
+            >
+              {revealed ? 'Hide' : 'Reveal'}
+            </button>
+          </div>
+          <div className="gd-input">
+            <Icon name="lock" size={13} style={{ color: 'var(--fg-subtle)' }} />
+            <input value={display ?? ''} readOnly placeholder="ot_live_…" />
+            <button
+              type="button"
+              className="button-link"
+              onClick={copy}
+              style={{ marginRight: -4 }}
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          {liveStatus === 'connected' && (
+            <div className="gd-connected">
+              <div className="icon"><Icon name="check" size={12} /></div>
+              <div>
+                <div style={{ fontWeight: 500 }}>Slack connected</div>
+                <div className="meta">First message received</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+      <div className="gd-card-actions">
+        <a
+          className="gd-btn-primary"
+          href={installHref}
+          target="_blank"
+          rel="noreferrer noopener"
+          style={{ textDecoration: 'none' }}
+        >
+          <SlackGlyph size={13} />
+          Open install page
+        </a>
+        {liveStatus !== 'connected' && (
+          <span style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>
+            Waiting for your first message in Slack… (polling 3s)
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const CopyableInput = ({
+  value,
+  plaintextKey,
+  fallbackValue,
+}: {
+  value: string | null;
+  plaintextKey: string | null;
+  fallbackValue: string;
+}) => {
+  const [revealed, setRevealed] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const display = revealed && plaintextKey ? plaintextKey : (value || fallbackValue);
+  const copyValue = plaintextKey ?? value ?? fallbackValue;
+
+  const copy = async () => {
+    if (!copyValue) return;
+    try {
+      await navigator.clipboard.writeText(copyValue);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard fail in insecure contexts */
+    }
+  };
+
+  return (
+    <div className="gd-input">
+      <Icon name="lock" size={13} style={{ color: 'var(--fg-subtle)' }} />
+      <input value={display ?? ''} readOnly />
+      {plaintextKey && (
+        <button type="button" className="button-link" onClick={() => setRevealed((v) => !v)}>
+          {revealed ? 'Hide' : 'Reveal'}
+        </button>
+      )}
+      <button type="button" className="button-link" onClick={copy} style={{ marginRight: -4 }}>
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+};
+
+const CodeBlock = ({ children }: { children: string }) => {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(children);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+  return (
+    <div className="gd-codeblock">
+      <pre>{children}</pre>
+      <button type="button" className="gd-codeblock-copy" onClick={copy}>
+        <Icon name={copied ? 'check' : 'copy'} size={12} /> {copied ? 'Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+};
+
+const ConnectWhatsappView = ({
+  card,
+  liveStatus,
+}: {
+  card: ConnectWhatsappCard;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="phone" size={14} style={{ color: '#25D366' }} />
+      <span className="gd-card-h">Connect WhatsApp</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'Meta Business setup'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+          In Meta Business Manager, point your WhatsApp webhook at the URL below and paste the verify token.
+        </div>
+        <div className="gd-slack-row">
+          <span className="label">Webhook URL</span>
+        </div>
+        <CopyableInput value={card.webhook_url} plaintextKey={null} fallbackValue="" />
+        <div className="gd-slack-row">
+          <span className="label">Verify token</span>
+        </div>
+        <CopyableInput value={card.verify_token_preview} plaintextKey={null} fallbackValue="" />
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>WhatsApp connected</div>
+              <div className="meta">First message received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+    <div className="gd-card-actions">
+      <a className="gd-btn-primary" href="https://business.facebook.com/" target="_blank" rel="noreferrer noopener" style={{ textDecoration: 'none' }}>
+        Open Meta Business
+      </a>
+      {liveStatus !== 'connected' && (
+        <span style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>
+          Waiting for your first WhatsApp message…
+        </span>
+      )}
+    </div>
+  </div>
+);
+
+const ConnectWebView = ({
+  card,
+  liveStatus,
+}: {
+  card: ConnectWebCard;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="globe" size={14} style={{ color: 'var(--info-fg)' }} />
+      <span className="gd-card-h">Embed Web widget</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'Drop the snippet on your site'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+          Paste this snippet before <code style={{ fontFamily: 'var(--font-mono)' }}>&lt;/body&gt;</code> on every page where the widget should appear.
+        </div>
+        <CodeBlock>{card.embed_snippet}</CodeBlock>
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>Widget connected</div>
+              <div className="meta">First visitor message received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+    <div className="gd-card-actions">
+      {liveStatus !== 'connected' && (
+        <span style={{ fontSize: 11.5, color: 'var(--fg-subtle)' }}>
+          Waiting for your first widget message…
+        </span>
+      )}
+    </div>
+  </div>
+);
+
+const ConnectApiView = ({
+  card,
+  plaintextKey,
+  liveStatus,
+}: {
+  card: ConnectApiCard;
+  plaintextKey: string | null;
+  liveStatus: 'waiting' | 'connected';
+}) => (
+  <div className="gd-card">
+    <div className="gd-card-head">
+      <Icon name="code" size={14} />
+      <span className="gd-card-h">Use the HTTP API</span>
+      <span className="gd-card-sub">{liveStatus === 'connected' ? 'Connected' : 'curl it from anywhere'}</span>
+    </div>
+    <div className="gd-card-body">
+      <div className="gd-slack">
+        <div className="gd-slack-row">
+          <span className="label">Agent key</span>
+        </div>
+        <CopyableInput value={card.agent_key_preview} plaintextKey={plaintextKey} fallbackValue="ot_live_…" />
+        <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55, marginTop: 4 }}>
+          Then send a request:
+        </div>
+        <CodeBlock>{card.curl_example}</CodeBlock>
+        {liveStatus === 'connected' && (
+          <div className="gd-connected">
+            <div className="icon"><Icon name="check" size={12} /></div>
+            <div>
+              <div style={{ fontWeight: 500 }}>API connected</div>
+              <div className="meta">First call received</div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  </div>
+);
+
+const TracePreviewView = ({ card }: { card: TracePreviewCard }) => {
+  const summary = card.summary ?? {};
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <Icon name="hash" size={12} />
+        <span className="gd-card-h">{String(summary.channel ?? 'support-test')}</span>
+        <span className="gd-card-sub">{card.trace_id}</span>
+      </div>
+      <div className="gd-card-body" style={{ fontSize: 13, color: 'var(--fg-muted)' }}>
+        First real message — {String(summary.turn_count ?? 1)} turn · {String(summary.duration_s ?? 0)}s
+      </div>
+    </div>
+  );
+};
+
+const ProviderKeyPasteView = ({
+  card,
+  onSaveKey,
+  saving,
+}: {
+  card: ProviderKeyPasteCard;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  saving: boolean;
+}) => {
+  const [value, setValue] = useState('');
   const [error, setError] = useState<string | null>(null);
-  const [transport, setTransport] = useState<OnboardingTransportInfo | null>(null);
+  const submit = async () => {
+    const trimmed = value.trim();
+    if (!trimmed) { setError('Paste a key first.'); return; }
+    setError(null);
+    try {
+      await onSaveKey(trimmed);
+      setValue('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not save the key.');
+    }
+  };
+  const isReady = card.status === 'ready';
+  return (
+    <div className="gd-card">
+      <div className="gd-card-head">
+        <Icon name="lock" size={14} style={{ color: 'var(--accent-fg)' }} />
+        <span className="gd-card-h">Paste your Anthropic API key</span>
+        <span className="gd-card-sub">{isReady ? 'Saved' : 'Stays KMS-encrypted'}</span>
+      </div>
+      <div className="gd-card-body">
+        <div className="gd-slack">
+          <div style={{ fontSize: 12.5, color: 'var(--fg-muted)', lineHeight: 1.55 }}>
+            We don't bill our account for your traffic — every tenant brings their own key. Grab one at{' '}
+            <a href={card.console_url} target="_blank" rel="noreferrer noopener" className="button-link">
+              console.anthropic.com
+            </a>.
+          </div>
+          {isReady ? (
+            <div className="gd-connected">
+              <div className="icon"><Icon name="check" size={12} /></div>
+              <div>
+                <div style={{ fontWeight: 500 }}>Key saved</div>
+                <div className="meta mono">{card.mask}</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              <input
+                className="gd-input"
+                type="password"
+                placeholder="sk-ant-…"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+                disabled={saving}
+                autoComplete="off"
+                spellCheck={false}
+                style={{ marginTop: 6 }}
+              />
+              {error && (
+                <div style={{ fontSize: 11.5, color: 'var(--danger-fg, #b00020)', marginTop: 4 }}>{error}</div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {!isReady && (
+        <div className="gd-card-actions">
+          <button
+            className="gd-btn-primary"
+            onClick={submit}
+            disabled={saving || !value.trim()}
+          >
+            {saving ? 'Saving…' : 'Save key + continue'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const RenderCard = ({
+  card,
+  onPick,
+  disabled,
+  plaintextKey,
+  liveStatus,
+  pendingPick,
+  onSaveKey,
+  savingKey,
+}: {
+  card: OnboardingCard;
+  onPick: (key: 'model' | 'channel', value: string) => void;
+  disabled: boolean;
+  plaintextKey: string | null;
+  liveStatus: 'waiting' | 'connected';
+  pendingPick: { key: 'model' | 'channel'; value: string } | null;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  savingKey: boolean;
+}) => {
+  switch (card.type) {
+    case 'model_picker':
+      return (
+        <ModelPickerView
+          card={card}
+          onPick={(v) => onPick('model', v)}
+          disabled={disabled}
+          pendingPick={pendingPick?.key === 'model' ? pendingPick.value : null}
+        />
+      );
+    case 'channel_picker':
+      return (
+        <ChannelPickerView
+          card={card}
+          onPick={(v) => onPick('channel', v)}
+          disabled={disabled}
+          pendingPick={pendingPick?.key === 'channel' ? pendingPick.value : null}
+        />
+      );
+    case 'provider_key_paste':
+      return (
+        <ProviderKeyPasteView card={card} onSaveKey={onSaveKey} saving={savingKey} />
+      );
+    case 'connect_slack':
+      return <ConnectSlackView card={card} plaintextKey={plaintextKey} liveStatus={liveStatus} />;
+    case 'connect_whatsapp':
+      return <ConnectWhatsappView card={card} liveStatus={liveStatus} />;
+    case 'connect_web':
+      return <ConnectWebView card={card} liveStatus={liveStatus} />;
+    case 'connect_api':
+      return <ConnectApiView card={card} plaintextKey={plaintextKey} liveStatus={liveStatus} />;
+    case 'trace_preview':
+      return <TracePreviewView card={card} />;
+    default:
+      return null;
+  }
+};
+
+// ─── Turn renderers ──────────────────────────────────────────────
+
+const AssistantTurn = ({
+  turn,
+  onPick,
+  pending,
+  plaintextKey,
+  liveStatus,
+  pendingPick,
+  onSaveKey,
+  savingKey,
+}: {
+  turn: OnboardingV2Turn;
+  onPick: (key: 'model' | 'channel', value: string) => void;
+  pending: boolean;
+  plaintextKey: string | null;
+  liveStatus: 'waiting' | 'connected';
+  pendingPick: { key: 'model' | 'channel'; value: string } | null;
+  onSaveKey: (plaintext: string) => Promise<void>;
+  savingKey: boolean;
+}) => (
+  <div className="gd-msg claude">
+    <div className="gd-msg-meta">
+      <div className="av c">C</div>
+      <span className="name">Claude</span>
+      <span>· OpenTracy</span>
+    </div>
+    <div className="gd-msg-body">
+      {turn.text && turn.text.split('\n\n').map((p, i) => <p key={i}>{p}</p>)}
+      {turn.cards.map((c, i) => (
+        <RenderCard
+          key={i}
+          card={c}
+          onPick={onPick}
+          disabled={pending}
+          plaintextKey={plaintextKey}
+          liveStatus={liveStatus}
+          pendingPick={pendingPick}
+          onSaveKey={onSaveKey}
+          savingKey={savingKey}
+        />
+      ))}
+    </div>
+  </div>
+);
+
+const UserTurn = ({
+  turn,
+  onEdit,
+  disabled,
+}: {
+  turn: OnboardingV2Turn;
+  onEdit: (key: 'model' | 'channel') => void;
+  disabled: boolean;
+}) => {
+  const isChip = !turn.text && turn.decision_key;
+  return (
+    <div className="gd-msg user">
+      <div className="gd-msg-meta">
+        <div className="av u">JM</div>
+        <span className="name">You</span>
+      </div>
+      <div className="gd-msg-body">
+        {isChip ? (
+          <span className="gd-settled">
+            <Icon name="check" size={11} />
+            {turn.decision_label}
+            <button
+              type="button"
+              className="edit"
+              onClick={() => onEdit(turn.decision_key as 'model' | 'channel')}
+              disabled={disabled}
+            >
+              edit
+            </button>
+          </span>
+        ) : (
+          <p>{turn.text}</p>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ─── Composers ───────────────────────────────────────────────────
+
+const WelcomeComposer = ({
+  onSubmit,
+  pending,
+}: {
+  onSubmit: (text: string) => void;
+  pending: boolean;
+}) => {
+  const [value, setValue] = useState('');
+  const submit = (e?: FormEvent) => {
+    e?.preventDefault();
+    const v = value.trim();
+    if (!v || pending) return;
+    onSubmit(v);
+    setValue('');
+  };
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+  return (
+    <form className="gd-welcome-input" onSubmit={submit}>
+      <textarea
+        placeholder="What should your agent help with?"
+        rows={2}
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={onKey}
+        disabled={pending}
+      />
+      <div className="gd-welcome-input-foot">
+        <div className="gd-welcome-input-tools">
+          <button type="button" className="gd-welcome-tool" title="Attach" disabled>
+            <Icon name="file" size={14} />
+          </button>
+          <button type="button" className="gd-welcome-tool" title="Link" disabled>
+            <Icon name="link" size={14} />
+          </button>
+        </div>
+        <button
+          type="submit"
+          className="gd-welcome-send"
+          disabled={pending || !value.trim()}
+          aria-label="Send"
+        >
+          <Icon name="arrowUp" size={14} />
+        </button>
+      </div>
+    </form>
+  );
+};
+
+const ChatComposer = ({
+  onSubmit,
+  pending,
+  placeholder,
+}: {
+  onSubmit: (text: string) => void;
+  pending: boolean;
+  placeholder: string;
+}) => {
+  const [value, setValue] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  const submit = (e?: FormEvent) => {
+    e?.preventDefault();
+    const v = value.trim();
+    if (!v || pending) return;
+    onSubmit(v);
+    setValue('');
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
 
   useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <form className="gd-composer" onSubmit={submit}>
+      <div className="gd-composer-inner">
+        <textarea
+          ref={textareaRef}
+          placeholder={placeholder}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={onKey}
+          rows={1}
+          disabled={pending}
+        />
+        <button
+          type="submit"
+          className="gd-composer-send"
+          disabled={pending || !value.trim()}
+          aria-label="Send"
+        >
+          <Icon name="arrowUp" size={14} />
+        </button>
+      </div>
+    </form>
+  );
+};
+
+// ─── Screen ──────────────────────────────────────────────────────
+
+const PLACEHOLDERS: Record<OnboardingPhase, string> = {
+  intent: 'Tell Claude what your agent should do…',
+  model: 'Reply or pick from the card above.',
+  key: 'Paste your Anthropic key in the card above — or reply.',
+  channel: "Pick a card above or just type — e.g. \"Slack\"",
+  connect: 'Paste the token above, or reply with anything to add to the prompt…',
+  live: 'Ask Claude anything — e.g. "show me yesterday\'s tone issues"',
+  done: 'Onboarding complete — head to the dashboard.',
+};
+
+const STARTERS: Array<{ label: string; message: string }> = [
+  { label: 'Customer support', message: 'I want a customer support agent for my Shopify store — answer order and refund questions.' },
+  { label: 'Sales outreach', message: 'I want a sales outreach agent that qualifies inbound leads for our SaaS.' },
+  { label: 'Internal helpdesk', message: 'I want an internal helpdesk agent for IT and HR questions inside our company.' },
+  { label: 'Research assistant', message: 'I want a research assistant that summarises long PDFs and answers questions about them.' },
+  { label: 'Refund flow', message: 'I want a refund-flow agent that handles refund requests and escalates billing issues.' },
+];
+
+// Phase → progress + sidebar/panel visibility.
+const visibilityFor = (
+  phase: OnboardingPhase,
+  hasUserMsg: boolean,
+  slackConnected: boolean,
+): {
+  showWelcome: boolean;
+  sidebarState: SidebarState;
+  panelStage: PanelStage | 'empty';
+  progress: number;
+} => {
+  if (!hasUserMsg && phase === 'intent') {
+    return { showWelcome: true, sidebarState: 'empty', panelStage: 'empty', progress: 0 };
+  }
+  if (phase === 'intent') {
+    return { showWelcome: false, sidebarState: 'empty', panelStage: 'initial', progress: 15 };
+  }
+  if (phase === 'model') {
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'initial', progress: 35 };
+  }
+  if (phase === 'key') {
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'initial', progress: 55 };
+  }
+  if (phase === 'channel') {
+    return { showWelcome: false, sidebarState: 'draft', panelStage: 'channel', progress: 70 };
+  }
+  if (phase === 'connect') {
+    return {
+      showWelcome: false,
+      sidebarState: 'partial',
+      panelStage: slackConnected ? 'connected' : 'channel',
+      progress: slackConnected ? 90 : 80,
+    };
+  }
+  // live / done
+  return { showWelcome: false, sidebarState: 'ready', panelStage: 'full', progress: 100 };
+};
+
+const channelLabel = (id: string | undefined): ReactNode => {
+  if (id === 'slack') return (<><SlackGlyph size={11} /> Slack</>);
+  if (id === 'whatsapp') return (<><Icon name="phone" size={11} /> WhatsApp</>);
+  if (id === 'web') return (<><Icon name="globe" size={11} /> Web</>);
+  return id ?? null;
+};
+
+const modelLabel = (id: string | undefined): string | null => {
+  if (!id) return null;
+  if (id.includes('haiku')) return 'Haiku 4';
+  if (id.includes('sonnet')) return 'Sonnet 4';
+  if (id.includes('opus')) return 'Opus 4';
+  return id;
+};
+
+export const Onboarding = ({ onDone }: OnboardingProps) => {
+  const [session, setSession] = useState<OnboardingV2Session | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [plaintextKey, setPlaintextKey] = useState<string | null>(null);
+  const [slackInstalled, setSlackInstalled] = useState(false);
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const prevDecisionsRef = useRef<string>('');
+  const [updatedSection, setUpdatedSection] = useState<'behavior' | 'tone' | 'channel' | 'model' | null>(null);
+  // What the user just clicked on a picker card. Cleared the moment the
+  // server's reply arrives (the picker is replaced by a chip anyway) —
+  // this only exists to give the click instant visual feedback.
+  const [pendingPick, setPendingPick] = useState<{ key: 'model' | 'channel'; value: string } | null>(null);
+  const [savingKey, setSavingKey] = useState(false);
+
+  // Cold load.
+  useEffect(() => {
     let cancelled = false;
-    void getOnboardingTransport()
-      .then((t) => {
-        if (!cancelled) setTransport(t);
+    void getOnboardingV2Session()
+      .then((s) => {
+        if (cancelled) return;
+        setSession(s);
+        if (s.agent_key_plaintext_once) setPlaintextKey(s.agent_key_plaintext_once);
+        setSlackInstalled(Boolean(s.slack?.installed));
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (!cancelled) setError(String(e?.message ?? e));
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const callTurn = async (history: ChatMsg[]) => {
-    setThinking(true);
+  // Autoscroll on new turn.
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [session?.turns.length]);
+
+  // Poll Slack status while connecting.
+  useEffect(() => {
+    if (!session || session.phase !== 'connect') return;
+    if (slackInstalled) return;
+    const t = window.setInterval(async () => {
+      try {
+        const status = await getSlackConnectStatus();
+        if (status.installed) setSlackInstalled(true);
+      } catch {
+        /* network blip — retry next tick */
+      }
+    }, 3000);
+    return () => window.clearInterval(t);
+  }, [session?.phase, slackInstalled, session]);
+
+  // Watch decisions/phase changes → drive the "just updated" pulse on the
+  // right panel. Compare the latest decisions snapshot to the previous one;
+  // the first key that differs is the section we highlight.
+  useEffect(() => {
+    if (!session) return;
+    const next = JSON.stringify({
+      phase: session.phase,
+      decisions: session.decisions,
+      slack: slackInstalled,
+    });
+    if (prevDecisionsRef.current && prevDecisionsRef.current !== next) {
+      const prev = JSON.parse(prevDecisionsRef.current);
+      const d = session.decisions as Record<string, unknown>;
+      const pd = prev.decisions as Record<string, unknown>;
+      let section: typeof updatedSection = null;
+      if (d.purpose !== pd.purpose) section = 'behavior';
+      else if (d.tone !== pd.tone) section = 'tone';
+      else if (d.channel !== pd.channel || slackInstalled !== prev.slack) section = 'channel';
+      else if (d.model !== pd.model) section = 'model';
+      else if (session.phase !== prev.phase) {
+        section = session.phase === 'channel' ? 'tone' : session.phase === 'connect' ? 'channel' : section;
+      }
+      if (section) {
+        setUpdatedSection(section);
+        const t = window.setTimeout(() => setUpdatedSection(null), 2400);
+        return () => window.clearTimeout(t);
+      }
+    }
+    prevDecisionsRef.current = next;
+  }, [session, slackInstalled]);
+
+  const applySession = (s: OnboardingV2Session) => {
+    setSession(s);
+    if (s.agent_key_plaintext_once) setPlaintextKey(s.agent_key_plaintext_once);
+    setSlackInstalled((prev) => prev || Boolean(s.slack?.installed));
+  };
+
+  const handleSay = async (text: string) => {
+    setPending(true);
     setError(null);
     try {
-      const apiMessages: OnboardingChatMessage[] = history.map((m) => ({
-        role: m.role,
-        content: m.text,
-      }));
-      const out = await onboardingTurn(apiMessages);
-      setConfig((c) => ({ ...c, ...out.config }));
-      setMessages((m) => [
-        ...m,
-        { role: 'assistant', text: out.reply, justAdded: out.justAdded ?? null },
-      ]);
-      if (out.ready) setReady(true);
+      const next = await sayOnboardingV2(text);
+      applySession(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(String((e as Error)?.message ?? e));
     } finally {
-      setThinking(false);
+      setPending(false);
     }
   };
 
-  const handleFirstSend = async (text: string) => {
-    setStage('chat');
-    const next: ChatMsg[] = [{ role: 'user', text }];
-    setMessages(next);
-    await callTurn(next);
-  };
-
-  const handleReply = async (text: string) => {
-    const next = [...messages, { role: 'user' as const, text }];
-    setMessages(next);
-    await callTurn(next);
-  };
-
-  const startConfirm = () => setStage('confirm');
-
-  const launch = async () => {
-    setStage('launching');
+  const handlePick = async (key: 'model' | 'channel', value: string) => {
+    setPending(true);
+    setError(null);
+    setPendingPick({ key, value });
     try {
+      const next = await decideOnboardingV2(key, value);
+      applySession(next);
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    } finally {
+      setPending(false);
+      setPendingPick(null);
+    }
+  };
+
+  const handleSaveKey = async (plaintext: string) => {
+    setSavingKey(true);
+    setError(null);
+    try {
+      const next = await saveOnboardingV2Key('anthropic', plaintext);
+      applySession(next);
+    } catch (e) {
+      // Re-throw so the input view can surface the error inline.
+      throw e instanceof Error ? e : new Error(String(e));
+    } finally {
+      setSavingKey(false);
+    }
+  };
+
+  const handleSkip = async () => {
+    setPending(true);
+    setError(null);
+    try {
+      const state = await skipOnboarding();
+      onDone(state);
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+      setPending(false);
+    }
+  };
+
+  const handleEdit = async (key: 'model' | 'channel') => {
+    setPending(true);
+    setError(null);
+    try {
+      const next = await rewindOnboardingV2(key);
+      if (key === 'model') setPlaintextKey(null);
+      applySession(next);
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    } finally {
+      setPending(false);
+    }
+  };
+
+  const finish = async () => {
+    if (!session) return;
+    setPending(true);
+    setError(null);
+    try {
+      const decisions = session.decisions as Record<string, string>;
       const next = await completeOnboarding({
         template: null,
-        name: config.name,
+        name: session.agent_id ?? '',
         company: '',
-        prompt: config.prompt,
-        model: config.model,
-        tools: config.tools,
-        channels: config.channels,
+        prompt: decisions.purpose ?? '',
+        model: decisions.model ?? 'claude-sonnet-4-6',
+        tools: [],
+        channels: decisions.channel ? [decisions.channel] : [],
       });
-      await new Promise((r) => setTimeout(r, 1800));
       onDone(next);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setStage('confirm');
+      setError(String((e as Error)?.message ?? e));
+    } finally {
+      setPending(false);
     }
   };
 
-  const skip = async () => {
-    try {
-      const next = await skipOnboarding();
-      onDone(next);
-    } catch {
-      onDone(null);
-    }
-  };
-
-  if (stage === 'launching') return <Launching name={config.name} />;
-
-  return (
-    <div className="onbA">
-      <Header
-        stage={stage}
-        onSkip={skip}
-        onBack={stage === 'confirm' ? () => setStage('chat') : null}
-      />
-      {stage === 'welcome' && <Welcome onSend={handleFirstSend} transport={transport} />}
-      {stage === 'chat' && (
-        <ChatStage
-          messages={messages}
-          thinking={thinking}
-          config={config}
-          ready={ready}
-          error={error}
-          onReply={handleReply}
-          onConfirm={startConfirm}
-        />
-      )}
-      {stage === 'confirm' && (
-        <Confirm
-          config={config}
-          onChangeConfig={setConfig}
-          onAsk={(text) => {
-            setStage('chat');
-            setReady(false);
-            void handleReply(text);
-          }}
-          onLaunch={() => void launch()}
-          error={error}
-        />
-      )}
-    </div>
+  // Derived state.
+  const hasUserMsg = useMemo(
+    () => Boolean(session?.turns.some((t) => t.role === 'user')),
+    [session?.turns],
   );
-};
 
-// ─── Shared chrome ────────────────────────────────────────────────────────
-const Header = ({
-  stage,
-  onSkip,
-  onBack,
-}: {
-  stage: Stage;
-  onSkip: () => void;
-  onBack: (() => void) | null;
-}) => (
-  <header className="onbA-head">
-    <div className="onbA-brand">
-      <div className="sidebar-mark" />
-      <span>
-        OpenTracy <span className="dim">Evolution</span>
-      </span>
-    </div>
-    <div className="onbA-head-right">
-      {stage === 'chat' && (
-        <span className="onbA-stagetag">
-          <span className="onbA-stagetag-dot" /> Building agent
-        </span>
-      )}
-      {onBack && (
-        <button className="btn ghost sm" onClick={onBack}>
-          ← Back to chat
-        </button>
-      )}
-      <button className="btn ghost sm" onClick={onSkip}>
-        Skip and use the wizard
-      </button>
-    </div>
-  </header>
-);
-
-const ClaudeAvatar = ({ size = 28, thinking = false }: { size?: number; thinking?: boolean }) => (
-  <div
-    className={`onbA-avatar onbA-avatar-c ${thinking ? 'onbA-avatar-thinking' : ''}`}
-    style={{ width: size, height: size, fontSize: size * 0.45 }}
-  >
-    C
-  </div>
-);
-
-const UserAvatar = ({ size = 28, label = 'You' }: { size?: number; label?: string }) => (
-  <div
-    className="onbA-avatar onbA-avatar-u"
-    style={{ width: size, height: size, fontSize: size * 0.36 }}
-  >
-    {label.slice(0, 2).toUpperCase()}
-  </div>
-);
-
-// ─── Transport badge — shows which brain is driving the chat ────────────
-const TransportBadge = ({ transport }: { transport: OnboardingTransportInfo }) => {
-  if (transport.transport === 'claude_code_cli') {
+  if (error && !session) {
     return (
-      <div className="onbA-transport-badge onbA-transport-cli">
-        <span className="onbA-transport-dot" />
-        <span>
-          Connected to <strong>Claude Code</strong>
-          {transport.claude_version && ` v${transport.claude_version}`} · reading{' '}
-          <code className="mono">{shortCwd(transport.cwd)}</code>
-        </span>
+      <div className="gd-wrap" style={{ '--sidebar-w': '0px', '--panel-w': '0px' } as CSSProperties}>
+        <div />
+        <main className="gd-main">
+          <div className="gd-thread">
+            <div className="gd-thread-inner">
+              <div className="gd-msg">
+                <div className="gd-msg-body">
+                  Could not load the onboarding session. <strong>{error}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+        <div />
       </div>
     );
   }
-  if (transport.transport === 'anthropic_api') {
+
+  if (!session) {
     return (
-      <div className="onbA-transport-badge">
-        <span className="onbA-transport-dot" />
-        <span>
-          Connected via <strong>Anthropic API</strong> · no filesystem access
-        </span>
+      <div className="gd-wrap" style={{ '--sidebar-w': '0px', '--panel-w': '0px' } as CSSProperties}>
+        <div />
+        <main className="gd-main">
+          <div className="gd-thread">
+            <div className="gd-thread-inner">
+              <div className="gd-msg">
+                <div className="gd-msg-body">
+                  <span className="gd-typing"><span /><span /><span /></span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </main>
+        <div />
       </div>
     );
   }
-  return (
-    <div className="onbA-transport-badge onbA-transport-offline">
-      <span className="onbA-transport-dot" />
-      <span>
-        Offline mode · scripted onboarding (install <code className="mono">claude</code> or set ANTHROPIC_API_KEY)
-      </span>
-    </div>
+
+  const decisions = (session.decisions ?? {}) as Record<string, string>;
+  const { showWelcome, sidebarState, panelStage, progress } = visibilityFor(
+    session.phase,
+    hasUserMsg,
+    slackInstalled,
   );
-};
 
-function shortCwd(p: string): string {
-  if (!p) return '~';
-  const home = '/Users/';
-  if (p.startsWith(home)) {
-    const rest = p.slice(home.length).split('/').slice(1).join('/');
-    return rest ? `~/${rest}` : '~';
-  }
-  return p;
-}
-
-// ─── Welcome ──────────────────────────────────────────────────────────────
-// Cycling examples used as the textarea's placeholder when empty.
-// Typed one phrase at a time, pause, delete, next — keeps a sense of
-// motion without distracting from the input.
-const PLACEHOLDER_PHRASES = [
-  'A customer support agent for my Shopify store',
-  'An SDR that qualifies inbound leads with BANT',
-  'A research assistant that cites sources',
-  'An internal helpdesk bot for IT & HR questions',
-  'A coding assistant for my team',
-];
-
-const Welcome = ({
-  onSend,
-  transport,
-}: {
-  onSend: (text: string) => void;
-  transport: OnboardingTransportInfo | null;
-}) => {
-  const [text, setText] = useState('');
-  const [placeholder, setPlaceholder] = useState('');
-  const taRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    taRef.current?.focus();
-  }, []);
-
-  // Typewriter that cycles PLACEHOLDER_PHRASES. Pauses while the
-  // operator is typing — the empty-text guard makes sure their cursor
-  // value doesn't fight the animation.
-  useEffect(() => {
-    if (text.length > 0) return; // user is typing — leave their input alone
-    let phraseIdx = 0;
-    let charIdx = 0;
-    let deleting = false;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const tick = () => {
-      const full = PLACEHOLDER_PHRASES[phraseIdx];
-      if (!deleting) {
-        charIdx += 1;
-        setPlaceholder(full.slice(0, charIdx));
-        if (charIdx >= full.length) {
-          // hold the full phrase for a beat before erasing
-          deleting = true;
-          timer = setTimeout(tick, 1800);
-          return;
-        }
-        timer = setTimeout(tick, 38 + Math.random() * 30);
-      } else {
-        charIdx -= 1;
-        setPlaceholder(full.slice(0, Math.max(0, charIdx)));
-        if (charIdx <= 0) {
-          deleting = false;
-          phraseIdx = (phraseIdx + 1) % PLACEHOLDER_PHRASES.length;
-          timer = setTimeout(tick, 320);
-          return;
-        }
-        timer = setTimeout(tick, 22);
-      }
-    };
-    timer = setTimeout(tick, 600);
-    return () => {
-      if (timer) clearTimeout(timer);
-    };
-  }, [text]);
-
-  const submit = () => {
-    const t = text.trim();
-    if (t.length < 8) return;
-    onSend(t);
-  };
-
-  return (
-    <div className="onbA-welcome">
-      <div className="onbA-welcome-inner">
-        <div className="onbA-welcome-greet">
-          <ClaudeAvatar size={52} />
-          <h1 className="onbA-h1">Let's build your first agent.</h1>
-          <p className="onbA-sub">
-            Tell me what it should do and who it's for. I'll set up the prompt, model, tools,
-            and channels — you can review and tweak everything before launch.
-          </p>
-          {transport && <TransportBadge transport={transport} />}
-        </div>
-
-        <div className="onbA-composer">
-          <textarea
-            ref={taRef}
-            className="onbA-composer-input"
-            rows={3}
-            placeholder={placeholder || PLACEHOLDER_PHRASES[0]}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
-            }}
-          />
-          <div className="onbA-composer-foot">
-            <span className="dim onbA-composer-hint">
-              <span className="onbA-composer-kbd">⌘</span>
-              <span className="onbA-composer-kbd">↵</span> to send
-            </span>
-            <button
-              className="onbA-send"
-              onClick={submit}
-              disabled={text.trim().length < 8}
-              title="Send (⌘↵)"
-            >
-              <Icon name="arrowUp" size={14} />
-            </button>
-          </div>
-        </div>
-
-        <div className="onbA-starters">
-          <div className="onbA-starters-label">Or start from a recipe</div>
-          <div className="onbA-starters-grid">
-            {STARTERS.map((s) => (
-              <button
-                key={s.title}
-                className="onbA-starter"
-                onClick={() => onSend(s.seed)}
-              >
-                <div className="onbA-starter-title">{s.title}</div>
-                <div className="onbA-starter-hint dim">{s.hint}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─── Chat stage (split: messages + live config) ─────────────────────────
-const ChatStage = ({
-  messages,
-  thinking,
-  config,
-  ready,
-  error,
-  onReply,
-  onConfirm,
-}: {
-  messages: ChatMsg[];
-  thinking: boolean;
-  config: OnboardingTurnConfig;
-  ready: boolean;
-  error: string | null;
-  onReply: (text: string) => void;
-  onConfirm: () => void;
-}) => {
-  const [draft, setDraft] = useState('');
-  const taRef = useRef<HTMLTextAreaElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    taRef.current?.focus();
-  }, [thinking]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, thinking]);
-
-  const submit = () => {
-    const t = draft.trim();
-    if (!t || thinking) return;
-    onReply(t);
-    setDraft('');
-  };
-
-  return (
-    <div className="onbA-split">
-      <section className="onbA-chat-pane">
-        <div className="onbA-chat-scroll" ref={scrollRef}>
-          {messages.map((m, i) => (
-            <Message key={i} role={m.role} text={m.text} justAdded={m.justAdded ?? undefined} />
-          ))}
-          {thinking && (
-            <div className="onbA-msg onbA-msg-c">
-              <ClaudeAvatar thinking />
-              <div className="onbA-bubble onbA-bubble-thinking">
-                <span className="onbA-typing">
-                  <span />
-                  <span />
-                  <span />
-                </span>
-              </div>
-            </div>
-          )}
-          {error && !thinking && (
-            <div className="onbA-msg onbA-msg-c">
-              <ClaudeAvatar />
-              <div
-                className="onbA-bubble"
-                style={{ background: 'var(--bad-soft)', color: 'var(--bad-fg)', border: '1px solid var(--bad-fg)' }}
-              >
-                Sorry — something went wrong sending that. Try again? <br />
-                <span className="dim" style={{ fontSize: 11 }}>{error}</span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {ready && !thinking && (
-          <div className="onbA-readybar">
-            <div>
-              <div className="onbA-readybar-title">Ready when you are.</div>
-              <div className="onbA-readybar-sub dim">
-                Or keep chatting to refine — I'll update the config live.
-              </div>
-            </div>
-            <button className="btn primary" onClick={onConfirm}>
-              Review and launch <Icon name="chevron" size={13} />
-            </button>
-          </div>
-        )}
-
-        <div className="onbA-replybar">
-          <textarea
-            ref={taRef}
-            className="onbA-reply-input"
-            rows={1}
-            placeholder={thinking ? 'Claude is thinking…' : 'Reply…'}
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            disabled={thinking}
-          />
-          <button
-            className="onbA-send onbA-send-sm"
-            onClick={submit}
-            disabled={!draft.trim() || thinking}
-          >
-            <Icon name="arrowUp" size={13} />
-          </button>
-        </div>
-      </section>
-
-      <aside className="onbA-config-pane">
-        <LiveConfig config={config} />
-      </aside>
-    </div>
-  );
-};
-
-const Message = ({
-  role,
-  text,
-  justAdded,
-}: {
-  role: 'user' | 'assistant';
-  text: string;
-  justAdded?: OnboardingJustAdded;
-}) => {
-  if (role === 'user') {
+  // ─── Welcome (G1) ─────────────────────────────────────────────
+  if (showWelcome) {
     return (
-      <div className="onbA-msg onbA-msg-u">
-        <div className="onbA-bubble onbA-bubble-u">{text}</div>
-        <UserAvatar />
-      </div>
-    );
-  }
-  return (
-    <div className="onbA-msg onbA-msg-c">
-      <ClaudeAvatar />
-      <div className="onbA-msg-body">
-        <div className="onbA-bubble">{text}</div>
-        {justAdded && <JustAdded {...justAdded} />}
-      </div>
-    </div>
-  );
-};
-
-const JustAdded = ({
-  tool,
-  model,
-  channel,
-}: {
-  tool?: string | null;
-  model?: string | null;
-  channel?: string | null;
-}) => (
-  <div className="onbA-justadded">
-    {tool && (
-      <span className="onbA-justadded-row">
-        <span className="dim">added tool</span>
-        <span className="onbA-mono-chip">{tool}</span>
-      </span>
-    )}
-    {model && (
-      <span className="onbA-justadded-row">
-        <span className="dim">switched model</span>
-        <span className="onbA-chip-soft">{MODELS.find((m) => m.id === model)?.name || model}</span>
-      </span>
-    )}
-    {channel && (
-      <span className="onbA-justadded-row">
-        <span className="dim">added channel</span>
-        <span className="onbA-chip">{CHANNEL_LABELS[channel] || channel}</span>
-      </span>
-    )}
-  </div>
-);
-
-// ─── Live config card (right pane) ──────────────────────────────────────
-const LiveConfig = ({ config }: { config: OnboardingTurnConfig }) => {
-  const model = MODELS.find((m) => m.id === config.model);
-  const completeness = computeCompleteness(config);
-
-  return (
-    <div className="onbA-lc">
-      <div className="onbA-lc-head">
-        <div className="onbA-lc-label">BUILDING</div>
-        <div className="onbA-lc-pct">{completeness}%</div>
-      </div>
-      <div className="onbA-lc-progress">
-        <span style={{ width: `${completeness}%` }} />
-      </div>
-
-      <div className="onbA-lc-row">
-        <div className="onbA-lc-k">name</div>
-        <div className="onbA-lc-v mono">
-          {config.name || <em className="onbA-empty">unnamed-agent</em>}
-        </div>
-      </div>
-      <div className="onbA-lc-row">
-        <div className="onbA-lc-k">model</div>
-        <div className="onbA-lc-v">
-          {model ? (
-            <span className="onbA-chip-soft">{model.name}</span>
-          ) : (
-            <em className="onbA-empty">—</em>
-          )}
-        </div>
-      </div>
-
-      <div className="onbA-lc-row onbA-lc-row-block">
-        <div className="onbA-lc-k">prompt</div>
-        {config.prompt ? (
-          <div className="onbA-lc-prompt">{config.prompt}</div>
-        ) : (
-          <div className="onbA-lc-empty">
-            <em>Empty — Claude will fill this as you chat.</em>
-          </div>
-        )}
-      </div>
-
-      <div className="onbA-lc-row onbA-lc-row-block">
-        <div className="onbA-lc-k">tools · {config.tools.length}</div>
-        {config.tools.length === 0 ? (
-          <div className="onbA-lc-empty">
-            <em>None yet.</em>
-          </div>
-        ) : (
-          <div className="onbA-lc-chips">
-            {config.tools.map((t) => (
-              <span key={t} className="onbA-mono-chip">
-                {t}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="onbA-lc-row onbA-lc-row-block">
-        <div className="onbA-lc-k">channels · {config.channels.length}</div>
-        {config.channels.length === 0 ? (
-          <div className="onbA-lc-empty">
-            <em>Not decided yet.</em>
-          </div>
-        ) : (
-          <div className="onbA-lc-chips">
-            {config.channels.map((c) => (
-              <span key={c} className="onbA-chip">
-                {CHANNEL_LABELS[c] || c}
-              </span>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <div className="onbA-lc-foot">
-        <Icon name="info" size={12} />
-        <span>Everything here is editable in the next step — and changeable forever after.</span>
-      </div>
-    </div>
-  );
-};
-
-function computeCompleteness(c: OnboardingTurnConfig): number {
-  let n = 0;
-  if (c.name) n += 20;
-  if (c.model) n += 15;
-  if (c.prompt && c.prompt.length > 40) n += 30;
-  if (c.tools.length > 0) n += 15;
-  if (c.channels.length > 0) n += 20;
-  return Math.min(100, n);
-}
-
-// ─── Confirm ────────────────────────────────────────────────────────────
-const Confirm = ({
-  config,
-  onChangeConfig,
-  onAsk,
-  onLaunch,
-  error,
-}: {
-  config: OnboardingTurnConfig;
-  onChangeConfig: (c: OnboardingTurnConfig) => void;
-  onAsk: (text: string) => void;
-  onLaunch: () => void;
-  error: string | null;
-}) => {
-  const [askText, setAskText] = useState('');
-  const [editingPrompt, setEditingPrompt] = useState(false);
-  const [promptDraft, setPromptDraft] = useState(config.prompt);
-  const model = MODELS.find((m) => m.id === config.model) || MODELS[1];
-
-  const sendAsk = () => {
-    const t = askText.trim();
-    if (!t) return;
-    onAsk(t);
-  };
-
-  const savePrompt = () => {
-    onChangeConfig({ ...config, prompt: promptDraft });
-    setEditingPrompt(false);
-  };
-
-  return (
-    <div className="onbA-confirm">
-      <div className="onbA-confirm-inner">
-        <div className="onbA-confirm-head">
-          <ClaudeAvatar size={32} />
-          <div>
-            <h2 className="onbA-confirm-h">Here's what I built. Look right?</h2>
-            <p className="onbA-confirm-sub dim">
-              Anything you can click below, you can edit. Or ask me to change something.
-            </p>
-          </div>
-        </div>
-
-        <div className="onbA-spec">
-          <div className="onbA-spec-top">
-            <div>
-              <span className="onbA-spec-name mono">{config.name || 'unnamed-agent'}</span>
-              <span className="onbA-spec-ver dim"> v0.1 · draft</span>
+      <div className="gd-wrap" style={{ '--sidebar-w': '0px', '--panel-w': '0px' } as CSSProperties}>
+        <div />
+        <main className="gd-main">
+          <div className="gd-welcome">
+            <div className="gd-welcome-brand">
+              <span className="mark" />
+              <span>OpenTracy <span className="dim">Evolution</span></span>
             </div>
-            <button className="btn ghost sm" disabled>
-              Rename
-            </button>
-          </div>
-
-          <div className="onbA-spec-row">
-            <div className="onbA-spec-k">model</div>
-            <div className="onbA-spec-v">
-              <span className="onbA-chip-soft">{model.name}</span>
-              <span className="dim" style={{ marginLeft: 8, fontSize: 12 }}>
-                fallback Sonnet · router learns later
-              </span>
-            </div>
-          </div>
-
-          <div className="onbA-spec-row">
-            <div className="onbA-spec-k">tools</div>
-            <div className="onbA-spec-v onbA-spec-chips">
-              {config.tools.length === 0 ? (
-                <em className="dim">None</em>
-              ) : (
-                config.tools.map((t) => (
-                  <span key={t} className="onbA-mono-chip">
-                    {t}
-                  </span>
-                ))
-              )}
-              <button className="onbA-add-chip" disabled>
-                + tool
-              </button>
-            </div>
-          </div>
-
-          <div className="onbA-spec-row">
-            <div className="onbA-spec-k">channels</div>
-            <div className="onbA-spec-v onbA-spec-chips">
-              {config.channels.length === 0 ? (
-                <em className="dim">None</em>
-              ) : (
-                config.channels.map((c) => (
-                  <span key={c} className="onbA-chip">
-                    {CHANNEL_LABELS[c] || c}
-                  </span>
-                ))
-              )}
-              <button className="onbA-add-chip" disabled>
-                + channel
-              </button>
-            </div>
-          </div>
-
-          <div className="onbA-spec-row onbA-spec-row-block">
-            <div className="onbA-spec-k-row">
-              <div className="onbA-spec-k">prompt</div>
-              {!editingPrompt && (
-                <button
-                  className="btn ghost sm"
-                  onClick={() => {
-                    setPromptDraft(config.prompt);
-                    setEditingPrompt(true);
-                  }}
-                >
-                  Edit
-                </button>
-              )}
-              {editingPrompt && (
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <button className="btn ghost sm" onClick={() => setEditingPrompt(false)}>
-                    Cancel
+            <div className="gd-welcome-stage">
+              <h1 className="gd-welcome-h">
+                Let's create your first <RotatingWord />.
+              </h1>
+              <p className="gd-welcome-sub">
+                Describe what it should do — I'll handle the model, prompt and channel. You can tweak everything as we go.
+              </p>
+              <WelcomeComposer onSubmit={handleSay} pending={pending} />
+              <div className="gd-welcome-starters">
+                <div className="gd-welcome-starters-label">Or start from a template</div>
+                {STARTERS.map((s) => (
+                  <button
+                    key={s.label}
+                    type="button"
+                    className="gd-welcome-starter"
+                    onClick={() => handleSay(s.message)}
+                    disabled={pending}
+                  >
+                    {s.label}
                   </button>
-                  <button className="btn sm" onClick={savePrompt}>
-                    Save
-                  </button>
+                ))}
+              </div>
+              {error && (
+                <div className="gd-error" style={{ marginTop: 18, marginLeft: 0 }}>
+                  <Icon name="warn" size={12} /> {error}
                 </div>
               )}
+              <button
+                type="button"
+                className="gd-skip"
+                onClick={handleSkip}
+                disabled={pending}
+              >
+                Skip onboarding — I'll set up later
+              </button>
             </div>
-            {editingPrompt ? (
-              <textarea
-                className="onbA-spec-prompt-edit"
-                value={promptDraft}
-                onChange={(e) => setPromptDraft(e.target.value)}
-                rows={8}
-              />
-            ) : (
-              <pre className="onbA-spec-prompt">
-                {config.prompt || <em className="dim">No prompt yet.</em>}
-              </pre>
-            )}
           </div>
-        </div>
+        </main>
+        <div />
+      </div>
+    );
+  }
 
-        {error && (
-          <div
-            className="onbA-confirm-caveat"
-            style={{ color: 'var(--bad-fg)' }}
+  // ─── Conversation (G2–G6) ─────────────────────────────────────
+  const sidebarW = sidebarState === 'empty' ? '0px' : '240px';
+  const panelW = panelStage === 'empty' ? '0px' : '340px';
+
+  const liveStatus: 'waiting' | 'connected' = slackInstalled ? 'connected' : 'waiting';
+  const showLiveCta = session.phase === 'live';
+
+  const agentName = session.agent_id || (decisions.purpose ? 'checkout-support' : 'Untitled agent');
+  const channelNode = decisions.channel ? channelLabel(decisions.channel) : null;
+  const modelStr = modelLabel(decisions.model);
+  const purposeShort = decisions.purpose
+    ? decisions.purpose.length > 110 ? `${decisions.purpose.slice(0, 107)}…` : decisions.purpose
+    : '';
+  const toneStr = decisions.tone ?? null;
+
+  return (
+    <div
+      className="gd-wrap"
+      style={{ '--sidebar-w': sidebarW, '--panel-w': panelW } as CSSProperties}
+    >
+      {sidebarState !== 'empty' ? (
+        <Sidebar
+          state={sidebarState}
+          progress={progress}
+          agentName={agentName}
+          channel={channelNode}
+          model={modelStr}
+          toolCount={3}
+        />
+      ) : (
+        <div />
+      )}
+
+      <main className="gd-main">
+        <div className="gd-main-toolbar">
+          <button
+            type="button"
+            className="gd-toolbar-link"
+            onClick={handleSkip}
+            disabled={pending}
+            title="Skip onboarding and go straight to the dashboard"
           >
-            <Icon name="info" size={13} />
-            <span>Couldn't save: {error}</span>
-          </div>
-        )}
-
-        <div className="onbA-confirm-actions">
-          <div className="onbA-ask">
-            <ClaudeAvatar size={20} />
-            <input
-              className="onbA-ask-input"
-              placeholder="Ask Claude to change something…"
-              value={askText}
-              onChange={(e) => setAskText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') sendAsk();
-              }}
-            />
-            <button
-              className="onbA-send onbA-send-xs"
-              onClick={sendAsk}
-              disabled={!askText.trim()}
-            >
-              <Icon name="arrowUp" size={11} />
-            </button>
-          </div>
-          <button className="btn primary lg" onClick={onLaunch}>
-            Launch agent <Icon name="chevron" size={14} />
+            Skip onboarding
           </button>
         </div>
-
-        <div className="onbA-confirm-caveat">
-          <Icon name="info" size={13} />
-          <span>The first conversation will be traced. You'll see suggestions to improve once a few have run.</span>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// ─── Launching animation ────────────────────────────────────────────────
-const LAUNCH_STEPS = [
-  'Compiling agent…',
-  'Wiring tools…',
-  'Connecting channels…',
-  'Watching for the first conversation.',
-];
-
-const Launching = ({ name }: { name: string }) => {
-  const [step, setStep] = useState(0);
-  useEffect(() => {
-    const t = setInterval(
-      () => setStep((s) => Math.min(s + 1, LAUNCH_STEPS.length - 1)),
-      520,
-    );
-    return () => clearInterval(t);
-  }, []);
-  return (
-    <div className="onbA onbA-launching">
-      <div className="onbA-launch-inner">
-        <div className="onbA-launch-mark" />
-        <div className="onbA-launch-name mono">{name || 'unnamed-agent'}</div>
-        <ul className="onbA-launch-list">
-          {LAUNCH_STEPS.map((s, i) => (
-            <li key={i} className={i < step ? 'done' : i === step ? 'on' : 'idle'}>
-              {i < step ? (
-                <Icon name="check" size={12} />
-              ) : i === step ? (
-                <span className="onbA-launch-dot" />
+        <div className="gd-thread">
+          <div className="gd-thread-inner">
+            {session.turns.map((t) =>
+              t.role === 'assistant' ? (
+                <AssistantTurn
+                  key={t.id}
+                  turn={t}
+                  onPick={handlePick}
+                  pending={pending}
+                  plaintextKey={plaintextKey}
+                  liveStatus={liveStatus}
+                  pendingPick={pendingPick}
+                  onSaveKey={handleSaveKey}
+                  savingKey={savingKey}
+                />
               ) : (
-                <span className="onbA-launch-tick" />
-              )}
-              <span>{s}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
+                <UserTurn key={t.id} turn={t} onEdit={handleEdit} disabled={pending} />
+              ),
+            )}
+            {pending && (
+              <div className="gd-msg claude">
+                <div className="gd-msg-meta">
+                  <div className="av c">C</div>
+                  <span className="name">Claude</span>
+                </div>
+                <div className="gd-msg-body">
+                  <span className="gd-typing"><span /><span /><span /></span>
+                </div>
+              </div>
+            )}
+            {showLiveCta && (
+              <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
+                <button
+                  type="button"
+                  className="gd-btn-primary"
+                  onClick={finish}
+                  disabled={pending}
+                >
+                  Go to dashboard
+                  <Icon name="arrowUp" size={12} />
+                </button>
+              </div>
+            )}
+            {error && (
+              <div className="gd-error">
+                <Icon name="warn" size={12} /> {error}
+              </div>
+            )}
+            <div ref={threadEndRef} />
+          </div>
+        </div>
+        <ChatComposer
+          onSubmit={handleSay}
+          pending={pending}
+          placeholder={PLACEHOLDERS[session.phase] ?? 'Type a message…'}
+        />
+      </main>
+
+      {panelStage !== 'empty' ? (
+        <Panel
+          stage={panelStage}
+          agentName={agentName}
+          purpose={purposeShort}
+          tone={toneStr}
+          channel={
+            decisions.channel === 'slack'
+              ? (<><SlackGlyph size={12} /> Slack · acme-co</>)
+              : channelNode
+          }
+          model={modelStr ? `Claude ${modelStr}` : null}
+          updatedSection={updatedSection}
+        />
+      ) : (
+        <PanelEmpty />
+      )}
     </div>
   );
 };

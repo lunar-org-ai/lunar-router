@@ -6,6 +6,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 import { z } from 'zod'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
@@ -21,7 +22,7 @@ versionsRouter.get('/', async (c) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(RUNTIME_URL + '/versions', { signal: controller.signal })
+    const res = await fetch(RUNTIME_URL + '/versions', { headers: proxyHeaders(c), signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       return c.json(
@@ -61,7 +62,7 @@ versionsRouter.post('/:version/rollback', async (c) => {
   try {
     const res = await fetch(`${RUNTIME_URL}/versions/${encodeURIComponent(version)}/rollback`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...proxyHeaders(c) },
       body: JSON.stringify(parsed.data),
       signal: controller.signal,
     })

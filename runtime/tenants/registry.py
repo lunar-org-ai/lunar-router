@@ -25,6 +25,7 @@ import logging
 import re
 import secrets
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,25 @@ _REGISTRY_FILE = "_registry.json"
 _TOKENS_INDEX_FILE = "_tokens_index.json"
 _DELETED_BUCKET = "_deleted"
 _DEFAULT_ID = "_default"
+
+
+# Per-root locks serialize the read-modify-write cycle inside a
+# single uvicorn worker. They don't help across Cloud Run instances —
+# for that, ``_load_registry`` below recovers from concat-corruption
+# that two racing writers leave on gcsfuse (rename is not atomic over
+# GCS). Same pattern as ``runtime.tenants.tokens``.
+_ROOT_LOCKS: dict[str, threading.Lock] = {}
+_ROOT_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(root: Path) -> threading.Lock:
+    key = str(root)
+    with _ROOT_LOCKS_GUARD:
+        lock = _ROOT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _ROOT_LOCKS[key] = lock
+        return lock
 
 # Reserved at the top-level of ``tenants/`` so the slug namespace
 # doesn't clash with the registry's own filesystem layout.
@@ -136,50 +156,55 @@ def create_tenant(
     writers don't trip on missing parents.
     """
     rroot = _resolve_root(root)
-    registry = _load_registry(rroot)
+    # Serialize concurrent creates inside this worker so the
+    # read-modify-write doesn't lose tenants. Cross-instance races
+    # are still possible; ``_load_registry`` recovers from the resulting
+    # concat-corruption on the next read.
+    with _lock_for(rroot):
+        registry = _load_registry(rroot)
 
-    if slug:
-        tenant_id = slug.strip()
-        # Reserved check first so the operator gets a precise error
-        # ("_default is reserved") rather than a regex-flavored one.
-        # _RESERVED_IDS all start with underscore today, so they'd
-        # fail the regex too — but the error message matters.
-        if tenant_id in _RESERVED_IDS:
-            raise ValueError(f"tenant id {tenant_id!r} is reserved")
-        # Strict: case-sensitive match. Operators are expected to pass a
-        # well-formed slug; auto-slugs from a free-form name lowercase
-        # via _allocate_slug. Mixing both modes silently is confusing.
-        if not _SLUG_RE.match(tenant_id):
-            raise ValueError(
-                f"invalid slug {tenant_id!r}: must match {_SLUG_RE.pattern}"
-            )
-        if registry.get(tenant_id) is not None:
-            raise ValueError(f"tenant {tenant_id!r} already exists")
-    else:
-        tenant_id = _allocate_slug(name or "tenant", registry)
+        if slug:
+            tenant_id = slug.strip()
+            # Reserved check first so the operator gets a precise error
+            # ("_default is reserved") rather than a regex-flavored one.
+            # _RESERVED_IDS all start with underscore today, so they'd
+            # fail the regex too — but the error message matters.
+            if tenant_id in _RESERVED_IDS:
+                raise ValueError(f"tenant id {tenant_id!r} is reserved")
+            # Strict: case-sensitive match. Operators are expected to pass a
+            # well-formed slug; auto-slugs from a free-form name lowercase
+            # via _allocate_slug. Mixing both modes silently is confusing.
+            if not _SLUG_RE.match(tenant_id):
+                raise ValueError(
+                    f"invalid slug {tenant_id!r}: must match {_SLUG_RE.pattern}"
+                )
+            if registry.get(tenant_id) is not None:
+                raise ValueError(f"tenant {tenant_id!r} already exists")
+        else:
+            tenant_id = _allocate_slug(name or "tenant", registry)
 
-    tenant_dir = rroot / tenant_id
-    if tenant_dir.exists():
-        # Defensive: previous run created the dir but failed to register.
-        # Re-register from scratch rather than refusing.
-        logger.warning("tenants/%s/ already exists; re-registering", tenant_id)
-    else:
-        tenant_dir.mkdir(parents=True, exist_ok=True)
+        tenant_dir = rroot / tenant_id
+        if tenant_dir.exists():
+            # Defensive: previous run created the dir but failed to register.
+            # Re-register from scratch rather than refusing.
+            logger.warning("tenants/%s/ already exists; re-registering", tenant_id)
+        else:
+            tenant_dir.mkdir(parents=True, exist_ok=True)
 
-    for sub in ("agents", "ledger", "traces", "corpora"):
-        (tenant_dir / sub).mkdir(parents=True, exist_ok=True)
+        for sub in ("agents", "ledger", "traces", "corpora"):
+            (tenant_dir / sub).mkdir(parents=True, exist_ok=True)
 
-    timestamp = _now_iso(now_iso)
-    meta = TenantMetadata(
-        id=tenant_id,
-        name=str(name or tenant_id),
-        description=description,
-        created_at=timestamp,
-        updated_at=timestamp,
-    )
-    registry.tenants.append(meta)
-    _save_registry(rroot, registry)
-    return meta
+        timestamp = _now_iso(now_iso)
+        meta = TenantMetadata(
+            id=tenant_id,
+            name=str(name or tenant_id),
+            description=description,
+            created_at=timestamp,
+            updated_at=timestamp,
+        )
+        registry.tenants.append(meta)
+        _save_registry(rroot, registry)
+        return meta
 
 
 def delete_tenant(
@@ -194,24 +219,25 @@ def delete_tenant(
     against revoked tenants 401 immediately.
     """
     rroot = _resolve_root(root)
-    registry = _load_registry(rroot)
-    meta = registry.get(tenant_id)
-    if meta is None:
-        raise KeyError(tenant_id)
-    if tenant_id == _DEFAULT_ID:
-        raise ValueError("cannot delete the _default tenant")
+    with _lock_for(rroot):
+        registry = _load_registry(rroot)
+        meta = registry.get(tenant_id)
+        if meta is None:
+            raise KeyError(tenant_id)
+        if tenant_id == _DEFAULT_ID:
+            raise ValueError("cannot delete the _default tenant")
 
-    src = rroot / tenant_id
-    if src.is_dir():
-        bucket = rroot / _DELETED_BUCKET
-        bucket.mkdir(parents=True, exist_ok=True)
-        dest = bucket / f"{tenant_id}-{secrets.token_hex(3)}"
-        shutil.move(str(src), str(dest))
+        src = rroot / tenant_id
+        if src.is_dir():
+            bucket = rroot / _DELETED_BUCKET
+            bucket.mkdir(parents=True, exist_ok=True)
+            dest = bucket / f"{tenant_id}-{secrets.token_hex(3)}"
+            shutil.move(str(src), str(dest))
 
-    registry.tenants = [t for t in registry.tenants if t.id != tenant_id]
-    _save_registry(rroot, registry)
-    _drop_tokens_for_tenant(rroot, tenant_id)
-    return meta
+        registry.tenants = [t for t in registry.tenants if t.id != tenant_id]
+        _save_registry(rroot, registry)
+        _drop_tokens_for_tenant(rroot, tenant_id)
+        return meta
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +276,49 @@ def _load_registry(root: Path) -> TenantRegistry:
     if not path.is_file():
         return TenantRegistry()
     with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    return TenantRegistry.from_dict(data)
+        text = f.read()
+    try:
+        return TenantRegistry.from_dict(json.loads(text))
+    except json.JSONDecodeError:
+        # Two writers on different Cloud Run instances raced and the
+        # file ended up with multiple concatenated JSON objects (e.g.
+        # ``{"tenants":[…]}{"tenants":[…]}``). Recover by parsing each
+        # object in turn, unioning their ``tenants`` arrays, deduped
+        # by id (keeping the latest ``updated_at``). Then rewrite the
+        # file so subsequent reads are fast.
+        logger.warning(
+            "_registry.json at %s had concatenated/corrupt JSON; recovering",
+            path,
+        )
+        merged: dict[str, TenantMetadata] = {}
+        decoder = json.JSONDecoder()
+        cursor = 0
+        n = len(text)
+        while cursor < n:
+            while cursor < n and text[cursor] in " \t\r\n":
+                cursor += 1
+            if cursor >= n:
+                break
+            try:
+                obj, end = decoder.raw_decode(text, cursor)
+            except json.JSONDecodeError:
+                break
+            cursor = end
+            if isinstance(obj, dict):
+                for t in obj.get("tenants") or []:
+                    try:
+                        meta = TenantMetadata.from_dict(t)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    existing = merged.get(meta.id)
+                    if existing is None or (meta.updated_at or "") > (existing.updated_at or ""):
+                        merged[meta.id] = meta
+        recovered = TenantRegistry(tenants=list(merged.values()))
+        try:
+            _save_registry(root, recovered)
+        except OSError as e:
+            logger.warning("could not rewrite recovered _registry.json: %s", e)
+        return recovered
 
 
 def _save_registry(root: Path, registry: TenantRegistry) -> None:

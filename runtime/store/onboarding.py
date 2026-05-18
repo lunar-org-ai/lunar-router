@@ -32,8 +32,50 @@ from typing import Any, Optional
 
 logger = logging.getLogger("runtime.store.onboarding")
 
-_DEFAULT_PATH = Path("agent") / "onboarding.json"
-_DEFAULT_PROMPT_PATH = Path("agent") / "prompts" / "system.md"
+_LEGACY_PATH = Path("agent") / "onboarding.json"
+_LEGACY_PROMPT_PATH = Path("agent") / "prompts" / "system.md"
+
+
+def _resolve_state_path(path: Optional[Path]) -> Path:
+    """Resolve the onboarding-state path.
+
+    Explicit ``path`` wins (callers/tests override directly). Otherwise,
+    in multi-tenant mode we scope under ``tenants/<active>/agent/...``
+    so each Firebase-provisioned tenant starts with no onboarding —
+    without this, every fresh tenant inherits the seed
+    ``agent/onboarding.json`` (completed=true) baked into the container
+    image and skips the chat-onboarding flow on first login.
+
+    In OSS-local mode we keep the legacy global path so single-tenant
+    dev keeps working.
+    """
+    if path is not None:
+        return Path(path)
+    from runtime.tenants.feature import is_multi_tenant_enabled
+
+    if not is_multi_tenant_enabled():
+        return _LEGACY_PATH
+    from runtime.tenant_context import get_active
+
+    return Path("tenants") / get_active() / _LEGACY_PATH
+
+
+def _resolve_prompt_path(path: Optional[Path]) -> Path:
+    if path is not None:
+        return Path(path)
+    from runtime.tenants.feature import is_multi_tenant_enabled
+
+    if not is_multi_tenant_enabled():
+        return _LEGACY_PROMPT_PATH
+    from runtime.tenant_context import get_active
+
+    return Path("tenants") / get_active() / _LEGACY_PROMPT_PATH
+
+
+# Backwards-compat alias for any external caller still importing the
+# legacy name. Resolves the active tenant at call time.
+_DEFAULT_PATH = _LEGACY_PATH
+_DEFAULT_PROMPT_PATH = _LEGACY_PROMPT_PATH
 
 
 @dataclass
@@ -81,7 +123,7 @@ class OnboardingConfig:
 
 def load_state(path: Optional[Path] = None) -> OnboardingConfig:
     """Read agent/onboarding.json, or return an empty config when missing."""
-    p = Path(path) if path else _DEFAULT_PATH
+    p = _resolve_state_path(path)
     if not p.is_file():
         return OnboardingConfig()
     try:
@@ -98,7 +140,7 @@ def save_state(
     path: Optional[Path] = None,
 ) -> Path:
     """Write the JSON. Used by record_complete and the skip path."""
-    p = Path(path) if path else _DEFAULT_PATH
+    p = _resolve_state_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("w", encoding="utf-8") as f:
         json.dump(config.to_dict(), f, indent=2, ensure_ascii=False)
@@ -125,7 +167,7 @@ def record_complete(
     the previous state was already ``completed``. The Lesson hook is
     factored so tests can inject without touching the ledger writer.
     """
-    p = Path(path) if path else _DEFAULT_PATH
+    p = _resolve_state_path(path)
     prev = load_state(p)
 
     config = OnboardingConfig.from_dict(payload)
@@ -160,7 +202,7 @@ def record_skip(path: Optional[Path] = None) -> OnboardingConfig:
 
 
 def _write_prompt(text: str, path: Optional[Path] = None) -> Path:
-    p = Path(path) if path else _DEFAULT_PROMPT_PATH
+    p = _resolve_prompt_path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     body = text.strip() + "\n\nThis prompt is part of the trainable surface. The harness may mutate it.\n"
     p.write_text(body, encoding="utf-8")

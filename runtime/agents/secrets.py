@@ -243,11 +243,16 @@ def get_secret(
 ) -> Optional[str]:
     """Look up the key for ``provider``. Resolution order:
        1. ``agents/<agent_id>/secrets.env`` (when agent_id given)
-       2. ``os.environ`` (global .env loaded at startup)
-       3. ``None``
+       2. Tenant BYOK (multi-tenant only) — ``tenants/<active>/byok/<provider>.json``
+       3. ``os.environ`` (OSS local only — BYOK strict mode skips this)
+       4. ``None``
 
     Always returns the FIRST canonical env var listed for the provider
     when writing back; reads tolerate aliases.
+
+    BYOK strict (multi-tenant): step 3 is intentionally skipped so a
+    platform-level env var can never accidentally bill the operator
+    account for tenant traffic. Generate stage fails closed → "[offline]".
     """
     candidates = PROVIDERS.get(provider.lower())
     if not candidates:
@@ -258,6 +263,25 @@ def get_secret(
         for name in candidates:
             if name in per_agent and per_agent[name]:
                 return per_agent[name]
+
+    # Tenant-level BYOK — only active when multi-tenant mode is on.
+    try:
+        from runtime.tenants.feature import is_multi_tenant_enabled
+    except Exception:
+        is_multi_tenant_enabled = lambda: False  # noqa: E731
+    if is_multi_tenant_enabled():
+        try:
+            from runtime.tenant_context import get_active
+            from runtime.tenants.byok import get_provider_key
+            tid = get_active()
+            if tid:
+                v = get_provider_key(tid, provider.lower())
+                if v:
+                    return v
+        except Exception as e:  # noqa: BLE001
+            logger.warning("byok lookup failed for %s: %s", provider, e)
+        # BYOK strict: no platform-env fallback in multi-tenant mode.
+        return None
 
     for name in candidates:
         v = os.environ.get(name)

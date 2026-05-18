@@ -240,6 +240,40 @@ async def tenant_middleware(request: Request, call_next):
         tenant_context.set_active(previous)
 
 
+# P17.1 — Map QuotaExceeded to HTTP 402 (Payment Required). The
+# structured detail payload lets the UI render an upgrade CTA from one
+# well-typed error instead of regex-matching message strings. No-op in
+# OSS mode because the gates short-circuit when multi-tenant is off.
+from runtime.tenants.quota import QuotaExceeded as _QuotaExceeded
+from fastapi.responses import JSONResponse as _JSONResponse
+
+
+@app.exception_handler(_QuotaExceeded)
+async def _quota_exceeded_handler(_request: Request, exc: _QuotaExceeded):  # type: ignore[misc]
+    # Rate-limit denials map to 429 (with Retry-After) so generic HTTP
+    # clients back off without our UI's upgrade-CTA branch firing.
+    # All other quota denials → 402 so the UI shows the upgrade banner.
+    if exc.code == "rate_limit_exceeded":
+        retry_after = int(exc.detail.get("retry_after_s") or 1)
+        return _JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.detail,
+            },
+        )
+    return _JSONResponse(
+        status_code=402,
+        content={
+            "code": exc.code,
+            "message": exc.message,
+            "detail": exc.detail,
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     cfg = _state.get("cfg")
@@ -890,6 +924,16 @@ async def list_traces(
     q: Optional[str] = None,
 ) -> TracesPage:
     available = traces_store.available_dates()
+    # Tier-aware retention: drop dates older than the tenant's retention
+    # window. Filtering at the date list is cheaper than per-row culling
+    # because traces are partitioned daily — old date folders simply
+    # disappear from the picker. No deletion, so an upgrade re-exposes
+    # historic traces immediately.
+    from runtime.tenants.quota import retention_cutoff_iso as _retention_cutoff
+    cutoff = _retention_cutoff()
+    if cutoff is not None and available:
+        cutoff_date = cutoff[:10]  # "YYYY-MM-DD"
+        available = [d for d in available if d >= cutoff_date]
     if not available:
         return TracesPage(
             date=date or "",
@@ -2055,10 +2099,18 @@ async def update_route(payload: RouteUpdateRequest) -> RouteUpdateResponse:
 @app.post("/run", response_model=RunResponse)
 async def run(payload: RunRequest) -> RunResponse:
     import uuid
+    from runtime.tenants import quota
 
     executor: Optional[PipelineExecutor] = _state.get("executor")
     if not executor:
         raise HTTPException(status_code=503, detail="agent not yet loaded")
+
+    # Tier gates (cheap → expensive):
+    #   1. Rate limit (instant, in-memory) — stops runaway loops
+    #   2. Monthly trace quota (1 file read) — stops cap overruns
+    # Both raise QuotaExceeded which the handler maps to 429/402.
+    quota.check_rate_limit()
+    quota.check_trace_quota()
 
     history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
     # If the caller didn't supply a session_id, mint one. The trace persists
@@ -2066,6 +2118,12 @@ async def run(payload: RunRequest) -> RunResponse:
     session_id = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
     _, rec = executor.run(payload.request, history=history, session_id=session_id)
     trace_id = write_trace(rec)
+    # Increment AFTER write_trace so a failure to persist doesn't burn a
+    # billable trace. Failures here are logged but don't fail the request.
+    try:
+        quota.consume_trace()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("billing: trace counter increment failed: %s", e)
 
     return RunResponse(
         response=rec.response,
@@ -3130,6 +3188,193 @@ def onboarding_transport() -> OnboardingTransportInfo:
 
 
 # ---------------------------------------------------------------------------
+# Conversational onboarding v2 (Phase A) — stateful session + inline cards
+# ---------------------------------------------------------------------------
+#
+# Endpoints below replace the stateless /turn flow for the new UI. The
+# server is the source of truth: it owns the running thread, the
+# settled decisions, and the phase. The UI fetches /session at boot,
+# POSTs /say to add a user message, /decide to pick a card option,
+# and /rewind to undo a settled decision.
+#
+# The Pydantic models are intentionally loose around card payloads —
+# the card schema varies by type, and tightening it (discriminated
+# unions) is a Phase-B follow-up. ``cards: list[dict[str, Any]]``
+# keeps the wire format flexible without sacrificing the typing on
+# the rest of the session.
+
+
+class OnboardingV2Turn(BaseModel):
+    id: str
+    ts: str
+    role: str
+    text: str = ""
+    cards: list[dict[str, Any]] = []
+    decision_key: Optional[str] = None
+    decision_value: Optional[str] = None
+    decision_label: Optional[str] = None
+
+
+class OnboardingV2Session(BaseModel):
+    version: int = 1
+    session_id: str
+    started_at: str
+    phase: str
+    turns: list[OnboardingV2Turn] = []
+    decisions: dict[str, Any] = {}
+    agent_id: Optional[str] = None
+    slack: dict[str, Any] = {}
+    agent_key_preview: Optional[str] = None
+    # Plaintext token shown ONCE on the connect card immediately
+    # after agent creation. Read it from session.slack and clear in
+    # the response so callers don't get tempted to log it.
+    agent_key_plaintext_once: Optional[str] = None
+
+
+class OnboardingV2SayRequest(BaseModel):
+    text: str
+
+
+class OnboardingV2DecideRequest(BaseModel):
+    decision_key: str   # "model" | "channel"
+    value: str
+
+
+class OnboardingV2RewindRequest(BaseModel):
+    decision_key: str   # "model" | "channel"
+
+
+def _to_v2_response(session) -> OnboardingV2Session:
+    """Project the internal Session dataclass to the wire model.
+
+    Pulls the one-shot plaintext key out of ``slack`` so the next
+    GET /session returns it as ``null`` — the masked preview survives,
+    the plaintext doesn't.
+    """
+    data = session.to_dict()
+    plaintext = data.get("slack", {}).pop("agent_key_plaintext_once", None)
+    data["agent_key_plaintext_once"] = plaintext
+    return OnboardingV2Session(**data)
+
+
+@app.get("/onboarding/session", response_model=OnboardingV2Session)
+def onboarding_v2_session() -> OnboardingV2Session:
+    """Return the current session, seeding it on first call.
+
+    The seed inserts the opening assistant turn, so the UI never has
+    to special-case an empty thread — it always renders at least one
+    message + the composer.
+    """
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.get_or_create_session())
+
+
+@app.post("/onboarding/session/say", response_model=OnboardingV2Session)
+def onboarding_v2_say(payload: OnboardingV2SayRequest) -> OnboardingV2Session:
+    """Append a user message + emit the assistant's reply.
+
+    Phase transitions happen server-side based on what the user said
+    and what the brain signaled.
+    """
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.say(payload.text))
+
+
+@app.post("/onboarding/session/decide", response_model=OnboardingV2Session)
+def onboarding_v2_decide(payload: OnboardingV2DecideRequest) -> OnboardingV2Session:
+    """Record a card pick (model / channel) and advance the phase."""
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(
+            onboarding_session.decide(payload.decision_key, payload.value)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+class OnboardingV2KeyRequest(BaseModel):
+    provider: str = "anthropic"
+    plaintext: str
+
+
+@app.post("/onboarding/session/save-key", response_model=OnboardingV2Session)
+def onboarding_v2_save_key(payload: OnboardingV2KeyRequest) -> OnboardingV2Session:
+    """Save a BYOK provider key during onboarding and advance to the
+    channel phase. The plaintext is consumed; only the mask persists
+    on the session for re-renders. The actual key lives KMS-encrypted
+    under tenants/<active>/byok/<provider>.json (see runtime.tenants.byok)."""
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(
+            onboarding_session.save_provider_key(payload.provider, payload.plaintext)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/onboarding/session/rewind", response_model=OnboardingV2Session)
+def onboarding_v2_rewind(payload: OnboardingV2RewindRequest) -> OnboardingV2Session:
+    """Drop a settled decision and re-emit the picker.
+
+    Rewinds cascade: re-picking the model also drops the channel + the
+    materialized agent, since both depend on the model decision having
+    closed in this thread.
+    """
+    from runtime.store import onboarding_session
+    try:
+        return _to_v2_response(onboarding_session.rewind(payload.decision_key))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/onboarding/session/reset", response_model=OnboardingV2Session)
+def onboarding_v2_reset() -> OnboardingV2Session:
+    """Wipe the session and seed a fresh one. Reserved for the
+    "start over" affordance and for tests."""
+    from runtime.store import onboarding_session
+    return _to_v2_response(onboarding_session.reset())
+
+
+# ─── Slack connect stubs (Phase A) ───────────────────────────────────
+#
+# Real OAuth lands in Phase C. These endpoints exist now so the UI
+# can wire its buttons + polling against stable URLs.
+
+
+class SlackConnectBeginResponse(BaseModel):
+    install_url: str
+    state: str
+
+
+@app.post("/onboarding/connect/slack/begin", response_model=SlackConnectBeginResponse)
+def onboarding_slack_begin() -> SlackConnectBeginResponse:
+    """Stub — returns a placeholder install URL until Phase C wires
+    real Slack OAuth. The UI surfaces this as the "Add to Slack" button
+    target; clicking it today is a no-op."""
+    return SlackConnectBeginResponse(
+        install_url="https://slack.com/oauth/v2/authorize?stub=1",
+        state="stub",
+    )
+
+
+class SlackConnectStatusResponse(BaseModel):
+    installed: bool
+    first_message_at: Optional[str] = None
+
+
+@app.get("/onboarding/connect/slack/status", response_model=SlackConnectStatusResponse)
+def onboarding_slack_status() -> SlackConnectStatusResponse:
+    """Stub — returns the current Slack connection state from the
+    session. Phase C will update it from real OAuth + event callbacks."""
+    from runtime.store import onboarding_session
+    session = onboarding_session.get_or_create_session()
+    return SlackConnectStatusResponse(
+        installed=bool(session.slack.get("installed")),
+        first_message_at=session.slack.get("first_message_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Multi-agent (P2.0)
 # ---------------------------------------------------------------------------
 
@@ -3216,7 +3461,11 @@ def create_agent_endpoint(payload: AgentCreateRequest) -> AgentSummary:
     """Create a new agent from the onboarding payload. If ``activate``
     is true, swap the live ``agent/`` dir + recompile the pipeline."""
     from runtime.agents.registry import activate as activate_agent
-    from runtime.agents.registry import create_agent, get_registry
+    from runtime.agents.registry import create_agent, get_registry, list_agents
+    from runtime.tenants import quota
+
+    # Tier gate: free is 1 agent, starter 1, team 5, scale unlimited.
+    quota.check_agent_count(current_count=len(list_agents()))
 
     meta = create_agent(payload.model_dump())
     if payload.activate:
@@ -3894,6 +4143,40 @@ _WIDGET_JS_TEMPLATE = r"""// OpenTracy Web Widget v1 — dependency-free
 # ─── Public API: external callers chat with an agent via bearer token ─────
 
 
+def _resolve_api_token_tenant(agent_id: str, token: str) -> None:
+    """Find the tenant that owns ``agents/<agent_id>/integrations/api.json``
+    with a matching token, and set it as the active tenant.
+
+    The /api/<id>/chat endpoint is gateway-public — it doesn't get
+    x-tenant-id from the backend (each ot_* token is implicitly bound
+    to one tenant via the agent it was minted for, not via a tenant
+    Bearer). We scan tenants to discover the binding once per request.
+
+    No-op in OSS mode (single-tenant root); the regular load() call
+    in the caller handles the OSS case directly.
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return
+
+    from runtime import tenant_context
+    from runtime.tenants.registry import list_tenants, get_tenant_dir
+
+    for t in list_tenants().tenants:
+        api_json = get_tenant_dir(t.id) / "agents" / agent_id / "integrations" / "api.json"
+        if not api_json.is_file():
+            continue
+        try:
+            with api_json.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("token") == token:
+            tenant_context.set_active(t.id)
+            return
+    raise HTTPException(status_code=401, detail="invalid_token")
+
+
 class ApiChatRequest(BaseModel):
     request: str
     history: Optional[list[HistoryMessage]] = None
@@ -3925,6 +4208,15 @@ def api_chat_endpoint(
     if not m:
         raise HTTPException(status_code=401, detail="missing_bearer_token")
     token = m.group(1).strip()
+
+    # /v1/api/<id>/chat is the only /v1/* route that doesn't carry an
+    # otrcy_live_* tenant Bearer (the gateway skips tenantAuth for this
+    # prefix). Without x-tenant-id every storage helper resolves under
+    # whatever tenant happened to be active on this worker last —
+    # almost always wrong. The ot_* token IS the identity, so we scan
+    # tenants for the (agent_id, token) pair and set the context to
+    # the matching tenant before any further lookups.
+    _resolve_api_token_tenant(agent_id, token)
 
     if get_agent(agent_id) is None:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
@@ -4062,13 +4354,23 @@ class MCPServerCreateRequest(BaseModel):
 def add_mcp_server_endpoint(
     agent_id: str, payload: MCPServerCreateRequest,
 ) -> MCPServersResponse:
-    from runtime.agents.mcp import MCPServer, add_server
+    from runtime.agents.mcp import MCPServer, add_server, load as load_mcp
     from runtime.agents.registry import get_agent
     from runtime.mcp.client import invalidate_cache
+    from runtime.tenants import quota
     if get_agent(agent_id) is None:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
     if not payload.name.strip():
         raise HTTPException(status_code=400, detail="missing_name")
+
+    # Tier gate:
+    #   - free tier cannot add sse/http (hosted) MCP servers — stdio only
+    #   - per-agent count cap (free=2, starter=10, team/scale=unlimited)
+    quota.check_integration_allowed(
+        transport=payload.transport,
+        current_count=len(load_mcp(agent_id)),
+    )
+
     try:
         servers = add_server(agent_id, MCPServer(**payload.model_dump()))
     except ValueError as e:
@@ -4387,6 +4689,155 @@ def _summarize_token(rec) -> TokenSummary:
     )
 
 
+# ---------------------------------------------------------------------------
+# P17.1 — Billing read endpoint (tenant-facing).
+#
+# Returns the *active* tenant's tier + monthly usage + caps. Used by
+# the UI top-bar banner (free-tier usage) and the Billing screen.
+# In OSS mode (no multi-tenancy), returns a synthetic "oss" tier with
+# no caps so the UI can render uniformly.
+# ---------------------------------------------------------------------------
+
+
+class BillingUsage(BaseModel):
+    traces: int
+    evolutions: int
+
+
+class BillingLimits(BaseModel):
+    monthly_traces: int
+    max_agents: int
+    max_integrations_per_agent: int
+    allow_evolution: bool
+    allow_hosted_mcp: bool
+    retention_days: int
+    rate_limit_per_minute: int
+
+
+class BillingResponse(BaseModel):
+    tier: str
+    period: str
+    updated_at: str
+    usage: BillingUsage
+    limits: BillingLimits
+    stripe_customer_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = None
+
+
+_OSS_BILLING_RESPONSE = BillingResponse(
+    tier="oss",
+    period="",
+    updated_at="",
+    usage=BillingUsage(traces=0, evolutions=0),
+    limits=BillingLimits(
+        monthly_traces=-1,
+        max_agents=-1,
+        max_integrations_per_agent=-1,
+        allow_evolution=True,
+        allow_hosted_mcp=True,
+        retention_days=-1,
+        rate_limit_per_minute=-1,
+    ),
+)
+
+
+@app.get("/tenant/billing", response_model=BillingResponse)
+def get_tenant_billing_endpoint() -> BillingResponse:
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    from runtime.tenants import billing
+    from runtime.tenant_context import get_active as get_tenant
+
+    if not is_multi_tenant_enabled():
+        return _OSS_BILLING_RESPONSE
+
+    tid = get_tenant()
+    if not tid:
+        raise HTTPException(status_code=400, detail="tenant_context_missing")
+
+    snap = billing.snapshot(tid)
+    return BillingResponse(
+        tier=snap["tier"],
+        period=snap["period"],
+        updated_at=snap["updated_at"],
+        usage=BillingUsage(**snap["usage"]),
+        limits=BillingLimits(**snap["limits"]),
+        stripe_customer_id=snap.get("stripe_customer_id"),
+        stripe_subscription_id=snap.get("stripe_subscription_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# P17.1 — Stripe checkout + webhook
+#
+# Both endpoints 503 cleanly when Stripe env vars / package are missing
+# so OSS deploys don't fail at import time. The webhook reads the raw
+# body for signature verification — FastAPI's JSON binding would
+# corrupt the bytes Stripe signed against.
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    tier: str
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+class CheckoutResponse(BaseModel):
+    url: str
+
+
+@app.post("/billing/checkout", response_model=CheckoutResponse)
+def billing_checkout_endpoint(payload: CheckoutRequest) -> CheckoutResponse:
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    from runtime.tenant_context import get_active as get_tenant
+    from runtime.tenants.stripe_handler import (
+        StripeNotConfigured,
+        create_checkout_session,
+    )
+
+    if not is_multi_tenant_enabled():
+        raise HTTPException(status_code=400, detail="checkout_unavailable_in_oss")
+
+    tenant_id = get_tenant()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_context_missing")
+
+    try:
+        url = create_checkout_session(
+            tenant_id,
+            payload.tier,
+            success_url=payload.success_url,
+            cancel_url=payload.cancel_url,
+        )
+    except StripeNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return CheckoutResponse(url=url)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook_endpoint(request: Request) -> Response:
+    """Public Stripe webhook receiver. Stripe POSTs raw JSON with a
+    ``Stripe-Signature`` header; we verify against ``STRIPE_WEBHOOK_SECRET``
+    before flipping any tier."""
+    from runtime.tenants.stripe_handler import (
+        StripeNotConfigured,
+        handle_webhook_event,
+    )
+
+    raw = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    try:
+        result = handle_webhook_event(raw, signature)
+    except StripeNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — signature error, bad payload, etc.
+        logger.warning("billing webhook rejected: %s", e)
+        raise HTTPException(status_code=400, detail="invalid_webhook")
+    return _JSONResponse(status_code=200, content=result)
+
+
 @app.get("/admin/tenants", response_model=TenantListResponse)
 def list_tenants_endpoint() -> TenantListResponse:
     from runtime.tenants.registry import list_tenants
@@ -4477,6 +4928,97 @@ def resolve_token_endpoint(payload: TokenResolveRequest) -> TokenResolveResponse
     if tid is None:
         raise HTTPException(status_code=401, detail="invalid_token")
     return TokenResolveResponse(tenant_id=tid)
+
+
+class ProviderKeyRecord(BaseModel):
+    provider: str
+    mask: str
+    created_at: str
+    rotated_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+
+
+class ProviderKeyListResponse(BaseModel):
+    tenant_id: str
+    keys: list[ProviderKeyRecord]
+
+
+class ProviderKeySetRequest(BaseModel):
+    plaintext: str
+
+
+class ProviderKeySetResponse(BaseModel):
+    provider: str
+    mask: str
+    created_at: str
+
+
+@app.get(
+    "/admin/tenants/{tenant_id}/provider-keys",
+    response_model=ProviderKeyListResponse,
+)
+def list_tenant_provider_keys_endpoint(tenant_id: str) -> ProviderKeyListResponse:
+    """List BYOK keys for a tenant — mask + metadata only.
+    Plaintext / ciphertext never leaves the runtime."""
+    from runtime.tenants.byok import list_provider_keys
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    raw = list_provider_keys(tenant_id)
+    return ProviderKeyListResponse(
+        tenant_id=tenant_id,
+        keys=[ProviderKeyRecord(**r) for r in raw],
+    )
+
+
+@app.post(
+    "/admin/tenants/{tenant_id}/provider-keys/{provider}",
+    response_model=ProviderKeySetResponse,
+    status_code=201,
+)
+def set_tenant_provider_key_endpoint(
+    tenant_id: str, provider: str, payload: ProviderKeySetRequest,
+) -> ProviderKeySetResponse:
+    """Set/rotate a BYOK provider key. Encrypts via the configured KMS
+    and stores under tenants/<tid>/byok/<provider>.json. Idempotent —
+    re-posting overwrites the prior record (rotation case).
+
+    The plaintext is consumed and immediately encrypted; only the
+    mask + timestamps are returned. This endpoint must be reachable
+    only by the operator admin Bearer (mounted under /v1/admin/* in
+    the backend, which is apiKeyAuth-gated)."""
+    from runtime.tenants.byok import set_provider_key, SUPPORTED_PROVIDERS
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    if provider not in SUPPORTED_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported_provider: {provider}",
+        )
+    try:
+        meta = set_provider_key(tenant_id, provider, payload.plaintext)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ProviderKeySetResponse(
+        provider=provider,
+        mask=meta["mask"],
+        created_at=meta["created_at"],
+    )
+
+
+@app.delete(
+    "/admin/tenants/{tenant_id}/provider-keys/{provider}",
+    status_code=204,
+)
+def delete_tenant_provider_key_endpoint(tenant_id: str, provider: str) -> Response:
+    from runtime.tenants.byok import delete_provider_key
+    from runtime.tenants.registry import get_tenant
+    if get_tenant(tenant_id) is None:
+        raise HTTPException(status_code=404, detail=f"tenant_not_found: {tenant_id}")
+    if not delete_provider_key(tenant_id, provider):
+        raise HTTPException(status_code=404, detail=f"key_not_found: {provider}")
+    return Response(status_code=204)
 
 
 class FeatureFlags(BaseModel):

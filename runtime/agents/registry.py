@@ -175,6 +175,18 @@ def create_agent(
 
     source_id = seed_from or registry.active or _DEFAULT_ID
     source_dir = rroot / source_id
+    if not source_dir.is_dir():
+        # New tenants start with empty agents/ dirs (see
+        # tenants.registry.create_tenant), so the per-tenant _default
+        # seed isn't there yet. Fall back to the canonical seed at
+        # tenants/_default/agents/_default — the migration bootstrap
+        # always populates it on first boot. Without this fallback,
+        # create_agent for a fresh tenant produces an empty dir with
+        # no pipeline yaml, and activate_agent silently fails to load
+        # a pipeline at chat time.
+        fallback = _baseline_seed_dir(rroot)
+        if fallback is not None and fallback.is_dir():
+            source_dir = fallback
     if source_dir.is_dir():
         _copy_tree(source_dir, agent_dir)
     else:
@@ -471,6 +483,31 @@ def _replace_tree(src: Path, dst: Path) -> None:
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def _baseline_seed_dir(tenant_agents_root: Path) -> Optional[Path]:
+    """Cross-tenant fallback for the ``_default`` agent seed.
+
+    When create_agent runs in a fresh tenant whose ``agents/`` dir is
+    empty, the in-tenant ``_default`` doesn't exist yet. The migration
+    bootstrap (P16.1) guarantees ``tenants/_default/agents/_default/``
+    exists on every healthy install — point at it so new agents in any
+    tenant inherit a working pipeline.
+
+    ``tenant_agents_root`` is the per-tenant agents dir (eg.
+    ``tenants/acme/agents/``). Walks up two levels to the tenants/
+    root, then back down to ``_default/agents/_default``. Returns
+    None in OSS mode (when this helper shouldn't be needed at all).
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return None
+    # tenants/<t>/agents → tenants/<t> → tenants → tenants/_default/agents/_default
+    try:
+        tenants_root = tenant_agents_root.parent.parent
+    except (AttributeError, IndexError):
+        return None
+    return tenants_root / _DEFAULT_ID / "agents" / _DEFAULT_ID
 
 
 def _resolve_root(root: Optional[Path]) -> Path:

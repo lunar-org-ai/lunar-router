@@ -1075,6 +1075,176 @@ export interface OnboardingTransportInfo {
 export const getOnboardingTransport = () =>
   _getJson<OnboardingTransportInfo>('/v1/onboarding/transport');
 
+// ─── Conversational onboarding v2 (stateful, card-driven) ───────
+//
+// Server owns the running thread. UI fetches /session once at mount,
+// then mutates via /say, /decide, /rewind. The whole session shape
+// comes back on every call — easier to reconcile than diffs.
+
+export type OnboardingPhase =
+  | 'intent'
+  | 'model'
+  | 'key'
+  | 'channel'
+  | 'connect'
+  | 'live'
+  | 'done';
+
+// Card payloads. `type` is the discriminator; the rest of the shape
+// varies by card kind. Kept loose here — the renderer narrows.
+export interface ModelPickerOption {
+  id: string;
+  name: string;
+  cost_per_million_in: string;
+  p50_latency_s: number;
+  tag: string;
+}
+export interface ChannelPickerOption {
+  id: string;
+  name: string;
+  sub: string;
+}
+export interface ModelPickerCard {
+  type: 'model_picker';
+  recommended_id: string;
+  rationale: string;
+  options: ModelPickerOption[];
+}
+export interface ChannelPickerCard {
+  type: 'channel_picker';
+  recommended_id: string;
+  options: ChannelPickerOption[];
+}
+export interface ProviderKeyPasteCard {
+  type: 'provider_key_paste';
+  provider: 'anthropic';
+  console_url: string;
+  mask: string | null;
+  status: 'missing' | 'ready';
+}
+export interface ConnectSlackCard {
+  type: 'connect_slack';
+  install_url: string;
+  agent_key_preview: string;
+  status: 'waiting' | 'connected';
+}
+export interface ConnectWhatsappCard {
+  type: 'connect_whatsapp';
+  webhook_url: string;
+  verify_token_preview: string;
+  status: 'waiting' | 'connected';
+}
+export interface ConnectWebCard {
+  type: 'connect_web';
+  embed_snippet: string;
+  agent_key_preview: string;
+  status: 'waiting' | 'connected';
+}
+export interface ConnectApiCard {
+  type: 'connect_api';
+  endpoint: string;
+  agent_id: string;
+  agent_key_preview: string;
+  curl_example: string;
+  status: 'waiting' | 'connected';
+}
+export interface TracePreviewCard {
+  type: 'trace_preview';
+  trace_id: string;
+  summary: Record<string, unknown>;
+}
+export type OnboardingCard =
+  | ModelPickerCard
+  | ChannelPickerCard
+  | ConnectSlackCard
+  | ConnectWhatsappCard
+  | ConnectWebCard
+  | ConnectApiCard
+  | ProviderKeyPasteCard
+  | TracePreviewCard;
+
+export interface OnboardingV2Turn {
+  id: string;
+  ts: string;
+  role: 'assistant' | 'user';
+  text: string;
+  cards: OnboardingCard[];
+  // When the user picked a card option, the chip-bearing user turn
+  // carries the decision metadata so the UI can render it inline + wire
+  // the "edit" affordance to /rewind.
+  decision_key: string | null;
+  decision_value: string | null;
+  decision_label: string | null;
+}
+
+export interface OnboardingV2Session {
+  version: number;
+  session_id: string;
+  started_at: string;
+  phase: OnboardingPhase;
+  turns: OnboardingV2Turn[];
+  decisions: Record<string, unknown>;
+  agent_id: string | null;
+  slack: {
+    installed?: boolean;
+    first_message_at?: string | null;
+    // Other fields the server may add later — kept loose.
+    [k: string]: unknown;
+  };
+  agent_key_preview: string | null;
+  // Plaintext key — only populated on the response immediately
+  // after channel pick. Use it ONCE for copy/reveal and discard.
+  agent_key_plaintext_once: string | null;
+}
+
+export const getOnboardingV2Session = () =>
+  _getJson<OnboardingV2Session>('/v1/onboarding/session');
+
+async function _postOnboardingV2<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+export const sayOnboardingV2 = (text: string) =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/say', { text });
+
+export const decideOnboardingV2 = (decision_key: 'model' | 'channel', value: string) =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/decide', { decision_key, value });
+
+export const rewindOnboardingV2 = (decision_key: 'model' | 'channel') =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/rewind', { decision_key });
+
+export const resetOnboardingV2 = () =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/reset', {});
+
+export const saveOnboardingV2Key = (provider: 'anthropic', plaintext: string) =>
+  _postOnboardingV2<OnboardingV2Session>('/v1/onboarding/session/save-key', {
+    provider,
+    plaintext,
+  });
+
+export interface SlackConnectBegin {
+  install_url: string;
+  state: string;
+}
+export const beginSlackConnect = () =>
+  _postOnboardingV2<SlackConnectBegin>('/v1/onboarding/connect/slack/begin', {});
+
+export interface SlackConnectStatus {
+  installed: boolean;
+  first_message_at: string | null;
+}
+export const getSlackConnectStatus = () =>
+  _getJson<SlackConnectStatus>('/v1/onboarding/connect/slack/status');
+
 // ─── Multi-agent (P2.0) ─────────────────────────────────────────
 
 export interface AgentSummary {
@@ -1729,4 +1899,68 @@ export async function revokeToken(
     const text = await res.text().catch(() => '');
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// P17.1 — Billing (tier, usage, limits)
+// ---------------------------------------------------------------------------
+
+export interface BillingUsage {
+  traces: number;
+  evolutions: number;
+}
+
+export interface BillingLimits {
+  /** -1 means unlimited for every numeric field. */
+  monthly_traces: number;
+  max_agents: number;
+  max_integrations_per_agent: number;
+  allow_evolution: boolean;
+  allow_hosted_mcp: boolean;
+  retention_days: number;
+  rate_limit_per_minute: number;
+}
+
+export interface BillingSnapshot {
+  /** 'oss' when multi-tenancy is off — UI should hide caps/upgrade CTAs. */
+  tier: 'oss' | 'free' | 'starter' | 'team' | 'scale';
+  period: string;
+  updated_at: string;
+  usage: BillingUsage;
+  limits: BillingLimits;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+}
+
+export async function getBilling(): Promise<BillingSnapshot> {
+  const res = await fetch('/v1/billing');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as BillingSnapshot;
+}
+
+export interface CheckoutResponse {
+  url: string;
+}
+
+export async function createCheckoutSession(
+  tier: 'starter' | 'team',
+  opts: { successUrl?: string; cancelUrl?: string } = {},
+): Promise<CheckoutResponse> {
+  const res = await fetch('/v1/billing/checkout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tier,
+      success_url: opts.successUrl,
+      cancel_url: opts.cancelUrl,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as CheckoutResponse;
 }

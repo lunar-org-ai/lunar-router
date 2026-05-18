@@ -5,6 +5,7 @@
  */
 
 import { Hono } from 'hono'
+import { proxyHeaders } from '../../auth/proxy_headers'
 
 const RUNTIME_URL = process.env.RUNTIME_URL ?? 'http://127.0.0.1:8001'
 const TIMEOUT_MS = 15_000
@@ -15,7 +16,7 @@ metricsRouter.get('/overview', async (c) => {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
   try {
-    const res = await fetch(RUNTIME_URL + '/metrics/overview', { signal: controller.signal })
+    const res = await fetch(RUNTIME_URL + '/metrics/overview', { headers: proxyHeaders(c), signal: controller.signal })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
       return c.json(
