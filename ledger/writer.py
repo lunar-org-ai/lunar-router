@@ -166,6 +166,19 @@ def write_decision(
     return path
 
 
+def _all_agent_entries_dirs() -> list[Path]:
+    """All ``<tenant>/<agent>/entries`` dirs under the current ledger root.
+
+    Same aggregator pattern as :func:`_all_agent_lessons_dirs` — the
+    harness introspection tools (``list_recent_promotions``,
+    ``list_recent_rollbacks``) read across every agent in the tenant,
+    so when no specific agent is requested we walk every dir."""
+    root = _ledger_root()
+    if not root.exists():
+        return []
+    return [d / "entries" for d in root.iterdir() if d.is_dir()]
+
+
 def read_entries(
     entries_dir: Optional[Path | str] = None,
     *,
@@ -173,18 +186,43 @@ def read_entries(
 ) -> list[LedgerEntry]:
     """Read all entries (chronological). For the harness, ledger/ui to query."""
     out: list[LedgerEntry] = []
-    root = Path(entries_dir) if entries_dir is not None else _entries_dir_for(agent_id)
-    if not root.exists():
-        return out
-    for p in sorted(root.glob("*.jsonl")):
-        with p.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                d = json.loads(line)
-                out.append(LedgerEntry(**d))
+    if entries_dir is not None:
+        roots: list[Path] = [Path(entries_dir)]
+    elif agent_id is not None:
+        roots = [_entries_dir_for(agent_id)]
+    else:
+        roots = _all_agent_entries_dirs()
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.glob("*.jsonl")):
+            with p.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    d = json.loads(line)
+                    out.append(LedgerEntry(**d))
+    # Aggregator pulls multiple dirs — final sort by timestamp keeps
+    # the chronological contract callers expect.
+    out.sort(key=lambda e: e.timestamp or "")
     return out
+
+
+def _all_agent_lessons_dirs() -> list[Path]:
+    """Every ``<tenant>/<agent>/lessons`` dir under the current ledger root.
+
+    Used to aggregate lessons across agents when the caller didn't ask
+    for a specific agent — the UI lesson list, evolution timeline,
+    router history, etc. don't carry agent context, so without this
+    they'd see only whatever ``agent_context._active`` happened to be
+    on the Cloud Run instance handling the request (racy across
+    instances).
+    """
+    root = _ledger_root()
+    if not root.exists():
+        return []
+    return [d / "lessons" for d in root.iterdir() if d.is_dir()]
 
 
 def read_lessons(
@@ -193,13 +231,19 @@ def read_lessons(
     agent_id: Optional[str] = None,
 ) -> list[Lesson]:
     out: list[Lesson] = []
-    root = Path(lessons_dir) if lessons_dir is not None else _lessons_dir_for(agent_id)
-    if not root.exists():
-        return out
-    for p in sorted(root.glob("*.json")):
-        with p.open() as f:
-            d = json.load(f)
-        out.append(Lesson(**d))
+    if lessons_dir is not None:
+        roots: list[Path] = [Path(lessons_dir)]
+    elif agent_id is not None:
+        roots = [_lessons_dir_for(agent_id)]
+    else:
+        roots = _all_agent_lessons_dirs()
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.glob("*.json")):
+            with p.open() as f:
+                d = json.load(f)
+            out.append(Lesson(**d))
     return out
 
 
@@ -209,13 +253,24 @@ def read_lesson(
     *,
     agent_id: Optional[str] = None,
 ) -> Optional[Lesson]:
-    """Read a single Lesson by id. Returns None if not found."""
-    root = Path(lessons_dir) if lessons_dir is not None else _lessons_dir_for(agent_id)
-    p = root / f"{lesson_id}.json"
-    if not p.exists():
-        return None
-    with p.open() as f:
-        return Lesson(**json.load(f))
+    """Read a single Lesson by id. Returns None if not found.
+
+    When neither ``lessons_dir`` nor ``agent_id`` is given, walks every
+    agent dir under the current tenant — mirrors :func:`read_lessons`.
+    """
+    if lessons_dir is not None:
+        roots: list[Path] = [Path(lessons_dir)]
+    elif agent_id is not None:
+        roots = [_lessons_dir_for(agent_id)]
+    else:
+        roots = _all_agent_lessons_dirs()
+    for root in roots:
+        p = root / f"{lesson_id}.json"
+        if not p.exists():
+            continue
+        with p.open() as f:
+            return Lesson(**json.load(f))
+    return None
 
 
 def update_lesson(

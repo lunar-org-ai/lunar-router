@@ -162,15 +162,9 @@ def list_tools_for_agent(
     bridge = _LoopBridge.get()
     discovered: list[DiscoveredTool] = []
     for srv in servers:
-        if srv.transport != "stdio":
-            logger.warning(
-                "mcp server %s/%s transport=%s not implemented; skipping",
-                agent_id, srv.name, srv.transport,
-            )
-            continue
         try:
             tools = bridge.run(
-                _discover_tools(srv.name, srv.command, srv.args, srv.env),
+                _discover_tools_for_server(srv),
                 timeout=timeout_s,
             )
         except Exception as e:
@@ -205,12 +199,10 @@ def call_tool(
     server = next((s for s in servers if s.name == server_name), None)
     if server is None:
         raise RuntimeError(f"mcp_server_not_found: {server_name}")
-    if server.transport != "stdio":
-        raise RuntimeError(f"transport_not_implemented: {server.transport}")
 
     bridge = _LoopBridge.get()
     return bridge.run(
-        _invoke_tool(server.command, server.args, server.env, tool_name, arguments),
+        _invoke_tool_for_server(server, tool_name, arguments),
         timeout=timeout_s,
     )
 
@@ -220,40 +212,86 @@ def call_tool(
 # ---------------------------------------------------------------------------
 
 
-async def _discover_tools(
-    server_name: str,
-    command: str,
-    args: list[str],
-    env: dict[str, str],
-) -> list[DiscoveredTool]:
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    import os
+def _server_headers(server) -> dict[str, str]:
+    """Build the HTTP headers for hosted (sse/http) transports."""
+    headers: dict[str, str] = {}
+    token = getattr(server, "auth_token", None)
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
-    if not command:
-        raise RuntimeError("missing command")
 
-    # Compose the subprocess env so the MCP server inherits PATH etc.
-    process_env = {**os.environ, **(env or {})}
+def _streams_ctx(server):
+    """Return the async context manager that yields the MCP
+    (read_stream, write_stream) pair for the chosen transport.
 
-    params = StdioServerParameters(
-        command=command, args=list(args), env=process_env,
-    )
+    Branches by ``server.transport``:
+      * stdio → subprocess via ``stdio_client``
+      * sse   → Server-Sent Events via ``sse_client``
+      * http  → streamable HTTP via ``streamablehttp_client``
+
+    The hosted transports honor ``server.auth_token`` as a
+    ``Bearer`` header so private MCP servers (Linear/Notion/etc) work.
+    """
+    transport = (server.transport or "stdio").lower()
+
+    if transport == "stdio":
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
+        import os
+
+        if not server.command:
+            raise RuntimeError("missing command for stdio transport")
+        process_env = {**os.environ, **(server.env or {})}
+        params = StdioServerParameters(
+            command=server.command, args=list(server.args), env=process_env,
+        )
+        return stdio_client(params)
+
+    if transport == "sse":
+        from mcp.client.sse import sse_client
+
+        if not server.url:
+            raise RuntimeError("missing url for sse transport")
+        return sse_client(server.url, headers=_server_headers(server))
+
+    if transport == "http":
+        from mcp.client.streamable_http import streamablehttp_client
+
+        if not server.url:
+            raise RuntimeError("missing url for http transport")
+        return streamablehttp_client(server.url, headers=_server_headers(server))
+
+    raise RuntimeError(f"transport_not_implemented: {transport}")
+
+
+def _normalize_streams(streams):
+    """Some transports yield ``(read, write)`` and some yield
+    ``(read, write, get_session_id)``. Normalize to the pair the
+    rest of the code path expects."""
+    if isinstance(streams, tuple) and len(streams) >= 2:
+        return streams[0], streams[1]
+    raise RuntimeError("transport did not return a (read, write) stream pair")
+
+
+async def _discover_tools_for_server(server) -> list[DiscoveredTool]:
+    from mcp import ClientSession
+
     out: list[DiscoveredTool] = []
-    async with stdio_client(params) as (read_stream, write_stream):
+    async with _streams_ctx(server) as streams:
+        read_stream, write_stream = _normalize_streams(streams)
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             resp = await session.list_tools()
             for t in resp.tools:
-                # Each MCP tool has name, description, inputSchema.
                 schema = getattr(t, "inputSchema", None) or {}
                 if hasattr(schema, "model_dump"):
                     schema = schema.model_dump()
                 out.append(
                     DiscoveredTool(
-                        server_name=server_name,
+                        server_name=server.name,
                         tool_name=t.name,
-                        qualified_name=f"{server_name}__{t.name}",
+                        qualified_name=f"{server.name}__{t.name}",
                         description=getattr(t, "description", "") or "",
                         input_schema=schema,
                     )
@@ -261,27 +299,18 @@ async def _discover_tools(
     return out
 
 
-async def _invoke_tool(
-    command: str,
-    args: list[str],
-    env: dict[str, str],
+async def _invoke_tool_for_server(
+    server,
     tool_name: str,
     arguments: dict[str, Any],
 ) -> str:
-    from mcp import ClientSession, StdioServerParameters
-    from mcp.client.stdio import stdio_client
-    import os
+    from mcp import ClientSession
 
-    process_env = {**os.environ, **(env or {})}
-    params = StdioServerParameters(
-        command=command, args=list(args), env=process_env,
-    )
-    async with stdio_client(params) as (read_stream, write_stream):
+    async with _streams_ctx(server) as streams:
+        read_stream, write_stream = _normalize_streams(streams)
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             result = await session.call_tool(tool_name, arguments)
-            # ``call_tool`` returns CallToolResult with .content (list of
-            # TextContent etc). Concat the text payloads.
             parts: list[str] = []
             for block in (getattr(result, "content", []) or []):
                 text = getattr(block, "text", None)

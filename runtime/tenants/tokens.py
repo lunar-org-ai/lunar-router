@@ -81,6 +81,7 @@ def mint_token(
     tenant_id: str,
     label: str,
     *,
+    agent_id: Optional[str] = None,
     root: Optional[Path] = None,
     now_iso: Optional[str] = None,
 ) -> tuple[str, TokenRecord]:
@@ -90,6 +91,9 @@ def mint_token(
     Returns ``(plaintext, record)``. The plaintext is the ONLY place the
     raw token is ever returned — callers must show it to the operator
     once and forget it. Hash is what lives on disk.
+
+    Pass ``agent_id`` to scope the token to a single agent (per-agent
+    MCP path enforces this). Omit for tenant-wide operator tokens.
 
     Raises ``FileNotFoundError`` if the tenant dir doesn't exist.
     """
@@ -104,6 +108,7 @@ def mint_token(
         label=label,
         created_at=_now_iso(now_iso),
         last_used_at=None,
+        agent_id=agent_id,
     )
 
     _append_token(tenant_dir, record)
@@ -128,6 +133,33 @@ def resolve_token(
     Comparison uses :func:`hmac.compare_digest` against the stored hash.
     On hit, touches ``last_used_at`` in the per-tenant file unless
     ``touch_last_used`` is False (e.g. health probes shouldn't write).
+
+    Drops the scope (``agent_id``) — callers that need to enforce per-
+    agent scoping (e.g. the per-agent MCP mount) use
+    :func:`resolve_token_with_scope` instead.
+    """
+    scope = resolve_token_with_scope(
+        token,
+        root=root,
+        touch_last_used=touch_last_used,
+        now_iso=now_iso,
+    )
+    return None if scope is None else scope[0]
+
+
+def resolve_token_with_scope(
+    token: str,
+    *,
+    root: Optional[Path] = None,
+    touch_last_used: bool = True,
+    now_iso: Optional[str] = None,
+) -> Optional[tuple[str, Optional[str]]]:
+    """Like :func:`resolve_token` but returns ``(tenant_id, agent_id)``.
+
+    ``agent_id`` is ``None`` for tenant-wide tokens. Callers binding
+    the token to a path-scoped agent must verify the URL agent matches
+    a non-None ``agent_id``; tenant-wide tokens are allowed through
+    (operator-level access).
     """
     if not token or not token.startswith(_TOKEN_PREFIX):
         return None
@@ -138,11 +170,6 @@ def resolve_token(
         return None
 
     candidate_hash = _hash_token(token)
-
-    # Index gives us tenant_id by exact hash match. The compare_digest
-    # below is belt-and-suspenders for timing-leak resistance — dict
-    # lookup is already constant-time on hash, but a future change might
-    # add a fallback scan, so we keep the discipline.
     tenant_id: Optional[str] = None
     for stored_hash, tid in index.items():
         if hmac.compare_digest(stored_hash, candidate_hash):
@@ -151,13 +178,22 @@ def resolve_token(
     if tenant_id is None:
         return None
 
+    # Load the per-tenant record to pull scope (and to touch last_used).
+    records = _load_tokens(rroot / tenant_id)
+    record: Optional[TokenRecord] = None
+    for rec in records:
+        if hmac.compare_digest(rec.hash, candidate_hash):
+            record = rec
+            break
+
     if touch_last_used:
         try:
             _touch_last_used(rroot / tenant_id, candidate_hash, _now_iso(now_iso))
         except Exception as e:  # pragma: no cover — defensive
             logger.warning("failed to touch last_used_at: %s", e)
 
-    return tenant_id
+    agent_id = record.agent_id if record is not None else None
+    return tenant_id, agent_id
 
 
 # ---------------------------------------------------------------------------
