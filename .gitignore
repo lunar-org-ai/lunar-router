@@ -33,6 +33,20 @@ uv.lock
 # Local env (API keys, secrets) — never commit
 .env
 .env.local
+.env.development
+.env.production
+.env.*.local
+
+# Per-agent runtime artifacts (operator state, not source).
+# The agent/ codebase (README, agent.yaml, pipeline/, prompts/) stays
+# tracked; only the generated side-files are ignored.
+agent/secrets.env
+agent/onboarding.json
+agent/integrations/
+
+# Convenience symlink some installs create at the root pointing into
+# the active tenant's agents dir. Always operator-local.
+/agents
 
 # Corpus index — operator-built locally; never committed
 corpora/indexed/*.faiss
@@ -46,5 +60,22 @@ corpora/ingested/
 # and runtime/agents/ source dirs stay tracked.
 /agents/
 
+# Multi-tenant runtime data (P16.1+). The tenants/ directory holds every
+# tenant's agents/, ledger/, traces/, corpora/ — pure operator state,
+# nothing source-y lives here. The codebase under runtime/tenants/ is
+# unaffected.
+/tenants/
+
+# Per-tenant ledger writes (autonomous arm + demo runs). Only the
+# versions/ subdir is tracked source-of-truth; everything else is
+# generated at runtime.
+/ledger/*/
+!/ledger/versions/
+
+# Wakeup runner state (P16.x). Operator-local; recreated on first run.
+/.harness/
+
+# TypeScript incremental build cache — derived, not source.
+*.tsbuildinfo
 
 .cloudbuild.*
