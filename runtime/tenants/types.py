@@ -70,12 +70,22 @@ class TokenRecord:
     Plaintext tokens are never stored — only ``hash`` is. The plaintext
     is returned once at mint time and the operator is expected to
     capture it.
+
+    Scope
+    -----
+    ``agent_id`` is optional. ``None`` means the token grants
+    tenant-wide access (operator-level — the legacy P16.1 default).
+    A non-empty ``agent_id`` scopes the token to a single agent and is
+    enforced at request time: any path-bound endpoint (e.g. the
+    per-agent MCP mount ``/mcp/agents/<id>``) refuses tokens whose
+    scope doesn't match the URL agent.
     """
 
     hash: str                  # sha256(token).hexdigest() — 64 hex chars
     label: str = ""
     created_at: str = ""
     last_used_at: Optional[str] = None
+    agent_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,6 +93,7 @@ class TokenRecord:
             "label": self.label,
             "created_at": self.created_at,
             "last_used_at": self.last_used_at,
+            "agent_id": self.agent_id,
         }
 
     @classmethod
@@ -92,6 +103,7 @@ class TokenRecord:
             label=str(data.get("label", "")),
             created_at=str(data.get("created_at", "")),
             last_used_at=data.get("last_used_at"),
+            agent_id=data.get("agent_id"),
         )
 
     @property

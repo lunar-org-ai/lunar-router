@@ -39,19 +39,27 @@ logger = logging.getLogger("runtime.agents.mcp")
 
 
 _FILENAME = "mcp.json"
-_VALID_TRANSPORTS = ("stdio", "sse")
+# stdio = subprocess (local/OSS); sse = Server-Sent Events; http =
+# streamable HTTP (modern MCP HTTP transport). The latter two cover
+# hosted MCP servers (Linear, Slack, etc).
+_VALID_TRANSPORTS = ("stdio", "sse", "http")
 
 
 @dataclass
 class MCPServer:
     name: str                        # operator-chosen label, must be unique per agent
-    transport: str = "stdio"         # "stdio" | "sse" (sse deferred)
+    transport: str = "stdio"         # "stdio" | "sse" | "http"
     command: str = ""                # for stdio: executable path or PATH name
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
-    url: Optional[str] = None        # for sse transport (future)
+    url: Optional[str] = None        # for sse / http transports
     enabled: bool = True
     description: str = ""
+    # Optional Bearer token for hosted MCP servers. Persisted as plain
+    # text in mcp.json today — the per-agent dir already sits inside
+    # the tenant's KMS-protected partition. A future tightening can
+    # move this into the runtime/agents/secrets KMS store.
+    auth_token: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -65,6 +73,8 @@ class MCPServer:
         }
         if self.url:
             d["url"] = self.url
+        if self.auth_token:
+            d["auth_token"] = self.auth_token
         return d
 
     @classmethod
@@ -78,6 +88,7 @@ class MCPServer:
             url=data.get("url"),
             enabled=bool(data.get("enabled", True)),
             description=str(data.get("description", "") or ""),
+            auth_token=data.get("auth_token") or None,
         )
 
 
