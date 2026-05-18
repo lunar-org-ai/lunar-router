@@ -39,6 +39,11 @@ router = [
 # with plaintext secrets.env don't need this. Adds ~20MB of Google
 # Cloud SDK transitive deps.
 kms = ["google-cloud-kms>=2.20"]
+# E2B sandbox SDK for the autonomous engineering loop. Activated by
+# setting OPENTRACY_E2B_API_KEY; without that env the sandbox wrapper
+# raises at first call so OSS/local installs that never go down the
+# autonomous path don't need the dep installed.
+sandbox = ["e2b>=1.0", "e2b-code-interpreter>=1.0"]
 
 [build-system]
 requires = ["hatchling"]

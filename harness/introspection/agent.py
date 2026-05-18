@@ -389,6 +389,33 @@ def _call_claude_code_cli(
     )
 
 
+def _byok_anthropic_key() -> Optional[str]:
+    """Resolve the tenant's BYOK Anthropic key for introspection.
+
+    Multi-tenant deploys never set ``ANTHROPIC_API_KEY`` at the
+    platform level (see ``byok_strict``). The introspect chat lives
+    above any particular agent context, so we walk the tenant's agents
+    and use the first one with an Anthropic secret on file.
+    Returns ``None`` in OSS mode or when no agent has BYOK configured.
+    """
+    try:
+        from runtime.tenants.feature import is_multi_tenant_enabled
+        if not is_multi_tenant_enabled():
+            return None
+        from runtime.agents.registry import list_agents
+        from runtime.agents.secrets import get_secret
+        for meta in list_agents():
+            agent_id = getattr(meta, "id", None)
+            if not agent_id:
+                continue
+            key = get_secret("anthropic", agent_id=agent_id)
+            if key:
+                return key
+    except Exception:  # pragma: no cover — defensive
+        return None
+    return None
+
+
 def introspect(
     request: str,
     history: Optional[list[dict[str, Any]]] = None,
@@ -396,6 +423,13 @@ def introspect(
 ) -> IntrospectResult:
     """Run one introspection request via the auto-selected transport."""
     transport = _select_transport()
+    byok_key = _byok_anthropic_key()
+
+    # In multi-tenant deploys the platform doesn't carry a key, so
+    # transport=='none'. If any tenant agent has BYOK on file, use
+    # that — the introspection chat is tenant-scoped anyway.
+    if transport == "none" and byok_key:
+        transport = "anthropic_api"
 
     if transport == "claude_code_cli":
         return _call_claude_code_cli(request, history)
@@ -415,8 +449,8 @@ def introspect(
             error="no_transport_available",
         )
 
-    # transport == "anthropic_api"
-    api_key = os.getenv("ANTHROPIC_API_KEY")
+    # transport == "anthropic_api" — prefer tenant BYOK, fall back to env.
+    api_key = byok_key or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return IntrospectResult(
             response=(
