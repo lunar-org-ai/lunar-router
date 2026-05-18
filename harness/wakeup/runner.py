@@ -277,15 +277,27 @@ def _safe_dataset_health() -> dict[str, Any]:
 
 
 def _check_transport() -> Optional[str]:
-    """Return None when a brain transport is reachable, else a reason string."""
+    """Return None when a brain transport is reachable, else a reason string.
+
+    In multi-tenant deploys ``ANTHROPIC_API_KEY`` is never set at the
+    platform level (BYOK strict), so ``select_transport`` reports
+    ``none``. We accept BYOK as a valid transport by consulting the
+    same helper the introspect chat uses — that way wakeup doesn't
+    block on tenants that have an Anthropic key on file."""
     try:
         from harness.brain.transport import select_transport
     except ImportError:
         return "harness.brain.transport not importable"
     chosen = select_transport()
-    if chosen == "none":
-        return "no ANTHROPIC_API_KEY and no `claude` CLI on PATH"
-    return None
+    if chosen != "none":
+        return None
+    try:
+        from harness.introspection.agent import _byok_anthropic_key
+        if _byok_anthropic_key():
+            return None
+    except Exception:  # pragma: no cover — defensive
+        pass
+    return "no ANTHROPIC_API_KEY and no `claude` CLI on PATH"
 
 
 def _default_introspect(prompt: str):
