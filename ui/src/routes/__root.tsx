@@ -35,8 +35,7 @@ import {
   type FeatureFlags,
   type OnboardingState,
 } from '../api';
-import { AUTH_ROUTES, preserveSearch, type View } from '../router';
-import { consumeGoogleRedirect, getAuthMode, isAuthed } from '../lib/auth';
+import { preserveSearch, type View } from '../router';
 import { UserMenu } from '../components/UserMenu';
 import { NewAgentModal } from '../components/NewAgentModal';
 import { AccountModal } from '../components/AccountModal';
@@ -138,81 +137,11 @@ export const RootLayout = () => {
     kms: false,
   });
 
-  // P16.6/P16.7 — Auth shell bypass + gate. /login + /register render
-  // outside the sidebar+topbar app chrome, and unauthenticated visitors
-  // are bounced there from any other route — but only in multi-tenant
-  // mode. OSS-local deploys skip the gate entirely (the backend has no
-  // auth either, so the redirect would be pure friction).
+  // OSS-local mode: no auth gate. The backend runs in dev-mode (no
+  // BACKEND_API_KEYS set) and passes every request through, so the
+  // shell renders straight to Evolution.
   const last = matches[matches.length - 1];
   const fullPath = last?.fullPath ?? '/';
-  const isAuthRoute = AUTH_ROUTES.has(fullPath);
-  // `authedTick` re-renders the gate after a Google redirect lands:
-  // consumeGoogleRedirect() writes the session synchronously, but
-  // isAuthed() is read at render-time, so we need a state bump to pick
-  // up the change.
-  const [authedTick, setAuthedTick] = useState(0);
-  const authed = isAuthed();
-  void authedTick;
-  // `redirectPending` covers the window between "page comes back from
-  // Google" and "session saved + navigate('/'). During those few
-  // hundred ms (longer if the runtime cold-starts) the user is on
-  // /login, but the Login form would just sit there. We render the
-  // Loader instead so the screen reads as "signing you in".
-  const [redirectPending, setRedirectPending] = useState(true);
-
-  // `gateEnabled` is null while we wait for /v1/auth/mode. We hold the
-  // render back during that window so an OSS deploy never flashes the
-  // /login screen on first paint.
-  const [gateEnabled, setGateEnabled] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getAuthMode().then((mode) => {
-      if (!cancelled) setGateEnabled(mode.multi_tenant);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (isAuthRoute) document.body.classList.add('auth-body');
-    else document.body.classList.remove('auth-body');
-    return () => document.body.classList.remove('auth-body');
-  }, [isAuthRoute]);
-
-  // P16.7 — finalize a Google sign-in redirect (if any) before the
-  // shell makes any /v1/* call. consumeGoogleRedirect() is a no-op
-  // when there's no pending redirect, so it's cheap to run on every
-  // boot. On success we bump authedTick and the gate re-evaluates.
-  // On failure we surface the reason via sessionStorage so the Login
-  // screen can render it on the next render — silent fallbacks here
-  // looked exactly like "click did nothing" to the operator.
-  useEffect(() => {
-    let cancelled = false;
-    void consumeGoogleRedirect().then((outcome) => {
-      if (cancelled) return;
-      setRedirectPending(false);
-      if (!outcome) return;
-      if ('error' in outcome && outcome.error) {
-        sessionStorage.setItem('opentracy.auth.lastError', outcome.error);
-        setAuthedTick((n) => n + 1);
-        return;
-      }
-      setAuthedTick((n) => n + 1);
-      navigate({ to: '/', replace: true });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [navigate]);
-
-  useEffect(() => {
-    if (gateEnabled !== true) return;
-    if (!isAuthRoute && !authed) {
-      navigate({ to: '/login', replace: true });
-    }
-  }, [gateEnabled, isAuthRoute, authed, navigate]);
 
   useEffect(() => {
     document.documentElement.style.setProperty('--primary', ACCENT.primary);
@@ -220,11 +149,8 @@ export const RootLayout = () => {
     document.documentElement.style.setProperty('--accent-fg', ACCENT.fg);
   }, []);
 
-  // Gate the data fetches: skip on auth screens, wait for the auth-mode
-  // probe, and in multi-tenant mode wait for a session. In OSS-local
-  // mode the backend has no auth so we fire as soon as the mode is known.
-  const canFetch =
-    !isAuthRoute && gateEnabled !== null && (gateEnabled === false || authed);
+  // OSS-local mode: no auth probe to wait on. Fetches fire on mount.
+  const canFetch = true;
 
   useEffect(() => {
     if (!canFetch) return;
@@ -284,30 +210,7 @@ export const RootLayout = () => {
 
   // ── End of hooks. Early returns from here on are safe.
 
-  if (isAuthRoute) {
-    // Cover the gap between the Google redirect landing and the
-    // session being exchanged so the Login form doesn't sit there
-    // looking idle. After the first consumeGoogleRedirect() resolves
-    // (success or no-op), `redirectPending` drops and the form
-    // becomes interactive again.
-    if (redirectPending) {
-      return <Loader caption="Signing you in…" />;
-    }
-    return <Outlet />;
-  }
-  // Hold render with a Loader until we know whether the gate is on
-  // (avoids a flash of /login on OSS deploys, and gives the user a
-  // friendly waiting state while the backend cold-starts).
-  if (gateEnabled === null) {
-    return <Loader />;
-  }
-  // Multi-tenant mode + no session: the useEffect above pushes us to
-  // /login on the next tick. Show the Loader meanwhile so we don't
-  // either flash the shell or render blank during the redirect.
-  if (gateEnabled && !authed) {
-    return <Loader caption="Signing you in…" />;
-  }
-  // Authed but onboarding state still unknown: hold the render with
+  // Hold the render with
   // the Loader so a fresh tenant never sees the empty Evolution shell
   // flash before /onboarding/state resolves and dispatches us to the
   // chat. Without this gate, the routes paint first, then a re-render

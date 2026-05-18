@@ -35,9 +35,6 @@ import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
 import { Tenants } from './screens/Tenants';
 import { Billing } from './screens/Billing';
-import { Login } from './screens/Login';
-import { Register } from './screens/Register';
-import { VerifyEmail } from './screens/VerifyEmail';
 
 export type View = 'simple' | 'technical';
 type LessonTab = 'story' | 'traces' | 'evals' | 'diff' | 'decision';
@@ -141,33 +138,10 @@ const billingRoute = createRoute({
   component: Billing,
 });
 
-// P16.6 — Auth screens. They share the root tree so a refresh of
-// /login still resolves, but `RootLayout` detects these pathnames
-// and renders the auth pages without the sidebar shell.
-const loginRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/login',
-  component: Login,
-});
-
-const registerRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/register',
-  component: Register,
-});
-
-const verifyEmailRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/verify-email',
-  component: VerifyEmail,
-});
-
-/** Pathnames that bypass the sidebar shell and any auth gate. */
-export const AUTH_ROUTES: ReadonlySet<string> = new Set([
-  '/login',
-  '/register',
-  '/verify-email',
-]);
+/** Auth screens are not part of the OSS distribution — there is no
+ *  login in single-tenant local mode. The set is exported empty so
+ *  callers that check membership keep typechecking. */
+export const AUTH_ROUTES: ReadonlySet<string> = new Set();
 
 const routeTree = rootRoute.addChildren([
   evolutionRoute,
@@ -178,9 +152,6 @@ const routeTree = rootRoute.addChildren([
   policiesRoute,
   tenantsRoute,
   billingRoute,
-  loginRoute,
-  registerRoute,
-  verifyEmailRoute,
   technicalLayoutRoute.addChildren([
     tracesRoute,
     evalsRoute,

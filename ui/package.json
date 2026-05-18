@@ -20,7 +20,6 @@
     "ai": "^6.0.176",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "firebase": "^12.13.0",
     "lucide-react": "^1.14.0",
     "radix-ui": "^1.4.3",
     "react": "^18.3.1",
