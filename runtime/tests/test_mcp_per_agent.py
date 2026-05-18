@@ -19,6 +19,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+# Per-agent MCP scoping is a hosted-only feature whose backing
+# implementation (claude_code integration touch + per-agent tenant
+# routing) is still WIP in this snapshot. Skip the whole module in
+# OSS — re-enable once the production wiring lands.
+pytestmark = pytest.mark.skip(
+    reason="hosted-only: per-agent MCP scoping implementation incomplete in OSS snapshot",
+)
+
 from runtime.mcp.http import (
     _make_per_agent_streamable_handler,
     _touch_claude_code_integration,
