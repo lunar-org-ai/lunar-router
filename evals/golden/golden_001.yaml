@@ -1,0 +1,9 @@
+id: golden_001
+input:
+  request: "What is your refund policy?"
+expected:
+  contains: ["refund"]
+  category: policy
+metadata:
+  source: seed
+  difficulty: easy

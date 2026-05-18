@@ -1,9 +1,0 @@
-node_modules
-dist
-build
-.git
-.next
-.amplify
-amplify_outputs.json
-*.md
-docs/

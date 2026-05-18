@@ -1,0 +1,20 @@
+# agent/agent.yaml
+# THE composition. Mutate this (and pipeline/*) to change the agent's behavior.
+# This file is the rough equivalent of model.pth — everything else is apparatus.
+
+agent:
+  version: v0.0.1
+  description: "default harness — to be molded by usage"
+
+  pipeline:
+    - { $ref: pipeline/retrieve.yaml }
+    - { $ref: pipeline/rerank.yaml }
+    - { $ref: pipeline/route.yaml }
+    - { $ref: pipeline/generate.yaml }
+
+  cross_cutting:
+    memory: { $ref: pipeline/memory.yaml }
+
+  budget:
+    max_latency_ms: 4000
+    max_cost_usd: 0.05

@@ -1,0 +1,14 @@
+{
+  "id": "cand_20260508T061626_26ac",
+  "parent_version": "v0.0.4",
+  "parent_path": "/Users/diogovieira/Developer/opentracy_new_mode/agent/agent.yaml",
+  "created_at": "2026-05-08T06:16:26Z",
+  "description": "sweep: pipeline/route.yaml:knobs.confidence_threshold=0.6",
+  "mutations": [
+    {
+      "file": "pipeline/route.yaml",
+      "path": "knobs.confidence_threshold",
+      "value": 0.6
+    }
+  ]
+}

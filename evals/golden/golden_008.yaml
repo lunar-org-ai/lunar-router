@@ -1,0 +1,12 @@
+id: golden_008
+input:
+  request: My item arrived damaged. What do I do?
+expected:
+  contains: []
+  category: from-trace
+metadata:
+  source: trace:4b9ccf97-6af5-4758-9d89-12a333eaf92d
+  promoted_at: '2026-05-09T22:20:30.184Z'
+  trace_verdict: pass
+  agent_version: v0.0.5
+  difficulty: medium

@@ -1,0 +1,562 @@
+"""Agent registry — CRUD on ``agents/`` + the live ``agent/`` dir (P2.0).
+
+Operations
+----------
+
+  - ``ensure_bootstrapped()`` — first-run migration. If ``agents/registry.json``
+    is missing, snapshot the current ``agent/`` directory into
+    ``agents/_default/``, write the registry with ``_default`` as the
+    active agent. Idempotent.
+  - ``list_agents()`` / ``get_agent(id)`` — read.
+  - ``create_agent(payload)`` — make a new ``agents/<id>/``. Seeded with
+    the operator's prompt/model/channels (from onboarding) and a default
+    pipeline copied from the currently-active agent.
+  - ``activate(id)`` — copy ``agents/<id>/*`` → ``agent/*`` and update
+    the registry's ``active`` pointer. Triggers ``on_activate`` hook so
+    the runtime can recompile its pipeline.
+  - ``delete_agent(id)`` — soft delete (rename to ``_deleted/<id>``)
+    plus registry mutation. Never touches the live ``agent/`` dir; if
+    the active agent is deleted, the caller decides what to activate
+    next (UI surface).
+
+Concurrency: FastAPI single-process, no real concurrency between
+requests. A simple file write + rename is enough — no locking primitives.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import secrets
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from runtime.agents.types import AgentMetadata, Registry
+
+
+logger = logging.getLogger("runtime.agents.registry")
+
+
+_DEFAULT_ROOT = Path("agents")
+_LIVE_AGENT_DIR = Path("agent")           # the running agent
+_REGISTRY_FILE = "registry.json"
+_DELETED_BUCKET = "_deleted"
+_DEFAULT_ID = "_default"
+_SLUG_RE = re.compile(r"[^a-z0-9-]+")
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap
+# ---------------------------------------------------------------------------
+
+
+def ensure_bootstrapped(
+    *,
+    root: Optional[Path] = None,
+    live_dir: Optional[Path] = None,
+    now_iso: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> Registry:
+    """If ``agents/registry.json`` is missing, migrate ``agent/`` to
+    ``agents/_default/`` and write a registry. Idempotent.
+
+    P2.1 — also partitions storage. Flat dirs that pre-date multi-agent
+    (``ledger/{entries,lessons,decisions,notifications}/...`` +
+    ``traces/{raw,feedback,flagged}/...``) get migrated under
+    ``<root>/_default/<kind>/...``. Idempotent: if the partition dir
+    already exists, the flat path is left as-is for any operator who
+    rolled back this code.
+
+    Returns the registry in its post-bootstrap state.
+    """
+    root = _resolve_root(root)
+    live = Path(live_dir) if live_dir is not None else _LIVE_AGENT_DIR
+    project = Path(project_root) if project_root is not None else Path.cwd()
+    root.mkdir(parents=True, exist_ok=True)
+
+    # Migrate flat storage into _default/ before / regardless of whether
+    # the registry exists, so re-running after partial install also
+    # finishes the job.
+    _migrate_flat_storage(project)
+
+    registry_path = root / _REGISTRY_FILE
+    if registry_path.is_file():
+        return _load_registry(root)
+
+    logger.info("agents/registry.json missing — migrating agent/ → agents/_default/")
+    default_dir = root / _DEFAULT_ID
+    if not default_dir.is_dir():
+        if live.is_dir():
+            _copy_tree(live, default_dir)
+        else:
+            default_dir.mkdir(parents=True, exist_ok=True)
+            logger.warning("no live agent/ dir to migrate — created empty agents/_default/")
+
+    meta = AgentMetadata(
+        id=_DEFAULT_ID,
+        name="Default agent",
+        template=None,
+        description="Migrated from the single-agent layout that preceded P2.0.",
+        created_at=_now_iso(now_iso),
+        updated_at=_now_iso(now_iso),
+    )
+    registry = Registry(agents=[meta], active=_DEFAULT_ID)
+    _save_registry(root, registry)
+    return registry
+
+
+# ---------------------------------------------------------------------------
+# Reads
+# ---------------------------------------------------------------------------
+
+
+def agents_root() -> Path:
+    """Effective filesystem root for the agents catalog right now.
+
+    Public surface for sibling modules (``channels``, ``improvement``,
+    ``mcp``) that previously read the ``_DEFAULT_ROOT`` constant
+    directly. In multi-tenant mode this routes through the active
+    tenant; in OSS mode it returns the legacy ``agents/`` path.
+    """
+    return _resolve_root(None)
+
+
+def list_agents(*, root: Optional[Path] = None) -> list[AgentMetadata]:
+    return _load_registry(_resolve_root(root)).agents
+
+
+def get_agent(agent_id: str, *, root: Optional[Path] = None) -> Optional[AgentMetadata]:
+    return _load_registry(_resolve_root(root)).get(agent_id)
+
+
+def get_active(*, root: Optional[Path] = None) -> Optional[AgentMetadata]:
+    reg = _load_registry(_resolve_root(root))
+    return reg.get(reg.active) if reg.active else None
+
+
+def get_registry(*, root: Optional[Path] = None) -> Registry:
+    return _load_registry(_resolve_root(root))
+
+
+# ---------------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------------
+
+
+def create_agent(
+    payload: dict[str, Any],
+    *,
+    root: Optional[Path] = None,
+    seed_from: Optional[str] = None,
+    now_iso: Optional[str] = None,
+) -> AgentMetadata:
+    """Create a new agent in ``agents/<id>/``.
+
+    ``payload`` is the onboarding result: ``{name, model, prompt, tools,
+    channels, template?}``. We slugify the name into the directory id
+    (unique across the registry; appends a hex suffix on collision).
+
+    ``seed_from`` (optional) is the id of an existing agent whose
+    pipeline yamls are used as the starting point. Defaults to the
+    currently-active agent so the new agent inherits the routing /
+    rerank / generate stages. The prompt + model + name are overwritten
+    by the payload.
+    """
+    rroot = _resolve_root(root)
+    registry = _load_registry(rroot)
+
+    agent_id = _allocate_slug(payload.get("name", "") or "agent", registry)
+    agent_dir = rroot / agent_id
+    if agent_dir.exists():
+        raise ValueError(f"agents/{agent_id} already exists")
+
+    source_id = seed_from or registry.active or _DEFAULT_ID
+    source_dir = rroot / source_id
+    if not source_dir.is_dir():
+        # New tenants start with empty agents/ dirs (see
+        # tenants.registry.create_tenant), so the per-tenant _default
+        # seed isn't there yet. Fall back to the canonical seed at
+        # tenants/_default/agents/_default — the migration bootstrap
+        # always populates it on first boot. Without this fallback,
+        # create_agent for a fresh tenant produces an empty dir with
+        # no pipeline yaml, and activate_agent silently fails to load
+        # a pipeline at chat time.
+        fallback = _baseline_seed_dir(rroot)
+        if fallback is not None and fallback.is_dir():
+            source_dir = fallback
+    if source_dir.is_dir():
+        _copy_tree(source_dir, agent_dir)
+    else:
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+    _apply_payload_to_dir(agent_dir, payload)
+
+    timestamp = _now_iso(now_iso)
+    meta = AgentMetadata(
+        id=agent_id,
+        name=str(payload.get("name", "") or agent_id),
+        template=payload.get("template"),
+        model=str(payload.get("model", "claude-sonnet-4-6")),
+        description=_describe_from_payload(payload),
+        created_at=timestamp,
+        updated_at=timestamp,
+        onboarding_completed_at=timestamp,
+        onboarding=_clone_payload(payload),
+    )
+    registry.agents.append(meta)
+    _save_registry(rroot, registry)
+    return meta
+
+
+def update_agent(
+    agent_id: str,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    model: Optional[str] = None,
+    root: Optional[Path] = None,
+    now_iso: Optional[str] = None,
+) -> AgentMetadata:
+    rroot = _resolve_root(root)
+    registry = _load_registry(rroot)
+    meta = registry.get(agent_id)
+    if meta is None:
+        raise KeyError(agent_id)
+    if name is not None:
+        meta.name = name
+    if description is not None:
+        meta.description = description
+    if model is not None:
+        meta.model = model
+        # P3.0 — propagate to the agent's route.yaml so /run uses it.
+        # If this agent is currently active, live ``agent/`` won't update
+        # until the operator hits /activate again — that's acceptable;
+        # the catalog copy is the source of truth.
+        _set_route_yaml_model(rroot / agent_id, model)
+    meta.updated_at = _now_iso(now_iso)
+    _save_registry(rroot, registry)
+    return meta
+
+
+def activate(
+    agent_id: str,
+    *,
+    root: Optional[Path] = None,
+    live_dir: Optional[Path] = None,
+    on_activate: Optional[Callable[[AgentMetadata], None]] = None,
+) -> AgentMetadata:
+    """Make ``agents/<id>/`` the live agent.
+
+    Copies the catalog entry into ``agent/`` (the runtime reads from
+    there). Updates ``registry.active``. The optional ``on_activate``
+    hook fires after the copy — the server uses it to recompile its
+    pipeline.
+    """
+    rroot = _resolve_root(root)
+    live = Path(live_dir) if live_dir is not None else _LIVE_AGENT_DIR
+    registry = _load_registry(rroot)
+    meta = registry.get(agent_id)
+    if meta is None:
+        raise KeyError(agent_id)
+
+    source = rroot / agent_id
+    if not source.is_dir():
+        raise FileNotFoundError(f"agents/{agent_id}/ missing on disk")
+
+    # Snapshot current live agent back into its catalog entry so any
+    # mid-flight prompt/route edits aren't lost on switch.
+    prev_active = registry.active
+    if prev_active and prev_active != agent_id and live.is_dir():
+        prev_dir = rroot / prev_active
+        if prev_dir.is_dir() or registry.get(prev_active) is not None:
+            _copy_tree(live, prev_dir)
+
+    _replace_tree(source, live)
+    registry.active = agent_id
+    _save_registry(rroot, registry)
+
+    if on_activate is not None:
+        try:
+            on_activate(meta)
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("on_activate hook failed for %s: %s", agent_id, e)
+
+    return meta
+
+
+def delete_agent(
+    agent_id: str,
+    *,
+    root: Optional[Path] = None,
+) -> AgentMetadata:
+    """Soft delete: move ``agents/<id>/`` to ``agents/_deleted/<id>/``.
+    Refuses to delete the active agent (caller must activate something
+    else first) and refuses to delete ``_default`` (it's the
+    bootstrap fallback)."""
+    rroot = _resolve_root(root)
+    registry = _load_registry(rroot)
+    meta = registry.get(agent_id)
+    if meta is None:
+        raise KeyError(agent_id)
+    if agent_id == _DEFAULT_ID:
+        raise ValueError("cannot delete the _default agent")
+    if registry.active == agent_id:
+        raise ValueError("cannot delete the active agent — switch first")
+
+    src = rroot / agent_id
+    if src.is_dir():
+        bucket = rroot / _DELETED_BUCKET
+        bucket.mkdir(parents=True, exist_ok=True)
+        dest = bucket / f"{agent_id}-{secrets.token_hex(3)}"
+        shutil.move(str(src), str(dest))
+
+    registry.agents = [a for a in registry.agents if a.id != agent_id]
+    _save_registry(rroot, registry)
+    return meta
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _apply_payload_to_dir(agent_dir: Path, payload: dict[str, Any]) -> None:
+    """Materialize the operator's onboarding payload into the agent dir."""
+    prompt = (payload.get("prompt") or "").strip()
+    if prompt:
+        prompt_path = agent_dir / "prompts" / "system.md"
+        prompt_path.parent.mkdir(parents=True, exist_ok=True)
+        body = (
+            prompt
+            + "\n\nThis prompt is part of the trainable surface. The harness may mutate it.\n"
+        )
+        prompt_path.write_text(body, encoding="utf-8")
+
+    # P3.0 — propagate the operator's model choice into route.yaml so
+    # the next /run actually uses it. Without this the router stays on
+    # whatever the seed agent had (typically claude-haiku-4-5).
+    model = (payload.get("model") or "").strip()
+    if model:
+        _set_route_yaml_model(agent_dir, model)
+
+    onboarding_path = agent_dir / "onboarding.json"
+    onboarding_path.write_text(
+        json.dumps(_clone_payload(payload), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _set_route_yaml_model(agent_dir: Path, model: str) -> None:
+    """Rewrite ``agent_dir/pipeline/route.yaml`` so its ``small`` knob
+    matches the operator's chosen model. The router treats this as the
+    default; ``big`` stays whatever the seed had (escalation target).
+
+    No-op when the file is missing — caller is responsible for ensuring
+    the agent dir was seeded from a working template first.
+    """
+    route_path = agent_dir / "pipeline" / "route.yaml"
+    if not route_path.is_file():
+        logger.warning("route.yaml missing at %s — model not propagated", route_path)
+        return
+    try:
+        body = route_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("failed to read %s: %s", route_path, e)
+        return
+
+    # Surgical line-level rewrite. Avoid a full YAML round-trip so
+    # comments + ordering stay intact (PyYAML doesn't preserve them).
+    new_lines: list[str] = []
+    rewrote = False
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("small:"):
+            indent = line[: len(line) - len(stripped)]
+            new_lines.append(f"{indent}small: {model}")
+            rewrote = True
+        else:
+            new_lines.append(line)
+    if not rewrote:
+        logger.warning("route.yaml at %s had no 'small:' knob — not modified", route_path)
+        return
+    if not body.endswith("\n"):
+        new_lines.append("")
+    route_path.write_text("\n".join(new_lines) + ("" if body.endswith("\n") else "\n"), encoding="utf-8")
+
+
+def _describe_from_payload(payload: dict[str, Any]) -> str:
+    name = payload.get("name") or ""
+    template = payload.get("template")
+    if template:
+        return f"{name} — template {template}"
+    return name or "(unnamed)"
+
+
+def _clone_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "template": payload.get("template"),
+        "name": payload.get("name", ""),
+        "company": payload.get("company", ""),
+        "prompt": payload.get("prompt", ""),
+        "model": payload.get("model", "claude-sonnet-4-6"),
+        "tools": list(payload.get("tools") or []),
+        "channels": list(payload.get("channels") or []),
+    }
+
+
+def _allocate_slug(seed: str, registry: Registry) -> str:
+    """Slugify ``seed``; if it collides, append a 4-char hex suffix."""
+    base = _SLUG_RE.sub("-", seed.lower()).strip("-")
+    if not base:
+        base = "agent"
+    if not registry.get(base):
+        return base
+    for _ in range(8):
+        candidate = f"{base}-{secrets.token_hex(2)}"
+        if not registry.get(candidate):
+            return candidate
+    # Extreme collision — fall back to a fully-random id.
+    return f"agent-{secrets.token_hex(4)}"
+
+
+_PARTITIONED_KINDS = {
+    "ledger": ("entries", "lessons", "decisions", "notifications"),
+    "traces": ("raw", "feedback", "flagged"),
+}
+
+
+def _migrate_flat_storage(project_root: Path) -> None:
+    """Move pre-multi-agent flat dirs under ``<root>/_default/<kind>/``.
+
+    Idempotent and best-effort: if any move fails (perm error, mount
+    weirdness), we log + skip rather than block startup. The flat path
+    stays in place so a future run can retry.
+    """
+    for parent, kinds in _PARTITIONED_KINDS.items():
+        parent_dir = project_root / parent
+        if not parent_dir.is_dir():
+            continue
+        partition_dir = parent_dir / _DEFAULT_ID
+        for kind in kinds:
+            flat = parent_dir / kind
+            if not flat.is_dir():
+                continue
+            target = partition_dir / kind
+            if target.exists():
+                # Already partitioned previously — leave the flat dir to
+                # the operator's discretion (could be a residual mount).
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(flat), str(target))
+                logger.info("migrated %s → %s", flat, target)
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("flat-storage migration of %s failed (%s)", flat, e)
+
+
+def _copy_tree(src: Path, dst: Path) -> None:
+    """Copy directory contents. Overwrites destination."""
+    if dst.exists():
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, dst, symlinks=False)
+
+
+def _replace_tree(src: Path, dst: Path) -> None:
+    """Atomic-ish replace: copy src to a temp dir, then move into place.
+
+    Falls back to direct copy if the temp move would cross devices.
+    """
+    if not src.is_dir():
+        raise FileNotFoundError(src)
+    parent = dst.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staging = parent / f".{dst.name}.staging-{secrets.token_hex(3)}"
+    try:
+        shutil.copytree(src, staging, symlinks=False)
+        if dst.exists():
+            shutil.rmtree(dst)
+        shutil.move(str(staging), str(dst))
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _baseline_seed_dir(tenant_agents_root: Path) -> Optional[Path]:
+    """Cross-tenant fallback for the ``_default`` agent seed.
+
+    When create_agent runs in a fresh tenant whose ``agents/`` dir is
+    empty, the in-tenant ``_default`` doesn't exist yet. The migration
+    bootstrap (P16.1) guarantees ``tenants/_default/agents/_default/``
+    exists on every healthy install — point at it so new agents in any
+    tenant inherit a working pipeline.
+
+    ``tenant_agents_root`` is the per-tenant agents dir (eg.
+    ``tenants/acme/agents/``). Walks up two levels to the tenants/
+    root, then back down to ``_default/agents/_default``. Returns
+    None in OSS mode (when this helper shouldn't be needed at all).
+    """
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if not is_multi_tenant_enabled():
+        return None
+    # tenants/<t>/agents → tenants/<t> → tenants → tenants/_default/agents/_default
+    try:
+        tenants_root = tenant_agents_root.parent.parent
+    except (AttributeError, IndexError):
+        return None
+    return tenants_root / _DEFAULT_ID / "agents" / _DEFAULT_ID
+
+
+def _resolve_root(root: Optional[Path]) -> Path:
+    """Pick the on-disk root for the agents registry.
+
+    Resolution order:
+      1. Explicit ``root`` argument — always wins (tests use this).
+      2. If multi-tenant mode is ON (env ``OPENTRACY_MULTI_TENANT=1``),
+         route through ``tenants/<active>/agents/`` — the ASGI tenant
+         middleware sets ``active`` per-request; when nothing is set
+         (background tasks, lifespan startup), ``get_active()`` falls
+         back to ``_default``.
+      3. Otherwise (OSS local default) → ``_DEFAULT_ROOT`` at the
+         project root, unchanged from pre-P16.1 behavior.
+    """
+    if root is not None:
+        return Path(root)
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    if is_multi_tenant_enabled():
+        from runtime.tenant_context import get_active
+        from runtime.tenants.registry import get_tenant_dir
+        return get_tenant_dir(get_active()) / "agents"
+    return _DEFAULT_ROOT
+
+
+def _load_registry(root: Path) -> Registry:
+    path = root / _REGISTRY_FILE
+    if not path.is_file():
+        return Registry()
+    with path.open(encoding="utf-8") as f:
+        data = json.load(f)
+    return Registry.from_dict(data)
+
+
+def _save_registry(root: Path, registry: Registry) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / _REGISTRY_FILE
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(registry.to_dict(), f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    tmp.replace(path)
+
+
+def _now_iso(override: Optional[str] = None) -> str:
+    if override:
+        return override
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )

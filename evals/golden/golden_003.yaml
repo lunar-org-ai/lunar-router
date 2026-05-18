@@ -1,0 +1,9 @@
+id: golden_003
+input:
+  request: "How long does shipping take to Brazil?"
+expected:
+  contains: ["shipping"]
+  category: shipping
+metadata:
+  source: seed
+  difficulty: medium

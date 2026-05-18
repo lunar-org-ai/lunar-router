@@ -1,167 +1,60 @@
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "opentracy"
-version = "0.4.1"
-description = "Auto-distillation layer for your LLM calls — drop-in OpenAI-compatible SDK that turns every request into training data for cheaper custom models."
-readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.10"
-authors = [
-    {name = "OpenTracy Team"}
-]
-keywords = [
-    "llm", "distillation", "fine-tuning", "routing",
-    "openai", "anthropic", "gateway", "ai",
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
-
-# Core dependencies — everything needed for `completion()`, `Router`, and
-# `Distiller` to work out of the box. Provider-specific SDKs and
-# research/training deps live in extras so the base install stays lean.
+name = "opentracy-new-mode"
+version = "0.0.1"
+description = "Self-improving AI agent harness"
+requires-python = ">=3.11"
 dependencies = [
-    "openai>=1.0.0",           # chat.completions plumbing used by sdk.completion + acompletion
-    "httpx>=0.24.0",           # Distiller / TrainingClient talk to /v1/distillation
-    "numpy>=1.24.0",           # used by models.llm_profile and trace math
-    "tqdm>=4.65.0",
     "pyyaml>=6.0",
-    "huggingface_hub>=0.16.0", # default weights pack lives on HF; keeps load_router() one-shot
+    "pydantic>=2.5",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "mcp>=1.0.0",
+    "anthropic>=0.40",
+    "openai>=1.40",
+    "duckdb>=1.1",
+    # AES-GCM helpers in runtime/crypto/envelope.py. Currently
+    # comes in transitively via several other deps, but we use it
+    # directly so declare it explicitly. Tiny binary, audited primitives.
+    "cryptography>=42",
 ]
 
 [project.optional-dependencies]
-# ── Per-provider SDKs ────────────────────────────────────────────────
-# Only required if you use `create_client("<provider>", ...)`. Without
-# them, `completion()` still works via the raw-HTTP fallback path.
-anthropic = ["anthropic>=0.18.0"]
-mistral   = ["mistralai>=0.1.0"]
-google    = ["google-generativeai>=0.3.0"]
-groq      = ["groq>=0.4.0"]
-
-# ── The wedge: automated distillation ───────────────────────────────
-# Train custom student models from your trace data. Pulls GPU/training deps.
-# NOTE: torch is listed explicitly even though unsloth/trl/peft depend on it —
-# a silent failure in any of those leaves the user with a half-installed env
-# that spends money on teacher+judge calls and then dies on `import torch`
-# in the training subprocess. Listing it keeps `pip install opentracy[distill]`
-# honest: if torch can't install, the install itself fails.
-distill = [
-    "torch>=2.1.0",
-    "datasets>=2.14.0",
-    "trl>=0.7.0",
-    "peft>=0.6.0",
-    "bitsandbytes>=0.41.0",
-    "unsloth>=2024.0",
+llm = ["anthropic>=0.40", "openai>=1.40"]
+rag = ["faiss-cpu>=1.8", "numpy>=1.26"]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+# Only needed to run infra/restate/serve.py (the daily compactor scheduler).
+# Stays out of the default dependency set so the runtime + harness don't pull
+# in a Restate dep they never import.
+infra = ["restate-sdk>=0.7", "hypercorn>=0.16"]
+# UniRoute router (P15.3): local sentence-transformers embedder + scikit-learn
+# KMeans + numpy. Pulls torch transitively (~700MB CPU wheel) and miniLM
+# weights on first model load. Opt-in so plain backend installs stay slim.
+router = [
+    "numpy>=1.26",
+    "scikit-learn>=1.5",
+    "sentence-transformers>=3.0",
 ]
+# KMS envelope encryption for per-tenant BYOK (P16.3). Activated by
+# setting OPENTRACY_KMS_KEY_NAME in env; OSS local installs that stick
+# with plaintext secrets.env don't need this. Adds ~20MB of Google
+# Cloud SDK transitive deps.
+kms = ["google-cloud-kms>=2.20"]
+# E2B sandbox SDK for the autonomous engineering loop. Activated by
+# setting OPENTRACY_E2B_API_KEY; without that env the sandbox wrapper
+# raises at first call so OSS/local installs that never go down the
+# autonomous path don't need the dep installed.
+sandbox = ["e2b>=1.0", "e2b-code-interpreter>=1.0"]
 
-# ── Research router (paper impl) ────────────────────────────────────
-# UniRouteRouter + clustering + embeddings + training pipeline.
-research = [
-    "sentence-transformers>=2.2.0",
-    "scikit-learn>=1.3.0",
-    "boto3>=1.28.0",
-]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-# ── Self-host the full REST API + engine-integrated services ────────
-server = [
-    "fastapi>=0.100.0",
-    "uvicorn>=0.23.0",
-    "pydantic>=2.0.0",
-    "clickhouse-connect>=0.7.0",
-    "mcp>=1.0.0",
-]
-
-# ── Kitchen sink ────────────────────────────────────────────────────
-all = [
-    "opentracy[anthropic,mistral,google,groq,distill,research,server]",
-]
-
-dev = [
-    "opentracy[all]",
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "ruff>=0.1.0",
-    "mypy>=1.0.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/OpenTracy/opentracy"
-Documentation = "https://github.com/OpenTracy/opentracy#readme"
-Repository = "https://github.com/OpenTracy/opentracy"
-Issues = "https://github.com/OpenTracy/opentracy/issues"
-
-[project.scripts]
-opentracy = "opentracy.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["opentracy*"]
-
-# Ship the per-platform Go binary inside the wheel so `pip install opentracy`
-# works out of the box. _find_binary() loads opentracy/_bin/opentracy-engine-<tag>
-# at runtime. Each CI job builds for its platform and publishes a platform-tagged
-# wheel; pip will resolve the right one automatically.
-[tool.setuptools.package-data]
-opentracy = [
-    # Per-platform Go binary + the onnxruntime shared library it dlopens.
-    "_bin/opentracy-engine-*",
-    "_bin/opentracy-engine-*.exe",
-    "_bin/libonnxruntime.so*",
-    "_bin/libonnxruntime.dylib",
-    "_bin/onnxruntime.dll",
-    # ONNX MiniLM model + vocab — copied into the weights dir on first start
-    # so the engine's built-in embedder works out of the box.
-    "_onnx/model.onnx",
-    "_onnx/vocab.txt",
-    "hub/index.json",
-    # Default routing weights (MMLU, 100 clusters, ~288KB) bundled in the wheel
-    # so `pip install opentracy` → `engine.start()` needs zero network access.
-    "_bundled_weights/weights-mmlu-v1/manifest.json",
-    "_bundled_weights/weights-mmlu-v1/clusters/*",
-    "_bundled_weights/weights-mmlu-v1/profiles/*",
-]
-
-[tool.black]
-line-length = 100
-target-version = ["py310"]
+[tool.hatch.build.targets.wheel]
+packages = ["runtime", "techniques"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
-select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "UP",  # pyupgrade
-]
-ignore = [
-    "E501",  # line too long (handled by black)
-    "B008",  # function calls in argument defaults
-]
+target-version = "py311"
 
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_ignores = true
-disallow_untyped_defs = true
-ignore_missing_imports = true
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

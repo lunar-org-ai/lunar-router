@@ -1,0 +1,9 @@
+id: golden_006
+input:
+  request: "Can I get a return label for order #777?"
+expected:
+  contains: ["return", "label"]
+  category: order_action
+metadata:
+  source: seed
+  difficulty: medium

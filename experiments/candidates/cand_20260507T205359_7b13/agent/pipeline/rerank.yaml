@@ -1,0 +1,7 @@
+stage: rerank
+technique: reranking
+variant: cross_encoder
+knobs:
+  model: bge-reranker-v2
+  top_n: 6
+  score_threshold: 0.3

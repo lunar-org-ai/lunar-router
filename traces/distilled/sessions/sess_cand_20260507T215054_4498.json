@@ -1,0 +1,35 @@
+{
+  "session_id": "sess_cand_20260507T215054_4498",
+  "kind": "experiment",
+  "started_at": "2026-05-07T21:50:54Z",
+  "ended_at": "2026-05-07T21:50:54.943Z",
+  "candidate_id": "cand_20260507T215054_4498",
+  "parent_version": "v0.0.1",
+  "suite": "smoke_v0",
+  "proposal_source": null,
+  "mutations": [
+    "pipeline/retrieve.yaml:knobs.k=8"
+  ],
+  "prediction": null,
+  "actual": null,
+  "prediction_verified": null,
+  "aggregate": {
+    "n_traces": 20,
+    "n_passed": 20,
+    "n_failed": 0,
+    "avg_latency_ms": 0.0,
+    "p95_latency_ms": 0.0
+  },
+  "overall_score": 1.0,
+  "pass_rate": 1.0,
+  "delta_overall": 0.0,
+  "final_decision": "auto_approve",
+  "promoted_version": "v0.0.2",
+  "blocking_critic": null,
+  "ledger_entries": [
+    "led_20260507T215054_d58f31"
+  ],
+  "trace_ids": [],
+  "lesson_id": "L-20260507-215054-3cb5",
+  "summary": "Candidate cand_20260507T215054_4498 mutated [pipeline/retrieve.yaml:knobs.k=8] from v0.0.1. Suite=smoke_v0: overall=1.000, Δ=+0.0000 vs baseline. Promoted → v0.0.2. Lesson L-20260507-215054-3cb5 captured."
+}

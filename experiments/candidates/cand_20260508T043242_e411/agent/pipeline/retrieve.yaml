@@ -1,0 +1,9 @@
+stage: retrieve
+technique: rag
+variant: hybrid
+knobs:
+  chunk_size: 512
+  k: 13
+  embedder: text-embed-3-small
+  bm25_weight: 0.3
+  rerank_inline: false

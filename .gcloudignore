@@ -1,0 +1,57 @@
+# Cloud Build upload filters. Mirrors .dockerignore — gcloud builds
+# submit uses .gcloudignore (not .dockerignore) to decide what to tar
+# and upload as the build source.
+
+# VCS
+.git/
+.gitignore
+.gitattributes
+.dockerignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+
+# Node
+**/node_modules/
+ui/dist/
+backend/dist/
+
+# Operator-local state — runtime regenerates at startup, prod reads
+# from gcsfuse /data. ledger/ and harness/ ARE Python packages
+# (code + data); only data subdirs are excluded. Leading slash anchors
+# the pattern at root — without it, gitignore-style patterns would
+# also match runtime/agents/, runtime/tenants/, etc.
+/.harness/
+/agents/
+/tenants/
+/ledger/_default/
+/ledger/entries/
+/ledger/lessons/
+/ledger/research-assistant*/
+/traces/
+/corpora/indexed/
+/corpora/ingested/
+/evals/reports/
+
+# Local secrets — never into images.
+.env
+.env.*
+*.env
+!agent/.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Plan + roadmap markdown.
+PLAN_*.md
+ROADMAP_*.md

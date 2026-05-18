@@ -1,0 +1,10 @@
+# agent/pipeline/rerank.yaml
+stage: rerank
+technique: reranking
+variant: cross_encoder
+knobs:
+  model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  top_n: 4
+  # ms-marco produces raw logits — typically in [-10, +10], not 0-1.
+  # Set low to keep most retrieve hits; calibrate per-corpus later.
+  score_threshold: -10.0

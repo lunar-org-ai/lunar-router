@@ -1,0 +1,21 @@
+suite: smoke_v0
+description: "Basic smoke test \u2014 domain: e-commerce support. Calibrated for real LLM (Haiku ~2-4s, matches agent budget)."
+goldens:
+- golden_001
+- golden_002
+- golden_003
+- golden_004
+- golden_005
+- golden_008
+rubrics:
+- name: pipeline_succeeded
+  type: pipeline_success
+- name: response_nonempty
+  type: response_nonempty
+- name: keywords_match
+  type: contains_keywords
+- name: under_budget
+  type: latency_under_budget
+  params:
+    max_ms: 4000
+aggregation: mean

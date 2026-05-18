@@ -1,0 +1,9 @@
+# agent/pipeline/route.yaml
+stage: route
+technique: routing
+variant: small_first
+knobs:
+  confidence_threshold: 0.7
+  small: claude-haiku-4-5
+  big: claude-sonnet-4-6
+  escalate_on_failure: true

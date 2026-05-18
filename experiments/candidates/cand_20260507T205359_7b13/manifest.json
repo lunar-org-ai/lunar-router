@@ -1,0 +1,19 @@
+{
+  "id": "cand_20260507T205359_7b13",
+  "parent_version": "v0.0.1",
+  "parent_path": "/Users/diogovieira/Developer/opentracy_new_mode/agent/agent.yaml",
+  "created_at": "2026-05-07T20:53:59Z",
+  "description": "bump k and top_n",
+  "mutations": [
+    {
+      "file": "pipeline/retrieve.yaml",
+      "path": "knobs.k",
+      "value": 12
+    },
+    {
+      "file": "pipeline/rerank.yaml",
+      "path": "knobs.top_n",
+      "value": 6
+    }
+  ]
+}

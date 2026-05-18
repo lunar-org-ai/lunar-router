@@ -1,0 +1,18 @@
+{
+  "version": 0,
+  "k": 0,
+  "centroids": null,
+  "model_psi": {},
+  "cost_weight": 0.0,
+  "embedder_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "embedding_dim": 384,
+  "min_corpus_size": 200,
+  "created_at": null,
+  "fitted_from": null,
+  "drift_baseline": null,
+  "metadata": {
+    "schema_doc": "ROADMAP_P15.3.md",
+    "phase": "P15.3.1",
+    "note": "Day-zero placeholder. Real configs replace this when the harness fits the first one. Runtime detects 'no current config' via missing versions/router_config_current pointer, NOT by reading this file. This v0 documents the on-disk shape for P15.3.3 / P15.3.7."
+  }
+}

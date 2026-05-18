@@ -1,32 +1,21 @@
-// Applies theme class before React hydrates to prevent FOUC (Flash of Unstyled Content).
-// Runs at module-load time to ensure the correct theme is applied immediately.
-(() => {
-  const STORAGE_KEY = 'vite-ui-theme';
-  const theme = (localStorage.getItem(STORAGE_KEY) ?? 'system') as 'light' | 'dark' | 'system';
-
-  const root = document.documentElement;
-  root.classList.remove('light', 'dark');
-
-  if (theme === 'system') {
-    root.classList.add(
-      window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
-    );
-  } else {
-    root.classList.add(theme);
-  }
-})();
-
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { RouterProvider } from '@tanstack/react-router';
+import { router } from './router';
+import './styles.css';
+import './auth.css';
+import './loader.css';
+import './app-chrome.css';
+import { installAuthFetch } from './lib/apiFetch';
 
-import './index.css';
-import App from '@/app/App';
+installAuthFetch();
 
-const rootElement = document.getElementById('root');
-if (!rootElement) throw new Error('Root element not found');
+router.subscribe('onResolved', () => {
+  document.querySelector('.main')?.scrollTo(0, 0);
+});
 
-createRoot(rootElement).render(
+createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
-  </StrictMode>
+    <RouterProvider router={router} />
+  </StrictMode>,
 );

@@ -1,0 +1,14 @@
+{
+  "id": "cand_20260507T205538_acf6",
+  "parent_version": "v0.0.1",
+  "parent_path": "/Users/diogovieira/Developer/opentracy_new_mode/agent/agent.yaml",
+  "created_at": "2026-05-07T20:55:38Z",
+  "description": "lower routing confidence threshold",
+  "mutations": [
+    {
+      "file": "pipeline/route.yaml",
+      "path": "knobs.confidence_threshold",
+      "value": 0.5
+    }
+  ]
+}

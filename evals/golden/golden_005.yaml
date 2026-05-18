@@ -1,0 +1,9 @@
+id: golden_005
+input:
+  request: "My item arrived damaged. What do I do?"
+expected:
+  contains: ["damaged"]
+  category: complaint
+metadata:
+  source: seed
+  difficulty: medium

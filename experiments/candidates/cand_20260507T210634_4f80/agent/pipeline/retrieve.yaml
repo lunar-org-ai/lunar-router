@@ -1,0 +1,10 @@
+# agent/pipeline/retrieve.yaml
+stage: retrieve
+technique: rag
+variant: hybrid
+knobs:
+  chunk_size: 512
+  k: 8
+  embedder: text-embed-3-small
+  bm25_weight: 0.3
+  rerank_inline: false

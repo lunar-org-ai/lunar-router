@@ -1,0 +1,6 @@
+# agent/pipeline/memory.yaml
+technique: memory
+variant: episodic
+knobs:
+  window: 20
+  summarize_after: 50
