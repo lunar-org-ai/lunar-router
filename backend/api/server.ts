@@ -14,6 +14,7 @@ import { slackRouter } from '../channels/slack/handler'
 import { whatsappRouter } from '../channels/whatsapp/handler'
 import { widgetPublicRouter } from '../channels/widget/handler'
 import { datasetRouter } from '../channels/dataset/handler'
+import { billingRouter } from '../channels/billing/handler'
 import { evalsRouter } from '../channels/evals/handler'
 import { introspectRouter } from '../channels/introspect/handler'
 import { lessonsRouter } from '../channels/lessons/handler'
@@ -115,6 +116,7 @@ app.route('/v1/evals', evalsRouter)
 app.route('/v1/router', routerRouter)
 app.route('/v1/datasets', datasetRouter)
 app.route('/v1/onboarding', onboardingRouter)
+app.route('/v1/billing', billingRouter)
 
 // Convention: 8001 = python runtime, 8002 = ts backend.
 const port = Number(process.env.PORT ?? 8002)

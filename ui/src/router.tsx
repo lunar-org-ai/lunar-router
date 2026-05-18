@@ -34,6 +34,7 @@ import { TalkToAgent } from './screens/TalkToAgent';
 import { Policies } from './screens/Policies';
 import { Traces, EvalSuites, RouterConfig, Datasets } from './screens/Technical';
 import { Tenants } from './screens/Tenants';
+import { Billing } from './screens/Billing';
 import { Login } from './screens/Login';
 import { Register } from './screens/Register';
 import { VerifyEmail } from './screens/VerifyEmail';
@@ -133,6 +134,13 @@ const tenantsRoute = createRoute({
   component: Tenants,
 });
 
+// P17.1 — Tenant-facing billing / plan management.
+const billingRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/billing',
+  component: Billing,
+});
+
 // P16.6 — Auth screens. They share the root tree so a refresh of
 // /login still resolves, but `RootLayout` detects these pathnames
 // and renders the auth pages without the sidebar shell.
@@ -169,6 +177,7 @@ const routeTree = rootRoute.addChildren([
   talkRoute,
   policiesRoute,
   tenantsRoute,
+  billingRoute,
   loginRoute,
   registerRoute,
   verifyEmailRoute,

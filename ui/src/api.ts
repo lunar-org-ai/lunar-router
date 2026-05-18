@@ -1900,3 +1900,67 @@ export async function revokeToken(
     throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// P17.1 — Billing (tier, usage, limits)
+// ---------------------------------------------------------------------------
+
+export interface BillingUsage {
+  traces: number;
+  evolutions: number;
+}
+
+export interface BillingLimits {
+  /** -1 means unlimited for every numeric field. */
+  monthly_traces: number;
+  max_agents: number;
+  max_integrations_per_agent: number;
+  allow_evolution: boolean;
+  allow_hosted_mcp: boolean;
+  retention_days: number;
+  rate_limit_per_minute: number;
+}
+
+export interface BillingSnapshot {
+  /** 'oss' when multi-tenancy is off — UI should hide caps/upgrade CTAs. */
+  tier: 'oss' | 'free' | 'starter' | 'team' | 'scale';
+  period: string;
+  updated_at: string;
+  usage: BillingUsage;
+  limits: BillingLimits;
+  stripe_customer_id?: string | null;
+  stripe_subscription_id?: string | null;
+}
+
+export async function getBilling(): Promise<BillingSnapshot> {
+  const res = await fetch('/v1/billing');
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as BillingSnapshot;
+}
+
+export interface CheckoutResponse {
+  url: string;
+}
+
+export async function createCheckoutSession(
+  tier: 'starter' | 'team',
+  opts: { successUrl?: string; cancelUrl?: string } = {},
+): Promise<CheckoutResponse> {
+  const res = await fetch('/v1/billing/checkout', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tier,
+      success_url: opts.successUrl,
+      cancel_url: opts.cancelUrl,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new ApiError(res.status, `backend ${res.status}: ${text.slice(0, 200)}`);
+  }
+  return (await res.json()) as CheckoutResponse;
+}

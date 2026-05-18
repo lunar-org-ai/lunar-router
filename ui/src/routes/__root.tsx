@@ -23,6 +23,7 @@ import { TanStackRouterDevtools } from '@tanstack/router-devtools';
 import { Icon, type IconName } from '../components/Icon';
 import { AgentSheet } from '../screens/AgentSheet';
 import { AgentSwitcher } from '../components/AgentSwitcher';
+import { BillingBadge } from '../components/BillingBadge';
 import { Onboarding } from '../screens/Onboarding';
 import { Loader } from '../components/Loader';
 import { Button } from '../components/ui/button';
@@ -104,6 +105,7 @@ const ROUTE_LABEL: Record<string, string> = {
   '/technical/router': 'Router config',
   '/technical/datasets': 'Datasets',
   '/admin/tenants': 'Tenants',
+  '/billing': 'Billing',
 };
 
 export const RootLayout = () => {
@@ -457,6 +459,7 @@ export const RootLayout = () => {
               ))}
             </div>
             <div className="topbar-right">
+              <BillingBadge onOpenBilling={() => navigate({ to: '/billing' })} />
               <Button
                 size="sm"
                 onClick={() => setNewAgentOpen(true)}

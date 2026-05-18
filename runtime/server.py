@@ -240,6 +240,40 @@ async def tenant_middleware(request: Request, call_next):
         tenant_context.set_active(previous)
 
 
+# P17.1 — Map QuotaExceeded to HTTP 402 (Payment Required). The
+# structured detail payload lets the UI render an upgrade CTA from one
+# well-typed error instead of regex-matching message strings. No-op in
+# OSS mode because the gates short-circuit when multi-tenant is off.
+from runtime.tenants.quota import QuotaExceeded as _QuotaExceeded
+from fastapi.responses import JSONResponse as _JSONResponse
+
+
+@app.exception_handler(_QuotaExceeded)
+async def _quota_exceeded_handler(_request: Request, exc: _QuotaExceeded):  # type: ignore[misc]
+    # Rate-limit denials map to 429 (with Retry-After) so generic HTTP
+    # clients back off without our UI's upgrade-CTA branch firing.
+    # All other quota denials → 402 so the UI shows the upgrade banner.
+    if exc.code == "rate_limit_exceeded":
+        retry_after = int(exc.detail.get("retry_after_s") or 1)
+        return _JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+            content={
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.detail,
+            },
+        )
+    return _JSONResponse(
+        status_code=402,
+        content={
+            "code": exc.code,
+            "message": exc.message,
+            "detail": exc.detail,
+        },
+    )
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     cfg = _state.get("cfg")
@@ -890,6 +924,16 @@ async def list_traces(
     q: Optional[str] = None,
 ) -> TracesPage:
     available = traces_store.available_dates()
+    # Tier-aware retention: drop dates older than the tenant's retention
+    # window. Filtering at the date list is cheaper than per-row culling
+    # because traces are partitioned daily — old date folders simply
+    # disappear from the picker. No deletion, so an upgrade re-exposes
+    # historic traces immediately.
+    from runtime.tenants.quota import retention_cutoff_iso as _retention_cutoff
+    cutoff = _retention_cutoff()
+    if cutoff is not None and available:
+        cutoff_date = cutoff[:10]  # "YYYY-MM-DD"
+        available = [d for d in available if d >= cutoff_date]
     if not available:
         return TracesPage(
             date=date or "",
@@ -2055,10 +2099,18 @@ async def update_route(payload: RouteUpdateRequest) -> RouteUpdateResponse:
 @app.post("/run", response_model=RunResponse)
 async def run(payload: RunRequest) -> RunResponse:
     import uuid
+    from runtime.tenants import quota
 
     executor: Optional[PipelineExecutor] = _state.get("executor")
     if not executor:
         raise HTTPException(status_code=503, detail="agent not yet loaded")
+
+    # Tier gates (cheap → expensive):
+    #   1. Rate limit (instant, in-memory) — stops runaway loops
+    #   2. Monthly trace quota (1 file read) — stops cap overruns
+    # Both raise QuotaExceeded which the handler maps to 429/402.
+    quota.check_rate_limit()
+    quota.check_trace_quota()
 
     history = [Message(role=m.role, content=m.content) for m in (payload.history or [])]
     # If the caller didn't supply a session_id, mint one. The trace persists
@@ -2066,6 +2118,12 @@ async def run(payload: RunRequest) -> RunResponse:
     session_id = payload.session_id or f"sess_{uuid.uuid4().hex[:12]}"
     _, rec = executor.run(payload.request, history=history, session_id=session_id)
     trace_id = write_trace(rec)
+    # Increment AFTER write_trace so a failure to persist doesn't burn a
+    # billable trace. Failures here are logged but don't fail the request.
+    try:
+        quota.consume_trace()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("billing: trace counter increment failed: %s", e)
 
     return RunResponse(
         response=rec.response,
@@ -3403,7 +3461,11 @@ def create_agent_endpoint(payload: AgentCreateRequest) -> AgentSummary:
     """Create a new agent from the onboarding payload. If ``activate``
     is true, swap the live ``agent/`` dir + recompile the pipeline."""
     from runtime.agents.registry import activate as activate_agent
-    from runtime.agents.registry import create_agent, get_registry
+    from runtime.agents.registry import create_agent, get_registry, list_agents
+    from runtime.tenants import quota
+
+    # Tier gate: free is 1 agent, starter 1, team 5, scale unlimited.
+    quota.check_agent_count(current_count=len(list_agents()))
 
     meta = create_agent(payload.model_dump())
     if payload.activate:
@@ -4292,13 +4354,23 @@ class MCPServerCreateRequest(BaseModel):
 def add_mcp_server_endpoint(
     agent_id: str, payload: MCPServerCreateRequest,
 ) -> MCPServersResponse:
-    from runtime.agents.mcp import MCPServer, add_server
+    from runtime.agents.mcp import MCPServer, add_server, load as load_mcp
     from runtime.agents.registry import get_agent
     from runtime.mcp.client import invalidate_cache
+    from runtime.tenants import quota
     if get_agent(agent_id) is None:
         raise HTTPException(status_code=404, detail=f"agent_not_found: {agent_id}")
     if not payload.name.strip():
         raise HTTPException(status_code=400, detail="missing_name")
+
+    # Tier gate:
+    #   - free tier cannot add sse/http (hosted) MCP servers — stdio only
+    #   - per-agent count cap (free=2, starter=10, team/scale=unlimited)
+    quota.check_integration_allowed(
+        transport=payload.transport,
+        current_count=len(load_mcp(agent_id)),
+    )
+
     try:
         servers = add_server(agent_id, MCPServer(**payload.model_dump()))
     except ValueError as e:
@@ -4615,6 +4687,155 @@ def _summarize_token(rec) -> TokenSummary:
         created_at=rec.created_at,
         last_used_at=rec.last_used_at,
     )
+
+
+# ---------------------------------------------------------------------------
+# P17.1 — Billing read endpoint (tenant-facing).
+#
+# Returns the *active* tenant's tier + monthly usage + caps. Used by
+# the UI top-bar banner (free-tier usage) and the Billing screen.
+# In OSS mode (no multi-tenancy), returns a synthetic "oss" tier with
+# no caps so the UI can render uniformly.
+# ---------------------------------------------------------------------------
+
+
+class BillingUsage(BaseModel):
+    traces: int
+    evolutions: int
+
+
+class BillingLimits(BaseModel):
+    monthly_traces: int
+    max_agents: int
+    max_integrations_per_agent: int
+    allow_evolution: bool
+    allow_hosted_mcp: bool
+    retention_days: int
+    rate_limit_per_minute: int
+
+
+class BillingResponse(BaseModel):
+    tier: str
+    period: str
+    updated_at: str
+    usage: BillingUsage
+    limits: BillingLimits
+    stripe_customer_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = None
+
+
+_OSS_BILLING_RESPONSE = BillingResponse(
+    tier="oss",
+    period="",
+    updated_at="",
+    usage=BillingUsage(traces=0, evolutions=0),
+    limits=BillingLimits(
+        monthly_traces=-1,
+        max_agents=-1,
+        max_integrations_per_agent=-1,
+        allow_evolution=True,
+        allow_hosted_mcp=True,
+        retention_days=-1,
+        rate_limit_per_minute=-1,
+    ),
+)
+
+
+@app.get("/tenant/billing", response_model=BillingResponse)
+def get_tenant_billing_endpoint() -> BillingResponse:
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    from runtime.tenants import billing
+    from runtime.tenant_context import get_active as get_tenant
+
+    if not is_multi_tenant_enabled():
+        return _OSS_BILLING_RESPONSE
+
+    tid = get_tenant()
+    if not tid:
+        raise HTTPException(status_code=400, detail="tenant_context_missing")
+
+    snap = billing.snapshot(tid)
+    return BillingResponse(
+        tier=snap["tier"],
+        period=snap["period"],
+        updated_at=snap["updated_at"],
+        usage=BillingUsage(**snap["usage"]),
+        limits=BillingLimits(**snap["limits"]),
+        stripe_customer_id=snap.get("stripe_customer_id"),
+        stripe_subscription_id=snap.get("stripe_subscription_id"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# P17.1 — Stripe checkout + webhook
+#
+# Both endpoints 503 cleanly when Stripe env vars / package are missing
+# so OSS deploys don't fail at import time. The webhook reads the raw
+# body for signature verification — FastAPI's JSON binding would
+# corrupt the bytes Stripe signed against.
+# ---------------------------------------------------------------------------
+
+
+class CheckoutRequest(BaseModel):
+    tier: str
+    success_url: Optional[str] = None
+    cancel_url: Optional[str] = None
+
+
+class CheckoutResponse(BaseModel):
+    url: str
+
+
+@app.post("/billing/checkout", response_model=CheckoutResponse)
+def billing_checkout_endpoint(payload: CheckoutRequest) -> CheckoutResponse:
+    from runtime.tenants.feature import is_multi_tenant_enabled
+    from runtime.tenant_context import get_active as get_tenant
+    from runtime.tenants.stripe_handler import (
+        StripeNotConfigured,
+        create_checkout_session,
+    )
+
+    if not is_multi_tenant_enabled():
+        raise HTTPException(status_code=400, detail="checkout_unavailable_in_oss")
+
+    tenant_id = get_tenant()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_context_missing")
+
+    try:
+        url = create_checkout_session(
+            tenant_id,
+            payload.tier,
+            success_url=payload.success_url,
+            cancel_url=payload.cancel_url,
+        )
+    except StripeNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return CheckoutResponse(url=url)
+
+
+@app.post("/billing/webhook")
+async def billing_webhook_endpoint(request: Request) -> Response:
+    """Public Stripe webhook receiver. Stripe POSTs raw JSON with a
+    ``Stripe-Signature`` header; we verify against ``STRIPE_WEBHOOK_SECRET``
+    before flipping any tier."""
+    from runtime.tenants.stripe_handler import (
+        StripeNotConfigured,
+        handle_webhook_event,
+    )
+
+    raw = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    try:
+        result = handle_webhook_event(raw, signature)
+    except StripeNotConfigured as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — signature error, bad payload, etc.
+        logger.warning("billing webhook rejected: %s", e)
+        raise HTTPException(status_code=400, detail="invalid_webhook")
+    return _JSONResponse(status_code=200, content=result)
 
 
 @app.get("/admin/tenants", response_model=TenantListResponse)
